@@ -39,8 +39,8 @@ jobs:
           ref: v${{ needs.prepare.outputs.version }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-deb
-        run: cargo install cargo-deb --locked
+      - name: Install packaging tools
+        run: cargo install cargo-deb cargo-generate-rpm --locked
       - name: Build release binary
         run: cargo build --release -p light-factory-tui
       - name: Package .deb
