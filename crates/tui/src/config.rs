@@ -1,15 +1,19 @@
 //! Client configuration resolved from the CLI and environment.
 
-/// The base HTTP URL of the server plus the derived WebSocket URL.
+use crate::i18n::Locale;
+
+/// The base HTTP URL of the server plus the derived WebSocket URL and locale.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub http_base: String,
     pub ws_url: String,
+    pub lang: Locale,
 }
 
 impl Config {
     /// Build a [`Config`] from a base URL. `http://` maps to `ws://` and
-    /// `https://` maps to `wss://`; anything else is rejected.
+    /// `https://` maps to `wss://`; anything else is rejected. The locale
+    /// defaults to English; use [`Config::with_lang`] to override it.
     pub fn from_url(base: &str) -> anyhow::Result<Self> {
         let http_base = base.trim().trim_end_matches('/').to_string();
         let ws_base = if http_base.starts_with("https://") {
@@ -22,7 +26,14 @@ impl Config {
         Ok(Self {
             http_base,
             ws_url: format!("{ws_base}/ws"),
+            lang: Locale::En,
         })
+    }
+
+    /// Set the locale this client renders in.
+    pub fn with_lang(mut self, lang: Locale) -> Self {
+        self.lang = lang;
+        self
     }
 }
 
