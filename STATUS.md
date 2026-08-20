@@ -179,3 +179,8 @@ web/                 Svelte 5 (signup/signin + TOTP QR)                         
   secrets never returned to clients, passwords/TOTP never logged.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` before calling a slice done.
 - Do not commit unless asked. No attribution/Co-Authored-By anywhere.
+- GitHub Actions are pinned to full 40-char commit SHAs (never mutable tags/branches). To bump an
+  action, resolve its tag to the commit SHA with
+  `git ls-remote https://github.com/<owner>/<repo>.git "refs/tags/<tag>^{}"` (the `^{}` dereferences
+  annotated tags to the commit they point to). `dtolnay/rust-toolchain` is pinned to a `stable`
+  branch-tip commit and must be bumped explicitly on toolchain changes.

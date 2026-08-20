@@ -22,7 +22,7 @@ jobs:
     name: Bump, commit, and tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Bump version and push tag
         env:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
