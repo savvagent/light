@@ -1,0 +1,173 @@
+# Semver release workflow.
+#
+# Trigger 1 — manual: bump major/minor/patch, commit + tag on master, then build
+#                    installers and publish a GitHub Release.
+# Trigger 2 — push a `v*` tag: build installers for that tag and publish a Release.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump to release
+        type: choice
+        required: true
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+env:
+  RUST_BACKTRACE: 0
+
+jobs:
+  prepare:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version
+        id: resolve
+        env:
+          BUMP: ${{ github.event.inputs.bump }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = "tag" ]; then
+            VERSION="${REF_NAME#v}"
+          else
+            NEW_VERSION="$(python3 .github/scripts/bump_version.py "$BUMP")"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add Cargo.toml Cargo.lock web/package.json
+            git commit -m "chore(release): bump version to v${NEW_VERSION} [skip ci]"
+            git tag "v${NEW_VERSION}"
+            git push origin HEAD:master
+            git push origin "v${NEW_VERSION}"
+            VERSION="$NEW_VERSION"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux (.deb, .rpm, .tar.gz)
+    runs-on: ubuntu-latest
+    needs: prepare
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.prepare.outputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build release binary
+        run: cargo build --release -p light-factory-tui
+      - name: Package .deb
+        run: cargo deb -p light-factory-tui --no-build
+      - name: Package .rpm
+        run: cargo generate-rpm -p crates/tui
+      - name: Linux tarball
+        run: |
+          mkdir -p dist/light-factory
+          cp target/release/light-factory dist/light-factory/
+          tar -czf "light-factory-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" -C dist light-factory
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            target/debian/*.deb
+            target/generate-rpm/*.rpm
+            light-factory-*.tar.gz
+
+  macos:
+    name: macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: aarch64-apple-darwin
+          - os: macos-13
+            arch: x86_64-apple-darwin
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.prepare.outputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release -p light-factory-tui
+      - name: Tarball
+        run: |
+          mkdir -p dist/light-factory
+          cp target/release/light-factory dist/light-factory/
+          tar -czf "light-factory-${VERSION}-${{ matrix.arch }}.tar.gz" -C dist light-factory
+      - name: DMG
+        run: |
+          hdiutil create -volname "light-factory" -srcfolder dist -ov -format UDZO \
+            "light-factory-${VERSION}-${{ matrix.arch }}.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            light-factory-*.tar.gz
+            light-factory-*.dmg
+
+  windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    needs: prepare
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.prepare.outputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release -p light-factory-tui
+      - name: Zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target\release\light-factory.exe `
+            -DestinationPath "light-factory-${{ env.VERSION }}-x86_64-pc-windows-msvc.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: light-factory-*.zip
+
+  publish:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [prepare, linux, macos, windows]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: cd artifacts && sha256sum * > checksums.txt
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.prepare.outputs.version }}
+          name: v${{ needs.prepare.outputs.version }}
+          generate_release_notes: true
+          files: artifacts/*
