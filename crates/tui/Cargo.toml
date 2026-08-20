@@ -9,6 +9,18 @@ description = "Terminal UI client for the light-factory agentic coding platform"
 name = "light-factory"
 path = "src/main.rs"
 
+[package.metadata.deb]
+maintainer = "Savvagent <rob@hixfamily.org>"
+section = "utils"
+priority = "optional"
+
+[package.metadata.generate-rpm]
+license = "MIT OR Apache-2.0"
+summary = "Terminal UI client for the light-factory agentic coding platform"
+assets = [
+  { source = "target/release/light-factory", dest = "/usr/bin/light-factory", mode = "755" },
+]
+
 [dependencies]
 light-factory-protocol = { path = "../protocol" }
 ratatui = { workspace = true, features = ["crossterm"] }

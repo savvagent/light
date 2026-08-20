@@ -1,0 +1,40 @@
+# Requires secret: RELEASE_TOKEN (a PAT with contents and workflows write access).
+name: Bump Version
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump to release
+        type: choice
+        required: true
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    name: Bump, commit, and tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bump version and push tag
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          BUMP: ${{ github.event.inputs.bump }}
+        run: |
+          set -euo pipefail
+          NEW_VERSION="$(python3 .github/scripts/bump_version.py "$BUMP")"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock web/package.json
+          git commit -m "chore(release): bump version to v${NEW_VERSION}"
+          git tag "v${NEW_VERSION}"
+          git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"
+          git push origin "v${NEW_VERSION}"
