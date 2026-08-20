@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import QRCode from 'qrcode';
   import { api } from '../lib/api.js';
+  import { t, errorMessage } from '../lib/i18n.svelte.js';
 
   let { registration, onTotpConfirmed } = $props();
 
@@ -18,7 +19,7 @@
         margin: 1,
       });
     } catch (e) {
-      error = e.message;
+      error = errorMessage(e.code, e.message);
     } finally {
       loading = false;
     }
@@ -34,7 +35,7 @@
       });
       onTotpConfirmed(resp);
     } catch (e) {
-      error = e.message;
+      error = errorMessage(e.code, e.message);
     } finally {
       confirming = false;
     }
@@ -46,29 +47,28 @@
 {/if}
 
 {#if loading}
-  <p class="subtitle">Generating your authenticator setup…</p>
+  <p class="subtitle">{t('totp.generating')}</p>
 {:else}
   <p class="subtitle" style="margin-bottom: 8px">
-    Scan this QR code with your authenticator app (Google Authenticator,
-    1Password, etc.), then enter the code it shows.
+    {t('totp.scan')}
   </p>
 
   <div class="qr">
-    <img src={qrDataUrl} alt="TOTP QR code" />
+    <img src={qrDataUrl} alt={t('totp.qr_alt')} />
   </div>
 
   <p class="subtitle" style="text-align: center; margin-bottom: 4px">
-    Or enter this secret manually:
+    {t('totp.manual')}
   </p>
   <div class="secret">{registration.secret}</div>
 
   <form onsubmit={(e) => (e.preventDefault(), confirm())}>
     <div class="field">
-      <label for="code">Confirmation code</label>
+      <label for="code">{t('totp.code_label')}</label>
       <input id="code" type="text" bind:value={code} inputmode="numeric" />
     </div>
     <button type="submit" disabled={confirming}>
-      {confirming ? 'Verifying…' : 'Confirm and continue'}
+      {confirming ? t('totp.verifying') : t('totp.confirm')}
     </button>
   </form>
 {/if}

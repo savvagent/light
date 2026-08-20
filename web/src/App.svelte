@@ -7,6 +7,7 @@
   import DeviceApprove from './views/DeviceApprove.svelte';
   import { api } from './lib/api.js';
   import { setSession } from './lib/auth.js';
+  import { t, locale, setLocale } from './lib/i18n.svelte.js';
 
   let view = $state('signin');
   let auth = $state(null);
@@ -56,23 +57,31 @@
 <main class="card">
   <h1 class="brand">light<span class="dot">-factory</span></h1>
 
+  <div class="locale">
+    <label for="locale">{t('common.language')}</label>
+    <select id="locale" value={locale.value} onchange={(e) => setLocale(e.currentTarget.value)}>
+      <option value="en">English</option>
+      <option value="es">Español</option>
+    </select>
+  </div>
+
   {#if view === 'device'}
     <DeviceApprove userCode={deviceCode} />
   {:else if view === 'signin'}
-    <p class="subtitle">Sign in with your authenticator app.</p>
+    <p class="subtitle">{t('signin.title')}</p>
     <SignIn {onAuthenticated} />
     <div class="footer">
-      No account? <button onclick={() => (view = 'signup')}>Create one</button>
+      {t('common.no_account')} <button onclick={() => (view = 'signup')}>{t('common.create_account')}</button>
     </div>
   {:else if view === 'signup'}
-    <p class="subtitle">Create your account.</p>
+    <p class="subtitle">{t('signup.title')}</p>
     <SignUp {onRegistered} />
     <div class="footer">
-      Already have an account?
-      <button onclick={() => (view = 'signin')}>Sign in</button>
+      {t('common.already_have_account')}
+      <button onclick={() => (view = 'signin')}>{t('common.sign_in')}</button>
     </div>
   {:else if view === 'totp-setup'}
-    <p class="subtitle">Secure your account with an authenticator app.</p>
+    <p class="subtitle">{t('totp.title')}</p>
     <TotpSetup {registration} {onTotpConfirmed} />
   {:else}
     <Dashboard user={auth.user} {onLogout} />

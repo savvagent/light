@@ -1,5 +1,6 @@
 <script>
   import { api } from '../lib/api.js';
+  import { t, errorMessage } from '../lib/i18n.svelte.js';
 
   let { onRegistered } = $props();
 
@@ -18,7 +19,7 @@
       });
       onRegistered(resp);
     } catch (e) {
-      error = e.message;
+      error = errorMessage(e.code, e.message);
     } finally {
       loading = false;
     }
@@ -31,14 +32,14 @@
 
 <form onsubmit={(e) => (e.preventDefault(), submit())}>
   <div class="field">
-    <label for="email">Email</label>
+    <label for="email">{t('common.email')}</label>
     <input id="email" type="email" bind:value={email} autocomplete="email" />
   </div>
   <div class="field">
-    <label for="name">Display name (optional)</label>
+    <label for="name">{t('signup.name_label')}</label>
     <input id="name" type="text" bind:value={displayName} />
   </div>
   <button type="submit" disabled={loading}>
-    {loading ? 'Creating account…' : 'Create account'}
+    {loading ? t('signup.submitting') : t('signup.submit')}
   </button>
 </form>

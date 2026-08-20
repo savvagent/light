@@ -1,5 +1,6 @@
 <script>
   import { api } from '../lib/api.js';
+  import { t, errorMessage } from '../lib/i18n.svelte.js';
 
   let { onAuthenticated } = $props();
 
@@ -15,7 +16,7 @@
       const resp = await api.login({ email, code });
       onAuthenticated(resp);
     } catch (e) {
-      error = e.message;
+      error = errorMessage(e.code, e.message);
     } finally {
       loading = false;
     }
@@ -28,14 +29,14 @@
 
 <form onsubmit={(e) => (e.preventDefault(), submit())}>
   <div class="field">
-    <label for="email">Email</label>
+    <label for="email">{t('common.email')}</label>
     <input id="email" type="email" bind:value={email} autocomplete="email" />
   </div>
   <div class="field">
-    <label for="code">Authenticator code</label>
+    <label for="code">{t('signin.code_label')}</label>
     <input id="code" type="text" bind:value={code} inputmode="numeric" />
   </div>
   <button type="submit" disabled={loading}>
-    {loading ? 'Signing in…' : 'Sign in'}
+    {loading ? t('signin.submitting') : t('signin.submit')}
   </button>
 </form>
