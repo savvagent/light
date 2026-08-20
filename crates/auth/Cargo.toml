@@ -1,0 +1,21 @@
+[package]
+name = "light-factory-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+totp-rs = { version = "5.7", features = ["otpauth", "zeroize"] }
+aes-gcm = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true }
+totp-rs = { version = "5.7", features = ["otpauth", "zeroize"] }

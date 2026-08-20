@@ -1,0 +1,8 @@
+target
+.pgdata
+.git
+.env
+.env.*
+*.log
+web/node_modules
+web/dist

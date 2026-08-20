@@ -1,0 +1,21 @@
+{
+  "name": "light-factory-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name light-factory"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "svelte": "^5.0.0",
+    "vite": "^6.0.0",
+    "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}

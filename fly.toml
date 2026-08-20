@@ -1,0 +1,29 @@
+# fly.io configuration for the light-factory backend (Axum HTTP + WebSocket).
+# Secrets (DATABASE_URL, LIGHT_SECRET_KEY) are set with `fly secrets set`,
+# not committed here. `CORS_ORIGINS` is updated to the Cloudflare Pages URL.
+
+app = "light-factory"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  ADDR = "0.0.0.0:8080"
+  RUST_LOG = "info"
+  REQUIRE_TOTP = "true"
+  STARTER_TOKENS = "1000"
+  CORS_ORIGINS = "https://light-factory.pages.dev"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"

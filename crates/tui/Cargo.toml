@@ -1,0 +1,23 @@
+[package]
+name = "light-factory-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal UI client for the light-factory agentic coding platform"
+
+[[bin]]
+name = "light-factory"
+path = "src/main.rs"
+
+[dependencies]
+light-factory-protocol = { path = "../protocol" }
+ratatui = { workspace = true, features = ["crossterm"] }
+crossterm = { workspace = true, features = ["event-stream"] }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
