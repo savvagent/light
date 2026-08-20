@@ -1549,7 +1549,7 @@ dependencies = [
 
 [[package]]
 name = "light-factory-auth"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -1566,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "light-factory-persistence"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "light-factory-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1587,7 +1587,7 @@ dependencies = [
 
 [[package]]
 name = "light-factory-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "light-factory-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
