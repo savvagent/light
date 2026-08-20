@@ -34,7 +34,7 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: v${{ needs.prepare.outputs.version }}
       - uses: dtolnay/rust-toolchain@stable
@@ -52,7 +52,7 @@ jobs:
           tar -czf "light-factory-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" -C target/release light-factory
           cp target/debian/*.deb .
           cp target/generate-rpm/*.rpm .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: linux
           path: |
@@ -67,7 +67,7 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: v${{ needs.prepare.outputs.version }}
       - uses: dtolnay/rust-toolchain@stable
@@ -83,7 +83,7 @@ jobs:
         run: |
           hdiutil create -volname "light-factory" -srcfolder dist -ov -format UDZO \
             "light-factory-${VERSION}-aarch64-apple-darwin.dmg"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: macos-aarch64-apple-darwin
           path: |
@@ -97,7 +97,7 @@ jobs:
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: v${{ needs.prepare.outputs.version }}
       - uses: dtolnay/rust-toolchain@stable
@@ -109,7 +109,7 @@ jobs:
         run: |
           Compress-Archive -Path target\release\light-factory.exe `
             -DestinationPath "light-factory-${{ env.VERSION }}-x86_64-pc-windows-msvc.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: windows
           path: light-factory-*.zip
@@ -119,14 +119,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: [prepare, linux, macos, windows]
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: true
       - name: Checksums
         run: cd artifacts && sha256sum * > checksums.txt
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ needs.prepare.outputs.version }}
           name: v${{ needs.prepare.outputs.version }}
