@@ -91,7 +91,7 @@ The pin matrix (from the spec §1):
 - [ ] In `STATUS.md` "Key conventions", append a bullet stating the policy: every `uses:` in
       `.github/workflows/` is pinned to a full 40-char commit SHA (never a mutable tag/branch), and
       giving the tag→SHA resolution command
-      (`git ls-remote https://github.com/<owner>/<repo>.git "refs/tags/<tag>^{"` — dereference
+      (`git ls-remote https://github.com/<owner>/<repo>.git "refs/tags/<tag>^{}"` — dereference
       annotated tags to their commit). Include the note that `dtolnay/rust-toolchain@stable` is
       pinned to a branch-tip commit and must be bumped explicitly on toolchain changes.
 - [ ] Verify `git diff -- STATUS.md` shows only the appended convention bullet, nothing else.
