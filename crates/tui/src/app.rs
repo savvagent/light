@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 use crate::api::{Api, ApiError};
 use crate::browser;
 use crate::config::Config;
+use crate::i18n::{self, Locale};
 use crate::session::Session;
 use crate::ws;
 
@@ -90,6 +91,7 @@ impl App {
         events: mpsc::UnboundedSender<UiEvent>,
     ) -> Self {
         let api = Api::new(&config.http_base);
+        let status = i18n::t(config.lang, "status.not_signed_in").to_string();
         Self {
             config,
             api,
@@ -110,11 +112,25 @@ impl App {
             session: None,
             ws_tx: None,
             error: None,
-            status: "Not signed in".into(),
+            status,
             log: VecDeque::new(),
             nonce: 0,
             pongs: 0,
         }
+    }
+
+    fn t<'a>(&self, key: &'a str) -> &'a str {
+        i18n::t(self.config.lang, key)
+    }
+
+    fn t_with(&self, key: &str, params: &[(&str, &str)]) -> String {
+        i18n::t_with(self.config.lang, key, params)
+    }
+
+    fn error_text(&self, code: &str, message: &str) -> String {
+        i18n::error_message(self.config.lang, code)
+            .map(str::to_string)
+            .unwrap_or_else(|| message.to_string())
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> bool {
@@ -140,7 +156,7 @@ impl App {
                     self.device_user_code = None;
                     self.device_verification_uri = None;
                     self.mode = Mode::SignIn;
-                    self.status = "Device login cancelled".into();
+                    self.status = self.t("status.device_cancelled").to_string();
                     self.error = None;
                 }
                 Mode::Connected => {}
@@ -200,13 +216,25 @@ impl App {
             "/auth/login" => self.start_device_login().await,
             "/auth/logout" => self.sign_out().await,
             "" => {}
-            other => self.error = Some(format!("unknown command: {other}")),
+            other if other.starts_with("/lang ") => {
+                let arg = other["/lang ".len()..].trim();
+                if let Some(locale) = Locale::parse(arg) {
+                    self.config.lang = locale;
+                    let _ = crate::settings::save_lang(locale.as_str());
+                    self.status = self.t_with("status.lang_set", &[("lang", locale.as_str())]);
+                } else {
+                    self.error = Some(self.t("status.lang_invalid").to_string());
+                }
+            }
+            other => {
+                self.error = Some(self.t_with("status.unknown_command", &[("command", other)]))
+            }
         }
     }
 
     /// Begin the browser-based device login and poll for approval.
     async fn start_device_login(&mut self) {
-        self.status = "Requesting device code...".into();
+        self.status = self.t("status.requesting_device_code").to_string();
         match self.api.device().await {
             Ok(resp) => {
                 self.device_nonce += 1;
@@ -214,7 +242,7 @@ impl App {
                 self.device_user_code = Some(resp.user_code);
                 self.device_verification_uri = Some(resp.verification_uri);
                 self.mode = Mode::Device;
-                self.status = "Waiting for browser approval...".into();
+                self.status = self.t("status.waiting_approval").to_string();
 
                 let _ = browser::open_browser(&resp.verification_uri_complete);
 
@@ -246,8 +274,8 @@ impl App {
                 });
             }
             Err(e) => {
-                self.error = Some(e.message);
-                self.status = "Device login failed".into();
+                self.error = Some(self.error_text(&e.code, &e.message));
+                self.status = self.t("status.device_failed").to_string();
             }
         }
     }
@@ -271,8 +299,8 @@ impl App {
             }
             Err(e) => {
                 self.mode = Mode::SignIn;
-                self.error = Some(e.message);
-                self.status = "Device login failed".into();
+                self.error = Some(self.error_text(&e.code, &e.message));
+                self.status = self.t("status.device_failed").to_string();
             }
         }
     }
@@ -288,14 +316,14 @@ impl App {
                 }
                 Focus::Code => {
                     if self.email.is_empty() {
-                        self.error = Some("Email is required".into());
+                        self.error = Some(self.t("status.email_required").to_string());
                         return;
                     }
                     if self.code.is_empty() {
-                        self.error = Some("TOTP code is required".into());
+                        self.error = Some(self.t("status.code_required").to_string());
                         return;
                     }
-                    self.status = "Signing in...".into();
+                    self.status = self.t("status.signing_in").to_string();
                     match self.api.login(&self.email, &self.code).await {
                         Ok(auth) => {
                             let session = Session {
@@ -307,7 +335,7 @@ impl App {
                             let _ = session.save();
                             self.enter(session).await;
                         }
-                        Err(e) => self.error = Some(e.message),
+                        Err(e) => self.error = Some(self.error_text(&e.code, &e.message)),
                     }
                 }
                 Focus::Name => {}
@@ -315,17 +343,17 @@ impl App {
             Mode::Register => match self.focus {
                 Focus::Email => {
                     if self.email.is_empty() {
-                        self.error = Some("Email is required".into());
+                        self.error = Some(self.t("status.email_required").to_string());
                         return;
                     }
                     self.focus = Focus::Name;
                 }
                 Focus::Name => {
                     if self.email.is_empty() {
-                        self.error = Some("Email is required".into());
+                        self.error = Some(self.t("status.email_required").to_string());
                         return;
                     }
-                    self.status = "Creating account...".into();
+                    self.status = self.t("status.creating_account").to_string();
                     match self.api.register(&self.email, Some(&self.name)).await {
                         Ok(resp) => {
                             self.setup_token = Some(resp.setup_token);
@@ -334,20 +362,20 @@ impl App {
                             self.mode = Mode::RegisterCode;
                             self.focus = Focus::Code;
                             self.code.clear();
-                            self.status = "Scan the QR / enter the secret, then confirm".into();
+                            self.status = self.t("status.scan_confirm").to_string();
                         }
-                        Err(e) => self.error = Some(e.message),
+                        Err(e) => self.error = Some(self.error_text(&e.code, &e.message)),
                     }
                 }
                 Focus::Code => {}
             },
             Mode::RegisterCode => {
                 if self.code.is_empty() {
-                    self.error = Some("TOTP code is required".into());
+                    self.error = Some(self.t("status.code_required").to_string());
                     return;
                 }
                 let setup_token = self.setup_token.clone().unwrap_or_default();
-                self.status = "Confirming...".into();
+                self.status = self.t("status.confirming").to_string();
                 match self.api.register_confirm(&setup_token, &self.code).await {
                     Ok(auth) => {
                         let session = Session {
@@ -359,7 +387,7 @@ impl App {
                         let _ = session.save();
                         self.enter(session).await;
                     }
-                    Err(e) => self.error = Some(e.message),
+                    Err(e) => self.error = Some(self.error_text(&e.code, &e.message)),
                 }
             }
             Mode::Device => {}
@@ -378,18 +406,19 @@ impl App {
         self.secret = None;
         self.otpauth_url = None;
         self.error = None;
-        self.status = "Connecting...".into();
+        self.status = self.t("status.connecting").to_string();
 
         let events = self.events.clone();
         let config = self.config.clone();
         match ws::connect(&config, &session.token, &events).await {
             Ok(tx) => {
                 self.ws_tx = Some(tx);
-                self.status = format!("Connected as {}", session.email);
+                self.status = self.t_with("status.connected_as", &[("email", &session.email)]);
             }
             Err(e) => {
-                self.error = Some(format!("could not connect: {e}"));
-                self.status = "Signed in, but the WebSocket failed".into();
+                let error = e.to_string();
+                self.error = Some(self.t_with("status.connect_failed", &[("error", &error)]));
+                self.status = self.t("status.ws_failed").to_string();
             }
         }
     }
@@ -406,28 +435,33 @@ impl App {
         self.code.clear();
         self.log.clear();
         self.pongs = 0;
-        self.status = "Signed out".into();
+        self.status = self.t("status.signed_out").to_string();
         self.error = None;
     }
 
     fn handle_server(&mut self, msg: ServerMessage) {
         match msg {
             ServerMessage::Ready { user } => {
-                self.push_log(format!("Ready: {} <{}>", user.display_name, user.email));
+                self.push_log(self.t_with(
+                    "status.ready",
+                    &[("name", &user.display_name), ("email", &user.email)],
+                ));
             }
             ServerMessage::Pong { nonce } => {
                 self.pongs += 1;
-                self.push_log(format!("Pong {nonce}"));
+                let nonce = nonce.to_string();
+                self.push_log(self.t_with("status.pong", &[("nonce", &nonce)]));
             }
             ServerMessage::Error { code, message } => {
                 self.push_log(format!("[{code}] {message}"));
                 if code == "ws_closed" {
                     self.ws_tx = None;
-                    self.status = format!("Disconnected: {message}");
+                    let text = self.error_text(&code, &message);
+                    self.status = self.t_with("status.disconnected", &[("reason", &text)]);
                     self.session = None;
                     self.mode = Mode::SignIn;
                     self.focus = Focus::Email;
-                    self.error = Some(message);
+                    self.error = Some(text);
                 }
             }
         }
@@ -437,7 +471,7 @@ impl App {
         if let Some(tx) = self.ws_tx.clone() {
             self.nonce += 1;
             let nonce = self.nonce.to_string();
-            self.push_log(format!("Ping {nonce}"));
+            self.push_log(self.t_with("status.ping", &[("nonce", &nonce)]));
             let _ = tx.send(ClientMessage::Ping { nonce });
         }
     }
@@ -549,10 +583,9 @@ impl App {
             format!("> {}", self.command)
         } else {
             match self.mode {
-                Mode::Connected => "p: ping · o: sign out · q/Ctrl-C: quit".to_string(),
-                Mode::Device => "Esc: cancel device login".to_string(),
-                _ => "/: command · Tab/↑↓: next field · Enter: submit · Esc: back/quit · Ctrl-C: quit"
-                    .to_string(),
+                Mode::Connected => self.t("hint.connected").to_string(),
+                Mode::Device => self.t("hint.device_cancel").to_string(),
+                _ => self.t("hint.default").to_string(),
             }
         };
         frame.render_widget(
@@ -563,21 +596,25 @@ impl App {
 
     fn draw_signin(&self, frame: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(Span::styled(
-            "Sign in",
+            self.t("screen.sign_in"),
             Style::default().add_modifier(Modifier::BOLD),
         ))];
         lines.push(Line::from(""));
         lines.push(Self::field(
-            "Email",
+            self.t("field.email"),
             &self.email,
             self.focus == Focus::Email,
         ));
-        lines.push(Self::field("Code ", &self.code, self.focus == Focus::Code));
+        lines.push(Self::field(
+            self.t("field.code"),
+            &self.code,
+            self.focus == Focus::Code,
+        ));
         lines.push(Line::from(""));
         lines.push(match &self.error {
             Some(err) => Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))),
             None => Line::from(Span::styled(
-                "Passwordless: enter the 6-digit code from your authenticator app",
+                self.t("hint.sign_in"),
                 Style::default().fg(Color::DarkGray),
             )),
         });
@@ -593,21 +630,25 @@ impl App {
 
     fn draw_register(&self, frame: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(Span::styled(
-            "Create account",
+            self.t("screen.create_account"),
             Style::default().add_modifier(Modifier::BOLD),
         ))];
         lines.push(Line::from(""));
         lines.push(Self::field(
-            "Email",
+            self.t("field.email"),
             &self.email,
             self.focus == Focus::Email,
         ));
-        lines.push(Self::field("Name ", &self.name, self.focus == Focus::Name));
+        lines.push(Self::field(
+            self.t("field.name"),
+            &self.name,
+            self.focus == Focus::Name,
+        ));
         lines.push(Line::from(""));
         lines.push(match &self.error {
             Some(err) => Line::from(Span::styled(err.clone(), Style::default().fg(Color::Red))),
             None => Line::from(Span::styled(
-                "Registering sends a TOTP secret to pair with your authenticator app",
+                self.t("hint.register"),
                 Style::default().fg(Color::DarkGray),
             )),
         });
@@ -623,27 +664,36 @@ impl App {
 
     fn draw_register_code(&self, frame: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(Span::styled(
-            "Complete registration",
+            self.t("screen.complete_registration"),
             Style::default().add_modifier(Modifier::BOLD),
         ))];
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::raw(format!("Account: {}", self.email))));
+        lines.push(Line::from(Span::raw(
+            self.t_with("hint.account", &[("email", &self.email)]),
+        )));
         if let Some(url) = &self.otpauth_url {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "Open this URL (or scan it as a QR code) in your authenticator app:",
+                self.t("hint.open_url"),
                 Style::default().fg(Color::DarkGray),
             )));
             lines.push(Line::from(Span::raw(url.clone())));
         }
         if let Some(secret) = &self.secret {
             lines.push(Line::from(vec![
-                Span::styled("Manual secret: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    self.t("hint.manual_secret"),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::raw(secret.clone()),
             ]));
         }
         lines.push(Line::from(""));
-        lines.push(Self::field("Code ", &self.code, self.focus == Focus::Code));
+        lines.push(Self::field(
+            self.t("field.code"),
+            &self.code,
+            self.focus == Focus::Code,
+        ));
         lines.push(Line::from(""));
         if let Some(err) = &self.error {
             lines.push(Line::from(Span::styled(
@@ -663,16 +713,14 @@ impl App {
 
     fn draw_device(&self, frame: &mut Frame, area: Rect) {
         let mut lines = vec![Line::from(Span::styled(
-            "Device login",
+            self.t("screen.device_login"),
             Style::default().add_modifier(Modifier::BOLD),
         ))];
         lines.push(Line::from(""));
-        lines.push(Line::from(
-            "A browser window should have opened. Sign in — or create an",
-        ));
-        lines.push(Line::from("account — there, then click Authorize."));
+        lines.push(Line::from(self.t("hint.device_line1")));
+        lines.push(Line::from(self.t("hint.device_line2")));
         lines.push(Line::from(""));
-        lines.push(Line::from("If the browser did not open, visit:"));
+        lines.push(Line::from(self.t("hint.device_visit")));
         if let Some(url) = &self.device_verification_uri {
             lines.push(Line::from(Span::styled(
                 url.clone(),
@@ -681,7 +729,7 @@ impl App {
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "This device code is already filled in on the page:",
+            self.t("hint.device_code_filled"),
             Style::default().fg(Color::DarkGray),
         )));
         if let Some(code) = &self.device_user_code {
@@ -694,7 +742,7 @@ impl App {
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "Waiting for approval in your browser...",
+            self.t("hint.device_waiting"),
             Style::default().fg(Color::DarkGray),
         )));
         if let Some(err) = &self.error {
@@ -721,8 +769,18 @@ impl App {
             .split(area);
 
         let info = match &self.session {
-            Some(s) => format!("{} <{}>  ·  pongs: {}", s.display_name, s.email, self.pongs),
-            None => "not signed in".to_string(),
+            Some(s) => {
+                let pongs = self.pongs.to_string();
+                self.t_with(
+                    "info.connected",
+                    &[
+                        ("name", &s.display_name),
+                        ("email", &s.email),
+                        ("pongs", &pongs),
+                    ],
+                )
+            }
+            None => self.t("hint.not_signed_in").to_string(),
         };
         frame.render_widget(
             Paragraph::new(info).block(
@@ -735,14 +793,17 @@ impl App {
 
         let items: Vec<ListItem> = if self.log.is_empty() {
             vec![ListItem::new(Span::styled(
-                "No messages yet — press 'p' to ping the server",
+                self.t("hint.no_messages"),
                 Style::default().fg(Color::DarkGray),
             ))]
         } else {
             self.log.iter().map(|l| ListItem::new(l.clone())).collect()
         };
-        let list =
-            List::new(items).block(Block::default().borders(Borders::ALL).title(" Activity "));
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", self.t("title.activity"))),
+        );
         frame.render_widget(list, chunks[1]);
     }
 }

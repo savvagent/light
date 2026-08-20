@@ -1,0 +1,432 @@
+//! Translation catalog and locale resolution for the TUI.
+//!
+//! User-facing strings live in two static tables (`EN`/`ES`). Lookup falls back
+//! to English, then to the key itself as a loud developer sentinel (unreachable
+//! in production because `EN` completeness is test-enforced). Server errors are
+//! translated by stable `code`; unknown codes surface the server message verbatim.
+
+type Catalog = &'static [(&'static str, &'static str)];
+
+/// The supported locales.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Locale {
+    En,
+    Es,
+}
+
+impl Locale {
+    /// Parse a locale from a `--lang`/config/environment value, taking the primary
+    /// subtag before `-`, `_`, or `.`. `en-US`, `en_US.UTF-8` → `En`; `es-419` →
+    /// `Es`; anything else (including `C.UTF-8`) → `None`.
+    pub fn parse(raw: &str) -> Option<Locale> {
+        let primary = raw.split(['-', '_', '.']).next().unwrap_or(raw);
+        match primary.to_ascii_lowercase().as_str() {
+            "en" => Some(Locale::En),
+            "es" => Some(Locale::Es),
+            // POSIX `C`/`C.UTF-8`/`POSIX` denote the default locale (English).
+            "c" | "posix" => Some(Locale::En),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Locale::En => "en",
+            Locale::Es => "es",
+        }
+    }
+}
+
+const EN: Catalog = &[
+    ("status.not_signed_in", "Not signed in"),
+    ("status.device_cancelled", "Device login cancelled"),
+    ("status.unknown_command", "unknown command: {command}"),
+    ("status.requesting_device_code", "Requesting device code..."),
+    ("status.waiting_approval", "Waiting for browser approval..."),
+    ("status.device_failed", "Device login failed"),
+    ("status.email_required", "Email is required"),
+    ("status.code_required", "TOTP code is required"),
+    ("status.signing_in", "Signing in..."),
+    ("status.creating_account", "Creating account..."),
+    (
+        "status.scan_confirm",
+        "Scan the QR / enter the secret, then confirm",
+    ),
+    ("status.confirming", "Confirming..."),
+    ("status.connecting", "Connecting..."),
+    ("status.connected_as", "Connected as {email}"),
+    ("status.connect_failed", "could not connect: {error}"),
+    ("status.ws_failed", "Signed in, but the WebSocket failed"),
+    ("status.signed_out", "Signed out"),
+    ("status.ready", "Ready: {name} <{email}>"),
+    ("status.pong", "Pong {nonce}"),
+    ("status.ping", "Ping {nonce}"),
+    ("status.disconnected", "Disconnected: {reason}"),
+    ("status.lang_set", "Language set to {lang}"),
+    ("status.lang_invalid", "Unknown language; use 'en' or 'es'"),
+    ("logout_done", "Logged out."),
+    ("screen.sign_in", "Sign in"),
+    ("screen.create_account", "Create account"),
+    ("screen.complete_registration", "Complete registration"),
+    ("screen.device_login", "Device login"),
+    ("field.email", "Email"),
+    ("field.code", "Code"),
+    ("field.name", "Name"),
+    (
+        "hint.sign_in",
+        "Passwordless: enter the 6-digit code from your authenticator app",
+    ),
+    (
+        "hint.register",
+        "Registering sends a TOTP secret to pair with your authenticator app",
+    ),
+    ("hint.account", "Account: {email}"),
+    (
+        "hint.open_url",
+        "Open this URL (or scan it as a QR code) in your authenticator app:",
+    ),
+    ("hint.manual_secret", "Manual secret: "),
+    (
+        "hint.device_line1",
+        "A browser window should have opened. Sign in — or create an",
+    ),
+    (
+        "hint.device_line2",
+        "account — there, then click Authorize.",
+    ),
+    ("hint.device_visit", "If the browser did not open, visit:"),
+    (
+        "hint.device_code_filled",
+        "This device code is already filled in on the page:",
+    ),
+    (
+        "hint.device_waiting",
+        "Waiting for approval in your browser...",
+    ),
+    ("hint.not_signed_in", "not signed in"),
+    (
+        "hint.no_messages",
+        "No messages yet — press 'p' to ping the server",
+    ),
+    ("hint.connected", "p: ping · o: sign out · q/Ctrl-C: quit"),
+    ("hint.device_cancel", "Esc: cancel device login"),
+    (
+        "hint.default",
+        "/: command · Tab/↑↓: next field · Enter: submit · Esc: back/quit · Ctrl-C: quit",
+    ),
+    ("title.activity", "Activity"),
+    ("info.connected", "{name} <{email}>  ·  pongs: {pongs}"),
+    ("error.invalid_credentials", "Invalid email or code"),
+    (
+        "error.email_taken",
+        "An account with that email already exists",
+    ),
+    ("error.invalid_email", "Invalid email address"),
+    ("error.invalid_totp_code", "Invalid TOTP code"),
+    ("error.invalid_challenge", "Invalid or expired challenge"),
+    ("error.invalid_session", "Invalid or expired session"),
+    ("error.invalid_grant", "Invalid device code"),
+    ("error.expired_token", "Device authorization expired"),
+    ("error.storage_error", "Storage error"),
+    ("error.internal_error", "Internal server error"),
+    ("error.invalid_json", "Invalid request"),
+    ("error.network", "Could not reach the server"),
+    ("error.decode", "Unexpected response from the server"),
+    ("error.bad_message", "Could not parse server message"),
+    ("error.ws_closed", "Connection closed"),
+];
+
+const ES: Catalog = &[
+    ("status.not_signed_in", "Sin iniciar sesión"),
+    (
+        "status.device_cancelled",
+        "Inicio de sesión del dispositivo cancelado",
+    ),
+    ("status.unknown_command", "comando desconocido: {command}"),
+    (
+        "status.requesting_device_code",
+        "Solicitando código del dispositivo...",
+    ),
+    (
+        "status.waiting_approval",
+        "Esperando aprobación en el navegador...",
+    ),
+    (
+        "status.device_failed",
+        "Falló el inicio de sesión del dispositivo",
+    ),
+    (
+        "status.email_required",
+        "El correo electrónico es obligatorio",
+    ),
+    ("status.code_required", "El código TOTP es obligatorio"),
+    ("status.signing_in", "Iniciando sesión..."),
+    ("status.creating_account", "Creando cuenta..."),
+    (
+        "status.scan_confirm",
+        "Escanea el QR o introduce el secreto y confirma",
+    ),
+    ("status.confirming", "Confirmando..."),
+    ("status.connecting", "Conectando..."),
+    ("status.connected_as", "Conectado como {email}"),
+    ("status.connect_failed", "no se pudo conectar: {error}"),
+    (
+        "status.ws_failed",
+        "Sesión iniciada, pero el WebSocket falló",
+    ),
+    ("status.signed_out", "Sesión cerrada"),
+    ("status.ready", "Listo: {name} <{email}>"),
+    ("status.pong", "Pong {nonce}"),
+    ("status.ping", "Ping {nonce}"),
+    ("status.disconnected", "Desconectado: {reason}"),
+    ("status.lang_set", "Idioma cambiado a {lang}"),
+    ("status.lang_invalid", "Idioma desconocido; usa 'en' o 'es'"),
+    ("logout_done", "Sesión cerrada."),
+    ("screen.sign_in", "Iniciar sesión"),
+    ("screen.create_account", "Crear cuenta"),
+    ("screen.complete_registration", "Completar registro"),
+    ("screen.device_login", "Inicio de sesión del dispositivo"),
+    ("field.email", "Correo electrónico"),
+    ("field.code", "Código"),
+    ("field.name", "Nombre"),
+    (
+        "hint.sign_in",
+        "Sin contraseña: introduce el código de 6 dígitos de tu aplicación de autenticación",
+    ),
+    (
+        "hint.register",
+        "Al registrarte se envía un secreto TOTP para vincular tu aplicación de autenticación",
+    ),
+    ("hint.account", "Cuenta: {email}"),
+    (
+        "hint.open_url",
+        "Abre esta URL (o escanéala como código QR) en tu aplicación de autenticación:",
+    ),
+    ("hint.manual_secret", "Secreto manual: "),
+    (
+        "hint.device_line1",
+        "Se debería haber abierto una ventana del navegador. Inicia sesión — o crea una",
+    ),
+    (
+        "hint.device_line2",
+        "cuenta — allí, y luego haz clic en Autorizar.",
+    ),
+    ("hint.device_visit", "Si el navegador no se abrió, visita:"),
+    (
+        "hint.device_code_filled",
+        "Este código de dispositivo ya está rellenado en la página:",
+    ),
+    (
+        "hint.device_waiting",
+        "Esperando aprobación en tu navegador...",
+    ),
+    ("hint.not_signed_in", "sin iniciar sesión"),
+    (
+        "hint.no_messages",
+        "Aún no hay mensajes: pulsa 'p' para hacer ping al servidor",
+    ),
+    (
+        "hint.connected",
+        "p: ping · o: cerrar sesión · q/Ctrl-C: salir",
+    ),
+    (
+        "hint.device_cancel",
+        "Esc: cancelar inicio de sesión del dispositivo",
+    ),
+    (
+        "hint.default",
+        "/: comando · Tab/↑↓: siguiente campo · Enter: enviar · Esc: atrás/salir · Ctrl-C: salir",
+    ),
+    ("title.activity", "Actividad"),
+    ("info.connected", "{name} <{email}>  ·  pongs: {pongs}"),
+    ("error.invalid_credentials", "Correo o código no válidos"),
+    (
+        "error.email_taken",
+        "Ya existe una cuenta con ese correo electrónico",
+    ),
+    (
+        "error.invalid_email",
+        "Dirección de correo electrónico no válida",
+    ),
+    ("error.invalid_totp_code", "Código TOTP no válido"),
+    ("error.invalid_challenge", "Desafío no válido o caducado"),
+    ("error.invalid_session", "Sesión no válida o caducada"),
+    ("error.invalid_grant", "Código de dispositivo no válido"),
+    (
+        "error.expired_token",
+        "La autorización del dispositivo ha caducado",
+    ),
+    ("error.storage_error", "Error de almacenamiento"),
+    ("error.internal_error", "Error interno del servidor"),
+    ("error.invalid_json", "Solicitud no válida"),
+    ("error.network", "No se pudo contactar con el servidor"),
+    ("error.decode", "Respuesta inesperada del servidor"),
+    (
+        "error.bad_message",
+        "No se pudo analizar el mensaje del servidor",
+    ),
+    ("error.ws_closed", "Conexión cerrada"),
+];
+
+fn lookup(catalog: Catalog, key: &str) -> Option<&'static str> {
+    catalog.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
+}
+
+/// Translate `key` for `locale`, falling back to English, then to `key`.
+pub fn t(locale: Locale, key: &str) -> &str {
+    if let Some(found) = match locale {
+        Locale::Es => lookup(ES, key).or_else(|| lookup(EN, key)),
+        Locale::En => lookup(EN, key),
+    } {
+        return found;
+    }
+    key
+}
+
+/// Translate `key` and substitute `{param}` placeholders from `params`.
+pub fn t_with(locale: Locale, key: &str, params: &[(&str, &str)]) -> String {
+    let mut out = t(locale, key).to_string();
+    for (name, value) in params {
+        out = out.replace(&format!("{{{name}}}"), value);
+    }
+    out
+}
+
+/// Translate a stable server/client error `code`, or `None` when the code is
+/// unrecognized (callers then surface the server message verbatim).
+pub fn error_message(locale: Locale, code: &str) -> Option<&'static str> {
+    let key = format!("error.{code}");
+    lookup(EN, &key)?;
+    match locale {
+        Locale::Es => lookup(ES, &key).or_else(|| lookup(EN, &key)),
+        Locale::En => lookup(EN, &key),
+    }
+}
+
+/// Pure resolution: `--lang` → saved config → `LC_ALL` → `LANG` → English.
+pub fn resolve_locale(
+    cli: Option<&str>,
+    saved: Option<&str>,
+    lang_env: Option<&str>,
+    lc_all_env: Option<&str>,
+) -> Locale {
+    if let Some(raw) = cli
+        && let Some(locale) = Locale::parse(raw)
+    {
+        return locale;
+    }
+    if let Some(raw) = saved
+        && let Some(locale) = Locale::parse(raw)
+    {
+        return locale;
+    }
+    if let Some(raw) = lc_all_env
+        && let Some(locale) = Locale::parse(raw)
+    {
+        return locale;
+    }
+    if let Some(raw) = lang_env
+        && let Some(locale) = Locale::parse(raw)
+    {
+        return locale;
+    }
+    Locale::En
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(catalog: Catalog) -> Vec<&'static str> {
+        let mut v: Vec<_> = catalog.iter().map(|(k, _)| *k).collect();
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn es_mirrors_en_exactly() {
+        assert_eq!(keys(ES), keys(EN), "ES must define exactly the EN key set");
+    }
+
+    #[test]
+    fn parses_locales() {
+        assert_eq!(Locale::parse("en"), Some(Locale::En));
+        assert_eq!(Locale::parse("EN"), Some(Locale::En));
+        assert_eq!(Locale::parse("en-US"), Some(Locale::En));
+        assert_eq!(Locale::parse("en_US.UTF-8"), Some(Locale::En));
+        assert_eq!(Locale::parse("es"), Some(Locale::Es));
+        assert_eq!(Locale::parse("es-419"), Some(Locale::Es));
+        assert_eq!(Locale::parse("fr"), None);
+        assert_eq!(Locale::parse("C"), Some(Locale::En));
+        assert_eq!(Locale::parse("C.UTF-8"), Some(Locale::En));
+        assert_eq!(Locale::parse("POSIX"), Some(Locale::En));
+        assert_eq!(Locale::parse(""), None);
+    }
+
+    #[test]
+    fn resolves_with_precedence() {
+        // --lang wins over everything.
+        assert_eq!(
+            resolve_locale(Some("es"), Some("en"), Some("en"), Some("en")),
+            Locale::Es
+        );
+        // saved config beats environment.
+        assert_eq!(
+            resolve_locale(None, Some("es"), Some("en"), Some("en")),
+            Locale::Es
+        );
+        // LANG is used when nothing higher is set.
+        assert_eq!(resolve_locale(None, None, Some("es"), None), Locale::Es);
+        // LC_ALL takes precedence over LANG.
+        assert_eq!(
+            resolve_locale(None, None, Some("en"), Some("es")),
+            Locale::Es
+        );
+        // LC_ALL=C denotes the default locale and overrides a non-English LANG.
+        assert_eq!(
+            resolve_locale(None, None, Some("es"), Some("C.UTF-8")),
+            Locale::En
+        );
+        assert_eq!(resolve_locale(None, None, None, None), Locale::En);
+        // invalid values fall through.
+        assert_eq!(resolve_locale(Some("fr"), None, None, None), Locale::En);
+    }
+
+    #[test]
+    fn translates_and_falls_back() {
+        assert_ne!(
+            t(Locale::Es, "screen.sign_in"),
+            t(Locale::En, "screen.sign_in")
+        );
+        assert_eq!(t(Locale::En, "screen.sign_in"), "Sign in");
+        assert_eq!(t(Locale::Es, "screen.sign_in"), "Iniciar sesión");
+        // Missing key falls back to English, then to the key.
+        assert_eq!(t(Locale::Es, "definitely.missing"), "definitely.missing");
+    }
+
+    #[test]
+    fn interpolates_params() {
+        assert_eq!(
+            t_with(Locale::En, "status.connected_as", &[("email", "a@b.c")]),
+            "Connected as a@b.c"
+        );
+        assert_eq!(
+            t_with(Locale::Es, "status.connected_as", &[("email", "a@b.c")]),
+            "Conectado como a@b.c"
+        );
+    }
+
+    #[test]
+    fn translates_known_error_codes_only() {
+        assert_eq!(
+            error_message(Locale::Es, "invalid_credentials"),
+            Some("Correo o código no válidos")
+        );
+        assert_eq!(
+            error_message(Locale::En, "invalid_credentials"),
+            Some("Invalid email or code")
+        );
+        assert_eq!(error_message(Locale::Es, "no_such_code"), None);
+        assert_eq!(error_message(Locale::En, "no_such_code"), None);
+    }
+}
