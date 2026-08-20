@@ -47,17 +47,17 @@ jobs:
         run: cargo deb -p light-factory-tui --no-build
       - name: Package .rpm
         run: cargo generate-rpm -p crates/tui
-      - name: Linux tarball
+      - name: Stage release artifacts
         run: |
-          mkdir -p dist/light-factory
-          cp target/release/light-factory dist/light-factory/
-          tar -czf "light-factory-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" -C dist light-factory
+          tar -czf "light-factory-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" -C target/release light-factory
+          cp target/debian/*.deb .
+          cp target/generate-rpm/*.rpm .
       - uses: actions/upload-artifact@v4
         with:
           name: linux
           path: |
-            target/debian/*.deb
-            target/generate-rpm/*.rpm
+            *.deb
+            *.rpm
             light-factory-*.tar.gz
 
   macos:
