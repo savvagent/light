@@ -456,11 +456,12 @@ impl App {
                 self.push_log(format!("[{code}] {message}"));
                 if code == "ws_closed" {
                     self.ws_tx = None;
-                    self.status = self.t_with("status.disconnected", &[("reason", &message)]);
+                    let text = self.error_text(&code, &message);
+                    self.status = self.t_with("status.disconnected", &[("reason", &text)]);
                     self.session = None;
                     self.mode = Mode::SignIn;
                     self.focus = Focus::Email;
-                    self.error = Some(self.error_text(&code, &message));
+                    self.error = Some(text);
                 }
             }
         }

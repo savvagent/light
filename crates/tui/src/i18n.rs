@@ -23,6 +23,8 @@ impl Locale {
         match primary.to_ascii_lowercase().as_str() {
             "en" => Some(Locale::En),
             "es" => Some(Locale::Es),
+            // POSIX `C`/`C.UTF-8`/`POSIX` denote the default locale (English).
+            "c" | "posix" => Some(Locale::En),
             _ => None,
         }
     }
@@ -355,7 +357,9 @@ mod tests {
         assert_eq!(Locale::parse("es"), Some(Locale::Es));
         assert_eq!(Locale::parse("es-419"), Some(Locale::Es));
         assert_eq!(Locale::parse("fr"), None);
-        assert_eq!(Locale::parse("C.UTF-8"), None);
+        assert_eq!(Locale::parse("C"), Some(Locale::En));
+        assert_eq!(Locale::parse("C.UTF-8"), Some(Locale::En));
+        assert_eq!(Locale::parse("POSIX"), Some(Locale::En));
         assert_eq!(Locale::parse(""), None);
     }
 
@@ -377,6 +381,11 @@ mod tests {
         assert_eq!(
             resolve_locale(None, None, Some("en"), Some("es")),
             Locale::Es
+        );
+        // LC_ALL=C denotes the default locale and overrides a non-English LANG.
+        assert_eq!(
+            resolve_locale(None, None, Some("es"), Some("C.UTF-8")),
+            Locale::En
         );
         assert_eq!(resolve_locale(None, None, None, None), Locale::En);
         // invalid values fall through.
