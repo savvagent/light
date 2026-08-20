@@ -8,3 +8,6 @@
 .wrangler/
 *.log
 .DS_Store
+
+# Local git worktrees (isolated feature-branch workspaces)
+/.worktrees
