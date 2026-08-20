@@ -1,7 +1,7 @@
 # Pin GitHub Actions to immutable commit SHAs design
 
-> **Status:** DRAFT — pin every `uses:` ref in `.github/workflows/` to a full 40-char commit SHA to
-> remove the mutable-tag supply-chain risk, and document the pinning convention.
+> **Status:** IMPLEMENTED — pin every `uses:` ref in `.github/workflows/` to a full 40-char commit SHA
+> to remove the mutable-tag supply-chain risk, and document the pinning convention.
 >
 > **Implements:** savvagent/light#12
 
@@ -122,11 +122,11 @@ There is no local GitHub Actions harness. Verification is:
 Goal: no workflow runs code reachable only through a mutable ref; every action resolves to an exact,
 pinned commit.
 
-- [ ] Every `uses:` in `.github/workflows/` is a full 40-char commit SHA matching the §1 matrix.
-- [ ] `STATUS.md` documents the SHA-pinning convention (including the tag→SHA resolution command).
-- [ ] `git diff` shows only `uses:` ref changes and the convention note — no behavior change.
-- [ ] All three workflow files parse as valid YAML.
-- [ ] PR CI (the `pull_request` trigger) runs green.
+- [x] Every `uses:` in `.github/workflows/` is a full 40-char commit SHA matching the §1 matrix.
+- [x] `STATUS.md` documents the SHA-pinning convention (including the tag→SHA resolution command).
+- [x] `git diff` shows only `uses:` ref changes and the convention note — no behavior change.
+- [x] All three workflow files parse as valid YAML.
+- [x] PR CI (the `pull_request` trigger) runs green.
 
 ## Error Handling & Edge Cases
 
