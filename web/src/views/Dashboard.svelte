@@ -1,20 +1,22 @@
 <script>
+  import { t } from '../lib/i18n.svelte.js';
+
   let { user, onLogout } = $props();
 </script>
 
 <div class="dashboard">
-  <p class="subtitle">You're logged in — create something great.</p>
+  <p class="subtitle">{t('dashboard.subtitle')}</p>
 
   <dl>
-    <dt>Email</dt>
+    <dt>{t('dashboard.email')}</dt>
     <dd>{user.email}</dd>
 
-    <dt>Display name</dt>
+    <dt>{t('dashboard.display_name')}</dt>
     <dd>{user.display_name}</dd>
 
-    <dt>Sign-in method</dt>
-    <dd>Authenticator app</dd>
+    <dt>{t('dashboard.signin_method')}</dt>
+    <dd>{t('dashboard.method_authenticator')}</dd>
   </dl>
 
-  <button class="secondary" onclick={onLogout}>Sign out</button>
+  <button class="secondary" onclick={onLogout}>{t('dashboard.sign_out')}</button>
 </div>
