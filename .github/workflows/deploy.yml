@@ -1,17 +1,32 @@
 # Requires secrets: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, FLY_API_TOKEN
-name: Deploy
+name: CI and Deploy
 
 on:
   push:
     branches: [master]
+  pull_request:
 
 concurrency:
-  group: deploy
+  group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  ci:
+    name: Test and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
   cloudflare-pages:
     name: Web -> Cloudflare Pages
+    needs: ci
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +51,8 @@ jobs:
 
   fly:
     name: Backend -> Fly.io
+    needs: ci
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
