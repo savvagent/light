@@ -1,6 +1,6 @@
 # Bump Node 20-targeting GitHub Actions to Node 24 design
 
-> **Status:** DRAFT — clear remaining Node 20 runtime deprecation warnings in CI by bumping the
+> **Status:** IMPLEMENTED — clear remaining Node 20 runtime deprecation warnings in CI by bumping the
 > actions themselves, not the `node-version` pin.
 >
 > **Implements:** savvagent/light#9
@@ -110,12 +110,12 @@ There is no local harness for GitHub Actions. Verification is:
 
 Goal: CI/CD completes with no Node runtime deprecation annotations.
 
-- [ ] Every `uses:` in `.github/workflows/` resolves to a version whose `action.yml` declares a
+- [x] Every `uses:` in `.github/workflows/` resolves to a version whose `action.yml` declares a
       Node 24 (or composite) runtime — no `node20` remains.
-- [ ] The `CI and Deploy` workflow (and `Release`, `Bump Version`) still specify the same jobs,
+- [x] The `CI and Deploy` workflow (and `Release`, `Bump Version`) still specify the same jobs,
       steps, and inputs; `git diff` shows only `uses:` ref changes.
-- [ ] All three workflow files parse as valid YAML.
-- [ ] PR CI (the `pull_request` trigger) runs green with no deprecation annotations.
+- [x] All three workflow files parse as valid YAML.
+- [x] PR CI (the `pull_request` trigger) runs green with no deprecation annotations.
 
 ## Error Handling & Edge Cases
 

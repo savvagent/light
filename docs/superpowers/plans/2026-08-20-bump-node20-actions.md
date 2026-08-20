@@ -68,23 +68,23 @@ The bump matrix (from the spec §1):
 
 Do NOT touch: `dtolnay/rust-toolchain@stable` (composite), `Swatinem/rust-cache@v2` (already node24).
 
-- [ ] In `.github/workflows/deploy.yml`: `actions/checkout@v4` → `actions/checkout@v5` (3 occurrences),
+- [x] In `.github/workflows/deploy.yml`: `actions/checkout@v4` → `actions/checkout@v5` (3 occurrences),
       `actions/setup-node@v4` → `actions/setup-node@v5`, `cloudflare/wrangler-action@v3` →
       `cloudflare/wrangler-action@v4`, `superfly/flyctl-actions/setup-flyctl@1.5` →
       `superfly/flyctl-actions/setup-flyctl@1.6`.
-- [ ] In `.github/workflows/release.yml`: `actions/checkout@v4` → `actions/checkout@v5` (3 occurrences),
+- [x] In `.github/workflows/release.yml`: `actions/checkout@v4` → `actions/checkout@v5` (3 occurrences),
       `actions/upload-artifact@v4` → `actions/upload-artifact@v6` (3 occurrences),
       `actions/download-artifact@v4` → `actions/download-artifact@v7`,
       `softprops/action-gh-release@v2` → `softprops/action-gh-release@v3`.
-- [ ] In `.github/workflows/bump.yml`: `actions/checkout@v4` → `actions/checkout@v5` (1 occurrence).
-- [ ] Verify no `node20`-targeting ref remains: grep `.github/workflows/` and confirm every `uses:`
+- [x] In `.github/workflows/bump.yml`: `actions/checkout@v4` → `actions/checkout@v5` (1 occurrence).
+- [x] Verify no `node20`-targeting ref remains: grep `.github/workflows/` and confirm every `uses:`
       resolves to a node24 or composite action (re-run the `runs.using` check on each pinned ref).
-- [ ] Confirm `git diff` shows ONLY `uses:` line changes — no `run:`, `env:`, `permissions:`, or
+- [x] Confirm `git diff` shows ONLY `uses:` line changes — no `run:`, `env:`, `permissions:`, or
       secret edits.
-- [ ] Validate all three files parse:
+- [x] Validate all three files parse:
       `python3 -c "import yaml; [yaml.safe_load(open(f)) for f in ('.github/workflows/deploy.yml','.github/workflows/release.yml','.github/workflows/bump.yml')]"`.
       (Requires PyYAML; local check only.)
-- [ ] Format and commit: `git commit -m "ci: bump node20 actions to node24"`.
+- [x] Format and commit: `git commit -m "ci: bump node20 actions to node24"`.
 
 ## Out-of-band verification
 
