@@ -126,7 +126,8 @@ Full detail in `docs/superpowers/specs/2026-08-20-engine-core-design.md`.
 - **The gate** is deterministic and involves no LLM. Reads are allowed anywhere in the
   workspace (an agent must be able to explore a repo). Writes and commands must fall inside the
   approved plan's declared scope. The **sensitive-path floor** always asks and cannot be
-  silently unlocked by plan approval.
+  silently unlocked by plan approval — for both file paths and any element of a command's
+  argument vector.
 - **No shell strings.** The `bash` tool takes a program and an args vector with no shell
   interpretation, because a gate cannot meaningfully evaluate `cargo test; rm -rf ~`. This is
   accepted as occasionally inconvenient in exchange for a guardrail that holds.

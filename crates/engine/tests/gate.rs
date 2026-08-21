@@ -126,6 +126,21 @@ fn arity_must_match_the_pattern() {
 }
 
 #[test]
+fn sensitive_command_arguments_ask_even_when_the_pattern_matches() {
+    let gate = PlanGate::new(Some(Scope {
+        write_paths: vec![],
+        commands: vec![CommandPattern {
+            program: "cat".into(),
+            args: vec![ArgPattern::Any],
+        }],
+    }));
+    assert!(matches!(
+        gate.evaluate("bash", &json!({"program": "cat", "args": [".env"]})),
+        Decision::Ask(GateReason::SensitiveFloor { .. })
+    ));
+}
+
+#[test]
 fn no_approved_plan_means_nothing_is_authorized() {
     let gate = PlanGate::new(None);
     assert!(matches!(

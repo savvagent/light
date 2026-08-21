@@ -17,7 +17,7 @@
 - **No comments unless asked.** Doc comments (`///`, `//!`) on public items are encouraged and expected.
 - **Every gate fails closed.** A gate that cannot obtain an answer resolves to denial. A disconnected client, a closed command channel, and an abort are all denials — never approvals.
 - **The `bash` tool takes a program and an args vector and performs no shell interpretation.** No `sh -c`, no pipes, no redirection, no glob expansion, no command chaining.
-- **Sensitive-path floor is `Ask`, never silent `Allow`.** Plan approval cannot bypass it.
+- **Sensitive-path floor is `Ask`, never silent `Allow`.** Plan approval cannot bypass it. The floor covers command arguments as well as paths: any element of a command's `args` that is sensitive asks, regardless of whether the approved scope matches the command pattern.
 - **No network in tests.** Providers are tested against `wiremock`; engine turns against `ScriptedProvider`.
 - `cargo fmt`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace` must pass before any task is considered done.
 - Ported files come from `/home/robhicks/dev/otto` (same author, same MIT/Apache-2.0 dual license). Porting means copy, rename `otto_*` → `light_factory_*`, strip anything the spec's non-goals exclude.
