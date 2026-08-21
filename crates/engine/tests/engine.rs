@@ -42,7 +42,9 @@ async fn dispatch_routes_a_command_to_its_session() {
 async fn dispatch_to_an_unknown_session_is_an_error() {
     let mut engine = Engine::new(provider());
     let err = engine
-        .dispatch(Command::Abort { session: SessionId::new() })
+        .dispatch(Command::Abort {
+            session: SessionId::new(),
+        })
         .unwrap_err();
     assert!(err.to_string().contains("unknown session"));
 }
@@ -50,5 +52,9 @@ async fn dispatch_to_an_unknown_session_is_an_error() {
 #[tokio::test]
 async fn create_session_rejects_a_missing_workspace() {
     let mut engine = Engine::new(provider());
-    assert!(engine.create_session("/nonexistent/path/xyz".into()).is_err());
+    assert!(
+        engine
+            .create_session("/nonexistent/path/xyz".into())
+            .is_err()
+    );
 }
