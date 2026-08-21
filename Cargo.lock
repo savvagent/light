@@ -1098,6 +1098,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "h2"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1641,6 +1647,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "light-factory-engine"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "glob",
+ "light-factory-engine-core",
+ "light-factory-protocol",
+ "light-factory-providers",
+ "light-factory-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "light-factory-engine-core"
 version = "0.1.1"
 dependencies = [
@@ -1714,6 +1739,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "light-factory-tools"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "glob",
+ "light-factory-engine-core",
+ "light-factory-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "light-factory-tui"
 version = "0.1.1"
 dependencies = [
@@ -1721,13 +1761,16 @@ dependencies = [
  "clap",
  "crossterm",
  "futures-util",
+ "light-factory-engine",
  "light-factory-protocol",
+ "light-factory-providers",
  "ratatui",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "uuid",
 ]
 
 [[package]]

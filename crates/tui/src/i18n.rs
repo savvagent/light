@@ -145,6 +145,34 @@ const EN: Catalog = &[
     ("error.decode", "Unexpected response from the server"),
     ("error.bad_message", "Could not parse server message"),
     ("error.ws_closed", "Connection closed"),
+    ("engine.plan_proposed", "plan proposed: {summary}"),
+    ("engine.plan_approved", "plan approved"),
+    ("engine.plan_rejected", "plan rejected"),
+    ("engine.step_started", "step: {description}"),
+    ("engine.step_done", "step done"),
+    ("engine.step_failed", "step failed"),
+    ("engine.file_edit", "wrote {path} ({bytes} bytes)"),
+    ("engine.command_run", "ran {command} (exit {code})"),
+    ("engine.approval_needed", "approval needed: {detail}"),
+    ("engine.token_usage", "tokens: {input} in / {output} out"),
+    ("engine.turn_complete", "turn complete"),
+    ("engine.turn_ended", "turn ended"),
+    (
+        "engine.plan_prompt",
+        "Plan: {summary}\n{steps} step(s), {paths} write path(s), {commands} command(s)",
+    ),
+    (
+        "engine.reason_outside_scope",
+        "outside the approved scope: {what}",
+    ),
+    ("engine.reason_sensitive", "sensitive path: {path}"),
+    ("engine.approve_keys", "[a] approve  [d] deny"),
+    ("title.engine", "Engine"),
+    (
+        "hint.engine",
+        "Enter: send prompt · a: approve · d: deny · Esc: back",
+    ),
+    ("status.engine_started", "Engine session started"),
 ];
 
 const ES: Catalog = &[
@@ -285,6 +313,37 @@ const ES: Catalog = &[
         "No se pudo analizar el mensaje del servidor",
     ),
     ("error.ws_closed", "Conexión cerrada"),
+    ("engine.plan_proposed", "plan propuesto: {summary}"),
+    ("engine.plan_approved", "plan aprobado"),
+    ("engine.plan_rejected", "plan rechazado"),
+    ("engine.step_started", "paso: {description}"),
+    ("engine.step_done", "paso completado"),
+    ("engine.step_failed", "paso fallido"),
+    ("engine.file_edit", "escrito {path} ({bytes} bytes)"),
+    ("engine.command_run", "ejecutado {command} (salida {code})"),
+    ("engine.approval_needed", "se requiere aprobación: {detail}"),
+    (
+        "engine.token_usage",
+        "tokens: {input} entrada / {output} salida",
+    ),
+    ("engine.turn_complete", "turno completado"),
+    ("engine.turn_ended", "turno finalizado"),
+    (
+        "engine.plan_prompt",
+        "Plan: {summary}\n{steps} paso(s), {paths} ruta(s) de escritura, {commands} comando(s)",
+    ),
+    (
+        "engine.reason_outside_scope",
+        "fuera del alcance aprobado: {what}",
+    ),
+    ("engine.reason_sensitive", "ruta sensible: {path}"),
+    ("engine.approve_keys", "[a] aprobar  [d] denegar"),
+    ("title.engine", "Motor"),
+    (
+        "hint.engine",
+        "Enter: enviar indicación · a: aprobar · d: denegar · Esc: volver",
+    ),
+    ("status.engine_started", "Sesión del motor iniciada"),
 ];
 
 fn lookup(catalog: Catalog, key: &str) -> Option<&'static str> {

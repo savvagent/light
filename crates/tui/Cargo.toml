@@ -9,6 +9,10 @@ description = "Terminal UI client for the light-factory agentic coding platform"
 name = "light-factory"
 path = "src/main.rs"
 
+[lib]
+name = "light_factory_tui"
+path = "src/lib.rs"
+
 [package.metadata.deb]
 maintainer = "Savvagent <rob@hixfamily.org>"
 section = "utils"
@@ -24,6 +28,7 @@ assets = [
 [dependencies]
 light-factory-protocol = { path = "../protocol" }
 light-factory-providers = { path = "../providers" }
+light-factory-engine = { path = "../engine" }
 ratatui = { workspace = true, features = ["crossterm"] }
 crossterm = { workspace = true, features = ["event-stream"] }
 reqwest = { workspace = true }
@@ -34,3 +39,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+uuid = { workspace = true }

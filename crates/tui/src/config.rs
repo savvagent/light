@@ -1,6 +1,6 @@
 //! Client configuration resolved from the CLI and environment.
 
-use crate::i18n::Locale;
+use light_factory_tui::i18n::Locale;
 
 /// The base HTTP URL of the server plus the derived WebSocket URL and locale.
 #[derive(Debug, Clone)]

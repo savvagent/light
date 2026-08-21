@@ -4,14 +4,13 @@ mod api;
 mod app;
 mod browser;
 mod config;
-mod i18n;
 mod provider;
 mod session;
 mod settings;
 mod ws;
 
 use clap::Parser;
-use i18n::Locale;
+use light_factory_tui::i18n::{self, Locale};
 
 /// Terminal UI client for the light-factory agentic coding platform.
 #[derive(Parser)]

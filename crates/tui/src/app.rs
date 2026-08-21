@@ -10,9 +10,13 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures_util::StreamExt;
+use light_factory_engine::Engine;
 use light_factory_protocol::auth::AuthResponse;
+use light_factory_protocol::session::{Command, Event as EngineEvent, EventKind, SessionId};
 use light_factory_protocol::wire::{ClientMessage, ServerMessage};
 use light_factory_providers::{CompleteRequest, Provider};
+use light_factory_tui::engine_view::{describe_event, pending_prompt};
+use light_factory_tui::i18n::{self, Locale};
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -25,7 +29,6 @@ use tokio::sync::mpsc;
 use crate::api::{Api, ApiError};
 use crate::browser;
 use crate::config::Config;
-use crate::i18n::{self, Locale};
 use crate::provider::ProviderInfo;
 use crate::session::Session;
 use crate::ws;
@@ -39,6 +42,7 @@ pub enum UiEvent {
         result: Result<AuthResponse, ApiError>,
     },
     Completion(Result<String, String>),
+    Engine(EngineEvent),
 }
 
 /// Which field currently owns keyboard input.
@@ -57,6 +61,7 @@ enum Mode {
     RegisterCode,
     Device,
     Connected,
+    Engine,
 }
 
 const LOG_CAPACITY: usize = 200;
@@ -83,6 +88,11 @@ pub struct App {
     ws_tx: Option<mpsc::UnboundedSender<ClientMessage>>,
     provider: Arc<dyn Provider>,
     provider_info: ProviderInfo,
+    engine: Option<Engine>,
+    engine_session: Option<SessionId>,
+    engine_log: Vec<String>,
+    engine_prompt: String,
+    pending: Option<(EventKind, String)>,
     error: Option<String>,
     status: String,
     log: VecDeque<String>,
@@ -121,6 +131,11 @@ impl App {
             ws_tx: None,
             provider,
             provider_info,
+            engine: None,
+            engine_session: None,
+            engine_log: Vec::new(),
+            engine_prompt: String::new(),
+            pending: None,
             error: None,
             status,
             log: VecDeque::new(),
@@ -147,6 +162,9 @@ impl App {
         if self.command_mode {
             return self.handle_command_key(key).await;
         }
+        if self.mode == Mode::Engine {
+            return self.handle_engine_key(key).await;
+        }
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
             KeyCode::Esc => match self.mode {
@@ -170,6 +188,7 @@ impl App {
                     self.error = None;
                 }
                 Mode::Connected => {}
+                Mode::Engine => {}
             },
             KeyCode::Char('/')
                 if matches!(
@@ -189,6 +208,11 @@ impl App {
             }
             KeyCode::Char('p') if self.mode == Mode::Connected => self.ping(),
             KeyCode::Char('o') if self.mode == Mode::Connected => self.sign_out().await,
+            KeyCode::Char('e') if self.mode == Mode::Connected => {
+                if let Err(e) = self.enter_engine() {
+                    self.error = Some(e.to_string());
+                }
+            }
             KeyCode::Char(c) => self.type_char(c),
             KeyCode::Backspace => self.backspace(),
             KeyCode::Tab | KeyCode::Up | KeyCode::Down => self.cycle_focus(),
@@ -196,6 +220,105 @@ impl App {
             _ => {}
         }
         false
+    }
+
+    async fn handle_engine_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+            KeyCode::Esc => self.leave_engine(),
+            KeyCode::Char('a') => self.engine_answer(true),
+            KeyCode::Char('d') => self.engine_answer(false),
+            KeyCode::Enter => self.engine_send_prompt(),
+            KeyCode::Backspace => {
+                self.engine_prompt.pop();
+            }
+            KeyCode::Char(c) => self.engine_prompt.push(c),
+            _ => {}
+        }
+        false
+    }
+
+    fn enter_engine(&mut self) -> anyhow::Result<()> {
+        let (provider, _info) = crate::provider::build();
+
+        let mut engine = Engine::new(provider);
+        let session = engine.create_session(std::env::current_dir()?)?;
+
+        let mut events = engine.handle(session).expect("just created").subscribe();
+        let tx = self.events.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = events.recv().await {
+                let _ = tx.send(UiEvent::Engine(event));
+            }
+        });
+
+        self.engine = Some(engine);
+        self.engine_session = Some(session);
+        self.engine_log.clear();
+        self.engine_prompt.clear();
+        self.pending = None;
+        self.mode = Mode::Engine;
+        self.status = self.t("status.engine_started").to_string();
+        Ok(())
+    }
+
+    fn leave_engine(&mut self) {
+        self.mode = Mode::Connected;
+        self.engine_prompt.clear();
+        self.pending = None;
+        if let Some(s) = &self.session {
+            self.status = self.t_with("status.connected_as", &[("email", &s.email)]);
+        }
+    }
+
+    fn engine_answer(&mut self, approved: bool) {
+        let (Some(engine), Some(session)) = (self.engine.as_mut(), self.engine_session) else {
+            return;
+        };
+        let command = match self.pending.as_ref().map(|(kind, _)| kind) {
+            Some(EventKind::PlanProposed { plan_id, .. }) => Some(Command::ApprovePlan {
+                session,
+                plan_id: *plan_id,
+                approved,
+            }),
+            Some(EventKind::ApprovalRequest { request_id, .. }) => Some(Command::ApproveAction {
+                session,
+                request_id: *request_id,
+                approved,
+            }),
+            _ => None,
+        };
+        if let Some(command) = command {
+            let _ = engine.dispatch(command);
+            self.pending = None;
+        }
+    }
+
+    fn engine_send_prompt(&mut self) {
+        let text = self.engine_prompt.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let (Some(engine), Some(session)) = (self.engine.as_mut(), self.engine_session) else {
+            return;
+        };
+        let _ = engine.dispatch(Command::SendPrompt {
+            session,
+            text: text.clone(),
+        });
+        self.engine_log.push(format!("> {text}"));
+        self.engine_prompt.clear();
+    }
+
+    fn handle_engine_event(&mut self, event: EngineEvent) {
+        let line = describe_event(self.config.lang, &event.kind);
+        self.engine_log.push(line);
+        while self.engine_log.len() > LOG_CAPACITY {
+            self.engine_log.remove(0);
+        }
+        if let Some(prompt) = pending_prompt(self.config.lang, &event.kind) {
+            self.pending = Some((event.kind, prompt));
+        }
     }
 
     async fn handle_command_key(&mut self, key: KeyEvent) -> bool {
@@ -430,6 +553,7 @@ impl App {
             }
             Mode::Device => {}
             Mode::Connected => {}
+            Mode::Engine => {}
         }
     }
 
@@ -578,6 +702,7 @@ impl App {
             Mode::RegisterCode => self.focus = Focus::Code,
             Mode::Device => {}
             Mode::Connected => {}
+            Mode::Engine => {}
         }
     }
 
@@ -622,6 +747,7 @@ impl App {
             Mode::RegisterCode => self.draw_register_code(frame, chunks[1]),
             Mode::Device => self.draw_device(frame, chunks[1]),
             Mode::Connected => self.draw_connected(frame, chunks[1]),
+            Mode::Engine => self.draw_engine(frame, chunks[1]),
         }
 
         let hints = if self.command_mode {
@@ -630,6 +756,7 @@ impl App {
             match self.mode {
                 Mode::Connected => self.t("hint.connected").to_string(),
                 Mode::Device => self.t("hint.device_cancel").to_string(),
+                Mode::Engine => self.t("hint.engine").to_string(),
                 _ => self.t("hint.default").to_string(),
             }
         };
@@ -853,6 +980,40 @@ impl App {
         );
         frame.render_widget(list, chunks[1]);
     }
+
+    fn draw_engine(&self, frame: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(3)])
+            .split(area);
+
+        let items: Vec<ListItem> = if self.engine_log.is_empty() {
+            vec![ListItem::new(Span::styled(
+                self.t("hint.no_messages"),
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
+            self.engine_log
+                .iter()
+                .map(|l| ListItem::new(l.clone()))
+                .collect()
+        };
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", self.t("title.engine"))),
+        );
+        frame.render_widget(list, chunks[0]);
+
+        let footer_text = match &self.pending {
+            Some((_, prompt)) => prompt.clone(),
+            None => format!("> {}", self.engine_prompt),
+        };
+        frame.render_widget(
+            Paragraph::new(footer_text).block(Block::default().borders(Borders::ALL)),
+            chunks[1],
+        );
+    }
 }
 
 /// Run the terminal UI until the user quits.
@@ -926,6 +1087,7 @@ pub async fn run(
                         app.handle_device_result(nonce, result).await
                     }
                     UiEvent::Completion(result) => app.handle_completion(result),
+                    UiEvent::Engine(event) => app.handle_engine_event(event),
                 }
             }
             _ = tick.tick() => {
