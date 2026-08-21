@@ -122,6 +122,18 @@ const EN: Catalog = &[
         "info.connected",
         "{name} <{email}>  ·  provider: {provider}  ·  pongs: {pongs}",
     ),
+    (
+        "provider.offline.nothing",
+        "No provider configured — set ANTHROPIC_API_KEY (or another provider's key) or LIGHT_OLLAMA=1",
+    ),
+    (
+        "provider.offline.missing_key",
+        "Provider '{selector}' selected but {key} is not set — falling back to offline",
+    ),
+    (
+        "provider.offline.base_url",
+        "{var} was rejected — falling back to offline",
+    ),
     ("status.ask_empty", "Usage: /ask <prompt>"),
     (
         "status.ask_not_connected",
@@ -145,6 +157,10 @@ const EN: Catalog = &[
     ("error.decode", "Unexpected response from the server"),
     ("error.bad_message", "Could not parse server message"),
     ("error.ws_closed", "Connection closed"),
+    (
+        "error.no_provider_configured",
+        "No provider configured — set an API key or LIGHT_OLLAMA=1",
+    ),
     ("engine.plan_proposed", "plan proposed: {summary}"),
     ("engine.plan_approved", "plan approved"),
     ("engine.plan_rejected", "plan rejected"),
@@ -282,6 +298,18 @@ const ES: Catalog = &[
         "info.connected",
         "{name} <{email}>  ·  proveedor: {provider}  ·  pongs: {pongs}",
     ),
+    (
+        "provider.offline.nothing",
+        "No hay proveedor configurado — define ANTHROPIC_API_KEY (o la clave de otro proveedor) o LIGHT_OLLAMA=1",
+    ),
+    (
+        "provider.offline.missing_key",
+        "Proveedor '{selector}' seleccionado pero {key} no está definida — usando modo sin conexión",
+    ),
+    (
+        "provider.offline.base_url",
+        "{var} fue rechazada — usando modo sin conexión",
+    ),
     ("status.ask_empty", "Uso: /ask <indicación>"),
     (
         "status.ask_not_connected",
@@ -314,6 +342,10 @@ const ES: Catalog = &[
         "No se pudo analizar el mensaje del servidor",
     ),
     ("error.ws_closed", "Conexión cerrada"),
+    (
+        "error.no_provider_configured",
+        "No hay proveedor configurado — define una clave de API o LIGHT_OLLAMA=1",
+    ),
     ("engine.plan_proposed", "plan propuesto: {summary}"),
     ("engine.plan_approved", "plan aprobado"),
     ("engine.plan_rejected", "plan rechazado"),
