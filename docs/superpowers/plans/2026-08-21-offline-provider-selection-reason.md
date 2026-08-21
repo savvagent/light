@@ -79,8 +79,9 @@ overrides it.
 
 - [ ] Add `fn is_offline(&self) -> bool { false }` to `Provider` (default body) with a doc comment.
 - [ ] Override `is_offline() -> true` in `LocalProvider` (`crates/providers/src/local.rs`).
-- [ ] Add a unit test in `local.rs` asserting `LocalProvider::new().is_offline()` is `true` and a
-      `ScriptedProvider` is `false` (scripted's existing test module or selection tests).
+- [ ] Add a unit test in `local.rs` asserting `LocalProvider::new().is_offline()` is `true`, and a
+      test in `crates/providers/src/scripted.rs`'s test module asserting `ScriptedProvider` is
+      `false`.
 - [ ] Run `cargo test -p light-factory-engine-core -p light-factory-providers` (expect green).
 - [ ] Run `cargo fmt --all` and commit `engine-core: add Provider::is_offline seam`.
 
@@ -90,8 +91,11 @@ overrides it.
 **Interfaces:** consumes `Provider::is_offline`; emits `EventKind::Error { code:
 "no_provider_configured" }` + `TurnComplete { ok: false }`.
 
-- [ ] Add the guard at the top of `Session::run_turn` (`turn.rs:49`), before `propose_plan`,
-      emitting the error then returning (fail-closed, never calls the provider).
+- [ ] Add the guard at the top of `Session::run_turn` (`turn.rs:49`), before `propose_plan`:
+      `if self.provider.is_offline() { emit(Error { code: "no_provider_configured", message:
+      "no provider configured — set an API key or LIGHT_OLLAMA=1" }); emit(TurnComplete { ok:
+      false }); return; }` — emit **both** events, then return (fail-closed, never calls the
+      provider).
 - [ ] Add a test in `crates/engine/tests/turn.rs` that spawns a `Session` with `LocalProvider`,
       sends `SendPrompt`, and asserts the first matching event is
       `Error { code: "no_provider_configured" }` (never `invalid_plan`) followed by
