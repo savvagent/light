@@ -226,13 +226,14 @@ impl App {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
             KeyCode::Esc => self.leave_engine(),
-            KeyCode::Char('a') => self.engine_answer(true),
-            KeyCode::Char('d') => self.engine_answer(false),
             KeyCode::Enter => self.engine_send_prompt(),
             KeyCode::Backspace => {
                 self.engine_prompt.pop();
             }
-            KeyCode::Char(c) => self.engine_prompt.push(c),
+            KeyCode::Char(c) => match engine_approval_key(c, self.pending.is_some()) {
+                Some(approved) => self.engine_answer(approved),
+                None => self.engine_prompt.push(c),
+            },
             _ => {}
         }
         false
@@ -1107,6 +1108,19 @@ pub async fn run(
     result
 }
 
+/// Map an engine-mode letter key to an approval answer while an approval is pending.
+/// `a`/`d` approve/deny only when `pending` is set; otherwise they are ordinary input.
+fn engine_approval_key(c: char, pending: bool) -> Option<bool> {
+    if !pending {
+        return None;
+    }
+    match c {
+        'a' => Some(true),
+        'd' => Some(false),
+        _ => None,
+    }
+}
+
 /// Parse an `/ask <prompt>` command into the prompt, or `None` when the command is not an
 /// `/ask` with a non-empty prompt. `/ask` and `/ask   ` (empty prompt) are `None` so the caller
 /// can show a usage hint; `/askhello` (no word boundary) and other commands are also `None`.
@@ -1126,7 +1140,16 @@ fn parse_ask_command(command: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_ask_command;
+    use super::{engine_approval_key, parse_ask_command};
+
+    #[test]
+    fn approval_keys_only_fire_while_a_prompt_is_pending() {
+        assert_eq!(engine_approval_key('a', true), Some(true));
+        assert_eq!(engine_approval_key('d', true), Some(false));
+        assert_eq!(engine_approval_key('a', false), None);
+        assert_eq!(engine_approval_key('d', false), None);
+        assert_eq!(engine_approval_key('x', true), None);
+    }
 
     #[test]
     fn parses_an_ask_prompt() {
