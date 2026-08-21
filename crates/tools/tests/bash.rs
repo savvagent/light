@@ -5,9 +5,7 @@ use serde_json::json;
 #[tokio::test]
 async fn runs_a_program_with_args() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = BashTool {
-        workspace_root: dir.path().to_path_buf(),
-    };
+    let tool = BashTool::new(dir.path().to_path_buf());
 
     let out = tool
         .call(json!({ "program": "echo", "args": ["hello", "world"] }))
@@ -24,9 +22,7 @@ async fn does_not_interpret_shell_metacharacters() {
     let canary = dir.path().join("canary.txt");
     std::fs::write(&canary, "intact").unwrap();
 
-    let tool = BashTool {
-        workspace_root: dir.path().to_path_buf(),
-    };
+    let tool = BashTool::new(dir.path().to_path_buf());
 
     // If a shell were involved, `;` would chain a second command and delete the canary.
     let out = tool
@@ -44,9 +40,7 @@ async fn does_not_interpret_shell_metacharacters() {
 #[tokio::test]
 async fn rejects_a_program_containing_a_path_separator() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = BashTool {
-        workspace_root: dir.path().to_path_buf(),
-    };
+    let tool = BashTool::new(dir.path().to_path_buf());
 
     let err = tool
         .call(json!({ "program": "/bin/sh", "args": ["-c", "echo pwned"] }))
@@ -58,13 +52,78 @@ async fn rejects_a_program_containing_a_path_separator() {
 #[tokio::test]
 async fn non_zero_exit_is_reported_not_raised() {
     let dir = tempfile::tempdir().unwrap();
-    let tool = BashTool {
-        workspace_root: dir.path().to_path_buf(),
-    };
+    let tool = BashTool::new(dir.path().to_path_buf());
 
     let out = tool
         .call(json!({ "program": "false", "args": [] }))
         .await
         .unwrap();
     assert_ne!(out["exit_code"], 0);
+}
+
+#[tokio::test]
+async fn a_command_reading_stdin_gets_eof_instead_of_blocking() {
+    // With stdin redirected to null, `cat` reaches EOF immediately instead of parking the turn
+    // waiting for terminal input.
+    let dir = tempfile::tempdir().unwrap();
+    let tool = BashTool::new(dir.path().to_path_buf());
+
+    let out = tool
+        .call(json!({ "program": "cat", "args": [] }))
+        .await
+        .unwrap();
+
+    assert_eq!(out["exit_code"], 0);
+}
+
+#[tokio::test]
+async fn a_command_longer_than_the_timeout_is_killed() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool =
+        BashTool::new(dir.path().to_path_buf()).with_timeout(std::time::Duration::from_millis(50));
+
+    let out = tool
+        .call(json!({ "program": "sleep", "args": ["60"] }))
+        .await
+        .unwrap();
+
+    assert_ne!(out["exit_code"], 0);
+    assert!(out["stderr"].as_str().unwrap().contains("timed out"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_timed_out_command_kills_its_whole_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("marker");
+    let tool =
+        BashTool::new(dir.path().to_path_buf()).with_timeout(std::time::Duration::from_millis(50));
+
+    // `sh` forks `sleep` (a grandchild). Killing only the direct child would leave `sleep`
+    // running long enough to write the marker; killing the group must stop it.
+    let out = tool
+        .call(json!({ "program": "sh", "args": ["-c", "sleep 1; touch marker"] }))
+        .await
+        .unwrap();
+
+    assert_ne!(out["exit_code"], 0);
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert!(!marker.exists(), "grandchild survived the timeout kill");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_with_a_backgrounded_descendant_is_still_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool =
+        BashTool::new(dir.path().to_path_buf()).with_timeout(std::time::Duration::from_millis(200));
+
+    // `sh` exits immediately but leaves `sleep` holding the stdout/stderr pipes open. The output
+    // drain must still be bounded, not block on the orphaned descendant.
+    let out = tool
+        .call(json!({ "program": "sh", "args": ["-c", "sleep 60 &"] }))
+        .await
+        .unwrap();
+
+    assert!(out["stderr"].as_str().unwrap().contains("timed out"));
 }
