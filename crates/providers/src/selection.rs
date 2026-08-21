@@ -332,7 +332,7 @@ pub(crate) fn resolve_base_url_for(
     })?;
     let var_name = base_url_var(choice).unwrap_or_default();
     resolve_base_url(override_value, default_base(choice), var_name)
-        .map_err(|r| anyhow::anyhow!(r.warning))
+        .map_err(|r| anyhow::anyhow!("{}", r.warning))
 }
 
 /// The production endpoint for a provider.

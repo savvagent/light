@@ -191,6 +191,10 @@ const EN: Catalog = &[
     ("provider.key.none", "none"),
     ("key.list", "keys: {list}"),
     ("status.model_set", "Model set to {model}"),
+    (
+        "status.settings_save_failed",
+        "Couldn't save settings: {error}",
+    ),
     ("status.model_empty", "Usage: /model <id>"),
     (
         "status.model_unsupported",
@@ -454,6 +458,10 @@ const ES: Catalog = &[
     ("provider.key.none", "ninguna"),
     ("key.list", "claves: {list}"),
     ("status.model_set", "Modelo cambiado a {model}"),
+    (
+        "status.settings_save_failed",
+        "No se pudieron guardar los ajustes: {error}",
+    ),
     ("status.model_empty", "Uso: /model <id>"),
     (
         "status.model_unsupported",

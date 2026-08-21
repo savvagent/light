@@ -84,7 +84,7 @@ struct ProviderRow {
 
 /// The connect modal's step. `rows` is carried through every step so "back" navigation can
 /// reconstruct the provider list without re-querying the keyring.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum ConnectStep {
     ProviderList {
         rows: Vec<ProviderRow>,
@@ -104,6 +104,47 @@ enum ConnectStep {
         error: Option<String>,
         from_key: bool,
     },
+}
+
+impl std::fmt::Debug for ConnectStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `KeyEntry.input` holds a plaintext API key and must never appear in a Debug rendering.
+        match self {
+            ConnectStep::ProviderList { rows, selected } => f
+                .debug_struct("ProviderList")
+                .field("rows", rows)
+                .field("selected", selected)
+                .finish(),
+            ConnectStep::KeyEntry {
+                rows,
+                provider,
+                input: _,
+            } => f
+                .debug_struct("KeyEntry")
+                .field("rows", rows)
+                .field("provider", provider)
+                .field("input", &"<redacted>")
+                .finish(),
+            ConnectStep::ModelList {
+                rows,
+                provider,
+                models,
+                selected,
+                fetching,
+                error,
+                from_key,
+            } => f
+                .debug_struct("ModelList")
+                .field("rows", rows)
+                .field("provider", provider)
+                .field("models", models)
+                .field("selected", selected)
+                .field("fetching", fetching)
+                .field("error", error)
+                .field("from_key", from_key)
+                .finish(),
+        }
+    }
 }
 
 /// The result of stepping the connect modal: advance to a new [`ConnectStep`], or close.
@@ -653,14 +694,18 @@ impl App {
         if let Some((provider, model)) = apply {
             self.settings.models.insert(provider.clone(), model.clone());
             self.settings.provider = Some(provider);
-            let _ = crate::settings::save(&self.settings);
-            self.rebuild_provider();
-            self.status = self.t_with("status.model_set", &[("model", model.as_str())]);
+            if let Err(e) = crate::settings::save(&self.settings) {
+                let err = e.to_string();
+                self.status = self.t_with("status.settings_save_failed", &[("error", &err)]);
+            } else {
+                self.rebuild_provider();
+                self.status = self.t_with("status.model_set", &[("model", model.as_str())]);
+            }
         }
         self.close_connect();
     }
 
-    fn begin_fetch(&mut self, provider: String) {
+    fn begin_fetch(&mut self, provider: String, key: Option<String>) {
         self.connect_nonce += 1;
         let nonce = self.connect_nonce;
         let events = self.events.clone();
@@ -669,10 +714,13 @@ impl App {
             let result = if provider == "ollama" {
                 list_ollama_models().await.map_err(|e| e.to_string())
             } else {
-                match crate::selection::resolve_key(&provider, store.as_ref()) {
-                    Some(key) => list_models(&provider, &key)
-                        .await
-                        .map_err(|e| e.to_string()),
+                // The just-typed key wins; a connected provider resolves its stored key here.
+                let key = match key {
+                    Some(k) => Some(k),
+                    None => crate::selection::resolve_key(&provider, store.as_ref()),
+                };
+                match key {
+                    Some(k) => list_models(&provider, &k).await.map_err(|e| e.to_string()),
                     None => Err(format!("no API key for {provider}")),
                 }
             };
@@ -741,6 +789,7 @@ impl App {
         }
         let transition = connect_step_next(&step, key);
 
+        let mut fetch_key = None;
         if let (
             ConnectStep::KeyEntry {
                 provider, input, ..
@@ -757,6 +806,7 @@ impl App {
                 ));
                 return false;
             }
+            fetch_key = Some(key_value);
         }
 
         match transition {
@@ -768,7 +818,7 @@ impl App {
                     ..
                 } = &next
                 {
-                    self.begin_fetch(provider.clone());
+                    self.begin_fetch(provider.clone(), fetch_key);
                 }
                 self.connect = Some(next);
             }
@@ -1575,6 +1625,13 @@ impl App {
                     mask(input),
                     Style::default().add_modifier(Modifier::REVERSED),
                 )));
+                if let Some(err) = &self.error {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        err.clone(),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
             }
             ConnectStep::ModelList {
                 provider,
@@ -2106,7 +2163,7 @@ mod tests {
     use tokio::sync::broadcast::error::RecvError;
     use tokio::sync::mpsc;
 
-    fn test_app() -> App {
+    fn test_app_with_store(store: Arc<dyn CredentialStore>) -> App {
         let config = Config::from_url("http://localhost:8080").unwrap();
         let provider: Arc<dyn Provider> = Arc::new(LocalProvider::new());
         let provider_info = ProviderInfo {
@@ -2116,7 +2173,6 @@ mod tests {
             selected_by: None,
             warnings: Vec::new(),
         };
-        let store: Arc<dyn CredentialStore> = Arc::new(MemStore::new());
         let (events, _rx) = mpsc::unbounded_channel::<UiEvent>();
         App::new(
             config,
@@ -2127,6 +2183,27 @@ mod tests {
             None,
             events,
         )
+    }
+
+    fn test_app() -> App {
+        test_app_with_store(Arc::new(MemStore::new()))
+    }
+
+    /// A store whose `set` always fails, for exercising the keyring-failure branch.
+    struct FailingStore;
+
+    impl CredentialStore for FailingStore {
+        fn get(&self, _provider: &str) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn set(&self, _provider: &str, _key: &str) -> anyhow::Result<()> {
+            anyhow::bail!("keyring unavailable")
+        }
+
+        fn delete(&self, _provider: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -2389,6 +2466,108 @@ mod tests {
             connect_step_next(&step, key(KeyCode::Down)),
             ConnectTransition::Step(ConnectStep::ProviderList { selected: 1, .. })
         ));
+    }
+
+    fn model_list_step(models: Vec<String>, fetching: bool) -> ConnectStep {
+        ConnectStep::ModelList {
+            rows: vec![],
+            provider: "openai".to_string(),
+            models,
+            selected: 0,
+            fetching,
+            error: None,
+            from_key: false,
+        }
+    }
+
+    #[test]
+    fn handle_models_ignores_stale_nonces() {
+        let mut app = test_app();
+        app.connect_nonce = 5;
+        app.connect = Some(model_list_step(vec![], true));
+        app.handle_models(4, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+        assert!(matches!(
+            app.connect,
+            Some(ConnectStep::ModelList {
+                fetching: true,
+                models,
+                ..
+            }) if models.is_empty()
+        ));
+    }
+
+    #[test]
+    fn handle_models_fills_models_for_a_matching_nonce() {
+        let mut app = test_app();
+        app.connect_nonce = 5;
+        app.connect = Some(model_list_step(vec![], true));
+        app.handle_models(
+            5,
+            "openai".to_string(),
+            Ok(vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]),
+        );
+        assert!(matches!(
+            app.connect,
+            Some(ConnectStep::ModelList {
+                fetching: false,
+                error: None,
+                models,
+                ..
+            }) if models == vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]
+        ));
+    }
+
+    #[test]
+    fn handle_models_surfaces_a_fetch_error() {
+        let mut app = test_app();
+        app.connect_nonce = 5;
+        app.connect = Some(model_list_step(vec![], true));
+        app.handle_models(5, "openai".to_string(), Err("bad key".to_string()));
+        assert!(matches!(
+            app.connect,
+            Some(ConnectStep::ModelList {
+                fetching: false,
+                error: Some(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn handle_connect_key_blank_key_stays_on_key_entry() {
+        let mut app = test_app();
+        app.connect = Some(ConnectStep::KeyEntry {
+            rows: vec![],
+            provider: "openai".to_string(),
+            input: "  ".to_string(),
+        });
+        app.handle_connect_key(key(KeyCode::Enter));
+        assert!(matches!(app.connect, Some(ConnectStep::KeyEntry { .. })));
+    }
+
+    #[test]
+    fn handle_connect_key_keyring_failure_sets_error_and_stays() {
+        let mut app = test_app_with_store(Arc::new(FailingStore));
+        app.connect = Some(ConnectStep::KeyEntry {
+            rows: vec![],
+            provider: "openai".to_string(),
+            input: "sk-x".to_string(),
+        });
+        app.handle_connect_key(key(KeyCode::Enter));
+        assert!(matches!(app.connect, Some(ConnectStep::KeyEntry { .. })));
+        assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn connect_step_debug_redacts_the_key() {
+        let step = ConnectStep::KeyEntry {
+            rows: vec![],
+            provider: "openai".to_string(),
+            input: "sk-super-secret".to_string(),
+        };
+        let rendered = format!("{step:?}");
+        assert!(!rendered.contains("sk-super-secret"));
+        assert!(rendered.contains("<redacted>"));
     }
 
     #[test]
