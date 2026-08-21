@@ -5,4 +5,7 @@
 //! boundary between client and server.
 
 pub mod auth;
+pub mod sensitive;
 pub mod wire;
+
+pub use sensitive::{SENSITIVE_MARKERS, is_sensitive};
