@@ -22,3 +22,9 @@ belongs in the active directories.
 | `port-llm-providers` | Ported otto's seven providers, the `base_url` trust boundary, and env-driven selection with a TUI `/ask` command |
 | `offline-provider-selection-reason` | Surfaces *why* provider selection fell back to the offline `LocalProvider` (`OfflineReason` + warnings), reports `no_provider_configured` instead of `invalid_plan`, and shows the reason in the TUI engine pane |
 | `provider-credentials-ui` | In-client provider/model/key commands (`/provider`, `/model`, `/key`) with OS-keyring credential storage, masked input, redaction, and injectable `Selection`/`SelectedBy` selection |
+| `engine-core-loose-ends` | Resolved the five engine-core loose ends from issue #21: removed dead step events (semver-major `0.1.1` → `0.2.0`), dropped the write-only `Session::approved`, tore engine mode down on leave, rejected mid-turn prompts visibly, and errored on non-UTF-8 `fs.read` |
+| `bash-stdin-timeout` | Bounded `bash` tool calls — null stdin, wall-clock timeout killing the whole process group, kill-on-drop (plan only; fast-path bug fix) |
+| `engine-prompt-ad-keys` | TUI engine prompt `a`/`d` approve/deny only while a decision is pending, typed as text otherwise (plan only) |
+| `gate-bash-sensitive-floor` | `PlanGate` now floor-checks every command argument, so an `ArgPattern::Any` scope cannot read `.env` or overwrite `.git/config` (plan only) |
+| `tui-broadcast-lag` | Engine-event forwarder continues on `RecvError::Lagged` and surfaces a "dropped events" notice instead of terminating (plan only) |
+| `turn-step-budget-transcript` | Bounded the execute loop with `MAX_STEPS_PER_TURN` and truncated transcript entries with `MAX_TRANSCRIPT_ENTRY_CHARS` (plan only) |

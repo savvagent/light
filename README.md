@@ -46,33 +46,34 @@ docs/superpowers/    design specs and implementation plans (active → archive o
 # 1. Toolchain
 rustup show            # installs the pinned 1.97.0 + rustfmt + clippy
 
-# 2. Postgres (local dev, no sudo)
-initdb -U light --auth=trust --encoding=UTF8 --locale=C.UTF-8 -D .pgdata
-pg_ctl -D .pgdata -o "-p 5432 -k /tmp/opencode -c listen_addresses=127.0.0.1" \
-       -l /tmp/opencode/pg.log start
-# may need restarting each session
-
-# 3. Environment (server only)
+# 2. Environment (server only)
 cp .env.example .env   # or create .env by hand — see below
 
-# 4. Web deps (web client only)
+# 3. Web deps (web client only)
 cd web && npm ci
 ```
 
-## Build & run
+Postgres is initialized and started by the dev-server script (see below) — no manual
+`initdb`/`pg_ctl` needed, and it never wipes an existing cluster.
+
+## Run
 
 ```sh
-# Everything
-cargo build --workspace
+# Server: starts PostgreSQL (idempotent, keeps existing data) and runs the server
+./scripts/dev-server.sh
 
-# Server (axum HTTP + WebSocket)
-cargo run -p light-factory-server          # runs migrations on startup
-
-# TUI (the product)
-cargo run -p light-factory                 # or ./target/release/light-factory
+# TUI (the product), in a second terminal
+./scripts/dev-tui.sh
 
 # Web SPA (auth + device approval), needs the server running
 cd web && npm run dev                       # http://localhost:5173
+```
+
+The scripts just wrap `cargo run`, so the underlying commands are:
+
+```sh
+cargo run -p light-factory-server          # runs migrations on startup
+cargo run -p light-factory-tui             # binary: light-factory
 ```
 
 ## Test & lint

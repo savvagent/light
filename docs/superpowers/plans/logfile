@@ -1,0 +1,2 @@
+2026-08-21 11:00:47.319 MDT [152938] LOG:  redirecting log output to logging collector process
+2026-08-21 11:00:47.319 MDT [152938] HINT:  Future log output will appear in directory "log".

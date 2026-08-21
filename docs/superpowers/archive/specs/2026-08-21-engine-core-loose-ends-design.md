@@ -1,7 +1,7 @@
 # Engine Core Loose Ends — Design
 
 **Date:** 2026-08-21
-**Status:** DRAFT — resolves the five loose ends from the engine core slice review
+**Status:** IMPLEMENTED — resolves the five loose ends from the engine core slice review
 
 > **Implements:** GitHub issue #21
 
