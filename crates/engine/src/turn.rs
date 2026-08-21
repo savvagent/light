@@ -16,6 +16,24 @@ use crate::session::Session;
 /// Consecutive gate denials tolerated before the turn aborts.
 pub const MAX_CONSECUTIVE_DENIALS: usize = 3;
 
+/// The maximum number of execute-loop iterations (one provider round-trip each) a single turn
+/// may make before it is stopped as runaway.
+pub const MAX_STEPS_PER_TURN: usize = 100;
+
+/// The maximum number of characters kept per transcript entry before truncation, so a single
+/// large `fs.read` result cannot dominate the re-rendered prompt.
+const MAX_TRANSCRIPT_ENTRY_CHARS: usize = 4096;
+
+/// Truncate a transcript entry to [`MAX_TRANSCRIPT_ENTRY_CHARS`] characters, tagging the cut.
+fn transcript_entry(line: String) -> String {
+    if line.len() <= MAX_TRANSCRIPT_ENTRY_CHARS {
+        return line;
+    }
+    let mut truncated: String = line.chars().take(MAX_TRANSCRIPT_ENTRY_CHARS).collect();
+    truncated.push_str("… [truncated]");
+    truncated
+}
+
 #[derive(Deserialize)]
 struct ToolCall {
     #[serde(default)]
@@ -126,8 +144,20 @@ impl Session {
         let gate = PlanGate::new(Some(plan.scope.clone()));
         let mut transcript: Vec<String> = Vec::new();
         let mut denials = 0usize;
+        let mut steps = 0usize;
 
         loop {
+            if steps >= MAX_STEPS_PER_TURN {
+                self.emit(EventKind::Error {
+                    code: "step_budget_exceeded".into(),
+                    message: format!(
+                        "the turn exceeded its {MAX_STEPS_PER_TURN}-step budget and was stopped"
+                    ),
+                });
+                return false;
+            }
+            steps += 1;
+
             if !self.wait_if_paused(commands).await {
                 return false;
             }
@@ -178,7 +208,7 @@ impl Session {
                 Decision::Allow => {}
                 Decision::Deny => {
                     denials += 1;
-                    transcript.push(format!("{name} -> denied: unknown tool"));
+                    transcript.push(transcript_entry(format!("{name} -> denied: unknown tool")));
                     if denials >= MAX_CONSECUTIVE_DENIALS {
                         return false;
                     }
@@ -194,10 +224,10 @@ impl Session {
 
                     if !self.await_action_decision(request_id, commands).await {
                         denials += 1;
-                        transcript.push(format!(
+                        transcript.push(transcript_entry(format!(
                             "{name} -> denied by the human: {}",
                             describe(&reason)
-                        ));
+                        )));
                         if denials >= MAX_CONSECUTIVE_DENIALS {
                             return false;
                         }
@@ -208,8 +238,8 @@ impl Session {
 
             denials = 0;
             match self.dispatch(&name, args).await {
-                Ok(result) => transcript.push(format!("{name} -> {result}")),
-                Err(e) => transcript.push(format!("{name} -> error: {e}")),
+                Ok(result) => transcript.push(transcript_entry(format!("{name} -> {result}"))),
+                Err(e) => transcript.push(transcript_entry(format!("{name} -> error: {e}"))),
             }
         }
     }
@@ -307,5 +337,38 @@ fn describe(reason: &GateReason) -> String {
         GateReason::SensitiveFloor { path } => {
             format!("sensitive path ({})", path.display())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_TRANSCRIPT_ENTRY_CHARS, transcript_entry};
+
+    #[test]
+    fn short_entries_pass_through_unchanged() {
+        assert_eq!(
+            transcript_entry("fs.read -> hello".into()),
+            "fs.read -> hello"
+        );
+    }
+
+    #[test]
+    fn long_entries_are_truncated_and_tagged() {
+        let long = "x".repeat(10_000);
+        let out = transcript_entry(long);
+        assert!(out.ends_with("[truncated]"));
+        assert!(out.len() < 10_000);
+        assert_eq!(
+            out.chars().count(),
+            MAX_TRANSCRIPT_ENTRY_CHARS + "… [truncated]".chars().count()
+        );
+    }
+
+    #[test]
+    fn truncation_never_splits_a_multibyte_char() {
+        let long = "é".repeat(MAX_TRANSCRIPT_ENTRY_CHARS + 1);
+        let out = transcript_entry(long);
+        assert!(out.ends_with("[truncated]"));
+        assert!(!out.ends_with('é'));
     }
 }

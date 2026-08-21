@@ -18,6 +18,7 @@ const PLAN_JSON: &str = r#"```json
 const WRITE_JSON: &str = r#"{"tool":"fs.write","args":{"path":"notes.txt","contents":"hello"}}"#;
 const OUT_OF_SCOPE_JSON: &str =
     r#"{"tool":"fs.write","args":{"path":"Cargo.toml","contents":"x"}}"#;
+const READ_JSON: &str = r#"{"tool":"fs.read","args":{"path":"notes.txt"}}"#;
 const DONE_JSON: &str = r#"{"done": true}"#;
 
 fn provider(execute_response: &str) -> Arc<dyn Provider> {
@@ -209,4 +210,39 @@ async fn an_out_of_scope_write_asks_instead_of_executing() {
     let kind = next_matching(&mut events, |k| matches!(k, EventKind::TurnComplete { .. })).await;
     assert!(matches!(kind, EventKind::TurnComplete { ok: false }));
     assert!(!dir.path().join("Cargo.toml").exists());
+}
+
+#[tokio::test]
+async fn the_step_budget_stops_a_turn_that_never_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "hello").unwrap();
+    let ws = Arc::new(LocalWorkspace::new(dir.path().to_path_buf()).unwrap());
+    let id = SessionId::new();
+    let handle = Session::spawn(id, ws, provider(READ_JSON));
+    let mut events = handle.subscribe();
+
+    handle.send(Command::SendPrompt {
+        session: id,
+        text: "read forever".into(),
+    });
+    let kind = next_matching(&mut events, |k| matches!(k, EventKind::PlanProposed { .. })).await;
+    let EventKind::PlanProposed { plan_id, .. } = kind else {
+        unreachable!()
+    };
+    handle.send(Command::ApprovePlan {
+        session: id,
+        plan_id,
+        approved: true,
+    });
+
+    // The in-scope read never returns `done`, so the turn runs until the step budget trips.
+    let kind = next_matching(
+        &mut events,
+        |k| matches!(k, EventKind::Error { code, .. } if code == "step_budget_exceeded"),
+    )
+    .await;
+    assert!(matches!(kind, EventKind::Error { .. }));
+
+    let kind = next_matching(&mut events, |k| matches!(k, EventKind::TurnComplete { .. })).await;
+    assert!(matches!(kind, EventKind::TurnComplete { ok: false }));
 }
