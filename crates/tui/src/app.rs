@@ -243,7 +243,7 @@ impl App {
     }
 
     fn enter_engine(&mut self) -> anyhow::Result<()> {
-        let (provider, _info) = crate::provider::build();
+        let (provider, info) = crate::provider::build();
 
         let mut engine = Engine::new(provider);
         let session = engine.create_session(std::env::current_dir()?)?;
@@ -272,6 +272,13 @@ impl App {
         self.engine_session = Some(session);
         self.engine_forward_task = Some(forwarder);
         self.engine_log.clear();
+        for warning in info.warnings {
+            self.engine_log.push(warning);
+        }
+        if let Some(reason) = &info.offline {
+            self.engine_log
+                .push(crate::provider::offline_notice(self.config.lang, reason));
+        }
         self.engine_prompt.clear();
         self.pending = None;
         self.mode = Mode::Engine;

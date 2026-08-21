@@ -3,7 +3,7 @@ use std::sync::Arc;
 use light_factory_engine::session::Session;
 use light_factory_engine_core::traits::Provider;
 use light_factory_protocol::session::{Command, EventKind, SessionId};
-use light_factory_providers::ScriptedProvider;
+use light_factory_providers::{LocalProvider, ScriptedProvider};
 use light_factory_tools::LocalWorkspace;
 use tokio::sync::broadcast::Receiver;
 
@@ -46,6 +46,29 @@ async fn next_matching(
             return ev.kind;
         }
     }
+}
+
+#[tokio::test]
+async fn an_offline_provider_reports_no_provider_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Arc::new(LocalWorkspace::new(dir.path().to_path_buf()).unwrap());
+    let id = SessionId::new();
+    let handle = Session::spawn(id, ws, Arc::new(LocalProvider::new()));
+    let mut events = handle.subscribe();
+
+    handle.send(Command::SendPrompt {
+        session: id,
+        text: "write a note".into(),
+    });
+
+    let kind = next_matching(&mut events, |k| matches!(k, EventKind::Error { .. })).await;
+    let EventKind::Error { code, .. } = kind else {
+        unreachable!()
+    };
+    assert_eq!(code, "no_provider_configured");
+
+    let kind = next_matching(&mut events, |k| matches!(k, EventKind::TurnComplete { .. })).await;
+    assert!(matches!(kind, EventKind::TurnComplete { ok: false }));
 }
 
 #[tokio::test]

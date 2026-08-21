@@ -51,6 +51,15 @@ impl Session {
         goal: &str,
         commands: &mut mpsc::UnboundedReceiver<Command>,
     ) {
+        if self.provider.is_offline() {
+            self.emit(EventKind::Error {
+                code: "no_provider_configured".into(),
+                message: "no provider configured — set an API key or LIGHT_OLLAMA=1".into(),
+            });
+            self.emit(EventKind::TurnComplete { ok: false });
+            return;
+        }
+
         let plan = match self.propose_plan(goal).await {
             Some(plan) => plan,
             None => {
