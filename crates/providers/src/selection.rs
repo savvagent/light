@@ -330,7 +330,12 @@ pub(crate) fn resolve_base_url_for(
     let choice = RemoteChoice::parse(id).ok_or_else(|| {
         anyhow::anyhow!("unknown provider '{id}'; expected anthropic|openai|gemini|deepseek|ollama")
     })?;
-    let var_name = base_url_var(choice).unwrap_or_default();
+    // A provider with no `*_BASE_URL` override var has a fixed endpoint: no operator input may
+    // reach it, so an override is ignored and the production default returned (this also keeps the
+    // rejection warning from carrying an empty variable name).
+    let Some(var_name) = base_url_var(choice) else {
+        return Ok(default_base(choice).to_string());
+    };
     resolve_base_url(override_value, default_base(choice), var_name)
         .map_err(|r| anyhow::anyhow!("{}", r.warning))
 }
@@ -796,6 +801,21 @@ mod tests {
         );
         assert!(
             resolve_base_url_for("openai", Some("http://evil.example.com".to_string())).is_err()
+        );
+    }
+
+    #[test]
+    fn resolve_base_url_for_ignores_overrides_for_fixed_endpoint_providers() {
+        // Anthropic/Gemini have no `*_BASE_URL` override var; an override must be ignored (default
+        // returned), never honored — there is no operator-controlled variable to receive the key.
+        assert_eq!(
+            resolve_base_url_for("anthropic", Some("https://evil.example.com".to_string()))
+                .unwrap(),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            resolve_base_url_for("gemini", Some("https://evil.example.com".to_string())).unwrap(),
+            "https://generativelanguage.googleapis.com"
         );
     }
 
