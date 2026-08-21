@@ -57,6 +57,8 @@ mid-turn `SendPrompt` with a stable error; `FsReadTool` rejects non-UTF-8 bytes.
 
 - [x] Emit `Error { code: "turn_in_progress" }` from `await_plan_decision`,
       `await_action_decision`, and `wait_if_paused` on a `SendPrompt`.
+- [x] Drain buffered commands (`try_recv`) at the top of every execute iteration so a prompt
+      sent during active execution is rejected at the next boundary, not silently queued.
 - [x] Add `error.turn_in_progress` to `EN`/`ES`.
 - [x] Add a turn test asserting the rejection then a normal plan approval.
 

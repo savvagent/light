@@ -1,4 +1,4 @@
-//! The session actor: owns a workspace, the approved plan, and the event sequence.
+//! The session actor: owns a workspace, the provider handle, and the event sequence.
 
 use std::sync::Arc;
 

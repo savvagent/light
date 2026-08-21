@@ -30,8 +30,10 @@ resources, or silently drop user input.
 4. **Reject mid-turn prompts visibly.** The decision loops in the turn machine
    (`await_plan_decision`, `await_action_decision`, `wait_if_paused`) currently drop a
    `SendPrompt` via a catch-all arm after the TUI has echoed it. They now emit
-   `EventKind::Error { code: "turn_in_progress" }` so the user sees the rejection instead of
-   silence.
+   `EventKind::Error { code: "turn_in_progress" }`. `wait_if_paused` also drains any buffered
+   commands (via `try_recv`) at the top of every execute iteration, so a prompt that arrives
+   while the turn is actively executing is rejected at the next iteration boundary rather than
+   silently queued to run as a fresh turn.
 5. **Error on non-UTF-8 `fs.read`.** `FsReadTool` used `String::from_utf8_lossy`, silently
    corrupting binary files into the transcript. It now errors (`fs.read: <path> is not valid
    UTF-8`), which the model sees as a tool error it can react to.
@@ -47,7 +49,8 @@ here); persisting sessions; a queue for mid-turn prompts (rejection is chosen ov
 
 - **Rejection over queueing** for mid-turn prompts: queueing would require buffering and a
   re-dispatch order that is unspecified; a visible rejection is simpler and leaves the user in
-  control.
+  control. A `SendPrompt` that races the final execute iteration's provider call may still be
+  processed as the next turn, an accepted and bounded edge.
 - **Removal over fake emission** for step events: emitting `StepStarted`/`StepFinished` without a
   real step boundary would be dishonest progress reporting.
 
