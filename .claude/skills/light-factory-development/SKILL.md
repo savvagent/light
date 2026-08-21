@@ -18,12 +18,13 @@ If you are working in any other repository, use `general-development`.
 ## Why this shape
 
 The spine mirrors what this repository builds: light-factory is a **human-in-the-loop** agentic
-platform — plan-first approval + risk-tiered gates, where the human owns
-planning/architecture/judgment and the agent owns mechanical execution within approved guardrails.
+platform — plan-first approval, where the human owns planning/architecture/judgment and the agent
+owns mechanical execution within the approved plan's scope.
 The workflow below is the same loop applied to the repo itself: a plan document first (the
 approval gate), implementation against it (the mechanical execution), and the repo's own test
-suite as the Verifier. `STATUS.md` describes the *intended* destination, not necessarily the
-current state; `docs/superpowers/plans/` (latest plan) records where the build currently stands.
+suite as the Verifier. `ARCHITECTURE.md` describes the *intended* destination and marks what is
+built in its "Current state" table; `docs/superpowers/plans/` (latest plan) records where the build
+currently stands.
 
 ## The Iron Law
 
@@ -153,14 +154,14 @@ one-sentence AC → STOP. Write the spec. The fast-path is for genuine trivialit
 | Plan storage | **Repo file, committed.** `docs/superpowers/plans/YYYY-MM-DD-<slug>.md` — same rule. |
 | Plan format | Goal / Architecture / Tech Stack / "**Spec:** … read it first" / Global Constraints / File Structure table / Task Order & Rationale / per-task `- [ ]` steps with failing-test-first TDD and a final format-and-commit step. The plan opens with the "For agentic workers: REQUIRED SUB-SKILL" note pointing at `superpowers:subagent-driven-development` / `executing-plans`. |
 | Record-as-shipped | On completion, update the spec's `> **Status:**` to IMPLEMENTED, mark the plan's phases complete, and commit as `docs: record <…> as shipped` (e.g. `docs: record the device authorization grant as shipped`). |
-| Architecture caveat | `STATUS.md` describes the full intended design, including the engine core that does not exist yet (plan-first + risk-tiered gates, Command/Event protocol, Slack/JIRA/GitHub integrations, token metering) — check the latest `docs/superpowers/plans/` for what is actually shipped before assuming. `STATUS.md` itself can also lag the code (e.g. it may still mention a `token_balance` that migrations dropped). Read the code. |
-| Test command | `cargo test --workspace`. Per crate: `cargo test -p light-factory-<crate> [filter]`. The persistence integration test (`crates/persistence/tests/pg_store.rs`) reads `DATABASE_URL` and **skips** when PostgreSQL is unavailable — the suite is not fully offline; a local dev cluster is described in `STATUS.md`. |
+| Architecture caveat | `ARCHITECTURE.md` describes the full intended design, including the engine core that does not exist yet (plan-first approval, Command/Event protocol, agent-to-agent bus, Slack/JIRA/GitHub integrations) — its "Current state" table marks what is built, and the latest `docs/superpowers/plans/` records where the build stands. Docs can still lag the code. Read the code. |
+| Test command | `cargo test --workspace`. Per crate: `cargo test -p light-factory-<crate> [filter]`. The persistence integration test (`crates/persistence/tests/pg_store.rs`) reads `DATABASE_URL` and **skips** when PostgreSQL is unavailable — the suite is not fully offline; a local dev cluster is described in `ARCHITECTURE.md`. |
 | Lint / format | `cargo clippy --workspace --all-targets -D warnings` and `cargo fmt --all`. **Run `cargo fmt --all` before every Rust commit** (rustfmt is pinned in `rust-toolchain.toml`). |
 | Frontend | `web/` is a Svelte 5 SPA (Vite), **not a Cargo crate** — `cargo build/test --workspace` must never require node. Web build: `cd web && npm run build`; deploy: `npm run deploy` (wrangler → Cloudflare Pages). |
 | Known pre-existing failure | None known at the time of writing (2026-08). Do not treat a pre-existing failure as a regression you caused; if the suite was green on `master` before your branch, a new failure is yours. |
 | Versioning | `rust-toolchain.toml` pins the toolchain (1.95.0); edition 2024. **Semver is a hard requirement (Non-Negotiable Rule 6):** wire-type and public-API changes are additive-only (semver-minor); a breaking change is semver-major — the 0.x minor-position bump while crates are pre-1.0 — and bumps the affected crate(s)' `version` in `Cargo.toml` within the same PR, documented in the spec. |
 
-Full convention reference in `STATUS.md` at the repo root. The above is the load-bearing subset for
+Full convention reference in `ARCHITECTURE.md` at the repo root. The above is the load-bearing subset for
 this workflow.
 
 ## Load-Bearing Invariants (the "auth spine" — get these right)
@@ -206,8 +207,10 @@ step below checks them:
    a field or variant breaks the protocol and is semver-major: version bump in the PR + explicit
    review, never an incidental refactor side-effect (Non-Negotiable Rule 6).
 9. **The product is human-in-the-loop — that is the architecture.** The engine core (not yet built;
-   the next milestone per `STATUS.md`) is plan-first approval + risk-tiered gates: the human owns
-   planning/architecture/judgment, the agent owns mechanical execution within approved guardrails.
+   the next milestone, designed in `docs/superpowers/specs/2026-08-20-engine-core-design.md`) is
+   plan-first approval: the agent proposes a structured plan, the human approves it once, and that
+   approval authorizes the whole plan. Guardrails catch *deviation* from the approved scope, plus a
+   sensitive-path floor that always asks. There is deliberately no per-tool risk-tier ladder.
    This is the *opposite* of otto's auto-apply model. Any edit-application path built later must be
    gated and fail-closed — never apply an edit without an explicit human approval. Nothing in this
    repo should silently widen an approval gate or bypass the human checkpoint.
@@ -356,7 +359,7 @@ existing specs' structure (read one first, e.g. the most recent design spec):
 - Status blockquote at top, e.g. `> **Status:** DRAFT — <one-line summary>` (updated to IMPLEMENTED at close-out)
 - Optional `> **Implements:**`, `> **Depends on:**`, `> **Blocks:**` links when the change is a phase of a larger plan
 - **Premise corrections** — if the task brief's premises do not survive contact with the repository
-  (a very common occurrence here; the codebase and `STATUS.md` are ahead of each other), record the
+  (a very common occurrence here; the codebase and `ARCHITECTURE.md` are ahead of each other), record the
   corrections explicitly instead of silently building to the wrong premise
 - **Scope** with **In:** and **Out:** — explicit non-goals
 - Numbered sections (§1, §2, …) for each component: shape, configuration, security properties,
@@ -583,7 +586,7 @@ PR gets ALL THREE dispatched in the same parallel batch, regardless of size:
 | Reviewer | Why |
 |---|---|
 | `rust-pro` (Rust expert) | Idiomatic Rust: ownership/lifetimes, error handling, no panics on untrusted input, `Send + Sync` async seams, test placement — against this repo's Rust conventions (tests next to code, MemStore for auth tests, offline-deterministic where possible). |
-| `architect-reviewer` (architect) | Architectural consistency: inward dependency flow (`protocol` → `auth` → `persistence` → `server` → `tui`), crate boundaries, trait-seam design, whether the change follows or erodes the documented architecture (`STATUS.md` locked decisions + latest plan), spec/plan alignment. |
+| `architect-reviewer` (architect) | Architectural consistency: inward dependency flow (`protocol` → `auth` → `persistence` → `server` → `tui`), crate boundaries, trait-seam design, whether the change follows or erodes the documented architecture (`ARCHITECTURE.md` + latest plan), spec/plan alignment. |
 | `security-auditor` (independent) | Security of the actual diff. **Receives ONLY the diff** — never the spec/plan/brief/PR-body summary (Non-Negotiable Rule 5). See the Independent Security Review template in `agent-prompts.md`. |
 
 The rust-pro and architect-reviewer reviews the actual diff (commit range), not the summary. Treat
@@ -696,7 +699,7 @@ The test suite does NOT auto-apply these. Verify whatever the change touched, ex
   and that `VITE_API_URL` points at the right backend origin.
 - **Database migrations** — if `crates/persistence/migrations/` changed: run
   `cargo test -p light-factory-persistence` against a local PostgreSQL (needs `DATABASE_URL`; the dev
-  cluster is described in `STATUS.md` — `pg_ctl -D .pgdata …`). Migrations are applied by
+  cluster is described in `ARCHITECTURE.md` — `pg_ctl -D .pgdata …`). Migrations are applied by
   `run_migrations` at server startup; new migrations must be additive (never rewrite an already-shipped
   migration) and must not break a fresh-cluster apply.
 - **CI** — if `.github/` changed (none exists yet): confirm the workflow files are valid and the jobs
@@ -805,7 +808,7 @@ Within each step you may calibrate effort to risk. You may NEVER eliminate a ste
 
 | Step | Cheapest valid form for a small change | Skip? |
 |---|---|---|
-| Convention reference | Skim STATUS.md + the latest plan + test command | NEVER |
+| Convention reference | Skim ARCHITECTURE.md + the latest plan + test command | NEVER |
 | Read source | 20-second skim of description + AC | NEVER |
 | Spec draft | 1-page spec with Assumptions + Brief + Scope (committed) | **Only** if fast-path criteria met |
 | Spec critique | 1 reviewer dispatch | **Only** when the spec is skipped under fast-path |

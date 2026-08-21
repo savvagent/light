@@ -223,7 +223,7 @@ Agent tool:
     - Units decomposed for independent testing?
     - Following file structure from the plan?
     - Did this change create or grow files significantly beyond what the task required?
-    - Repo-specific conventions (from STATUS.md and light-factory-development's Load-Bearing
+    - Repo-specific conventions (from ARCHITECTURE.md and light-factory-development's Load-Bearing
       Invariants):
       - Rust idioms: tests live next to code (#[cfg(test)] mod tests) or in tests/; MemStore for
         auth tests; offline-deterministic where possible (the PG integration test skips without
@@ -258,7 +258,7 @@ Agent tool:
     - The implementation actually achieves the spec's success criteria
     - No dead code, leftover debug, or skipped tests
     - Test coverage is reasonable for what was built
-    - Repo convention compliance (from STATUS.md + light-factory-development's Load-Bearing
+    - Repo convention compliance (from ARCHITECTURE.md + light-factory-development's Load-Bearing
       Invariants): inward dependency flow, auth spine intact, fail-closed auth preserved,
       secrets never returned/logged, wire types semver-minor, commit format `<scope>: <subject>`,
       no AI attribution, out-of-band surfaces (fly image/web bundle/migrations) handled and
@@ -288,7 +288,7 @@ Agent tool:
       gh pr diff <N>
       gh pr view <N> --json commits,files,title,body
 
-    Check against light-factory's Rust conventions (from STATUS.md):
+    Check against light-factory's Rust conventions (from ARCHITECTURE.md):
     - Idiomatic Rust: ownership/lifetimes, error handling, no panics on untrusted input
     - Trait seams are Send + Sync + async; the Store seam is held behind Arc<dyn Store>
     - Tests live next to code (#[cfg(test)] mod tests) or in tests/; MemStore for auth tests;
@@ -316,7 +316,7 @@ Agent tool:
       # Spec/plan (committed repo files): docs/superpowers/specs/<slug>-design.md,
       # docs/superpowers/plans/<slug>.md
 
-    Check against light-factory's architecture (STATUS.md "Locked decisions" + "Crate layout" —
+    Check against light-factory's architecture (ARCHITECTURE.md "Execution model" + "Crate layout" —
     the intended destination — and the latest plan for what is actually shipped):
     - Inward dependency flow preserved: protocol (serde only) → auth → persistence → server → tui;
       auth must never depend on a concrete persistence impl; persistence must never depend on server
