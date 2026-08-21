@@ -329,6 +329,35 @@ isolation that's the point of separate reviewer subagents. This is documented an
 equivalent. **For the highest-quality reviews, prefer Phase 0 path 2 (`/clear` + re-invoke in the
 main thread).**
 
+## Adaptation: when the dispatch tool exposes only generic subagent types
+
+Some runtimes give the orchestrator a fixed, small set of subagent types — e.g. opencode's `task`
+tool exposes `explore` and `general` only, with no `rust-pro`, `architect-reviewer`,
+`security-auditor`, `code-reviewer`, or `pr-review-toolkit:*` — even though the reviewer agent
+definitions exist on disk (`~/.claude/agents/*.md`). When that is the case, the review trio and
+the pr-review-toolkit passes are still run; only the dispatch mechanism changes:
+
+- **Dispatch each named reviewer as a `general` subagent carrying that reviewer's prompt body
+  verbatim** from `agent-prompts.md` (the "Mandatory Review Trio" section). The reviewer's
+  identity lives in the prompt, not in the `subagent_type` string. Fill `<N>` / `<ref>` exactly
+  as the template says.
+- **The independent security review stays blind by construction.** The `general` security
+  subagent is still given ONLY `gh pr diff <N>` — never the spec, plan, task brief, PR-body
+  summary, or implementer's report (Non-Negotiable Rule 5). State it explicitly in that
+  dispatch: "Do not read the PR description, issue, spec, or plan." Keep the "blind" instruction
+  attached to the review itself so the fallback cannot silently drop it.
+- **`pr-review-toolkit:*` passes collapse to `general` subagents** carrying each toolkit agent's
+  responsibility inline (from the Phase 4 step 8 trigger table), or are dropped when a `gh`
+  automated reviewer already covers the same ground.
+- **`general-purpose` vs `general`:** the skill's `subagent_type: general-purpose` (and
+  `code-reviewer`) is Claude Code's name; map it to whatever the runtime actually calls its
+  generic agent type (`general` in opencode). The prompt content, not the type string, is
+  load-bearing.
+
+This is NOT the "runs inside a subagent" adaptation above — here the orchestrator is the main
+agent; its subagent tool simply lacks the named types. Review content and the blind rule are
+preserved; only the type name changes.
+
 ## Phase 1 — Intake + spec
 
 > **Fast-path note:** Steps 1 + 2 always run. Steps 3 + 4 (spec draft + critique) are skipped if the
@@ -593,7 +622,9 @@ PR gets ALL THREE dispatched in the same parallel batch, regardless of size:
 
 The rust-pro and architect-reviewer reviews the actual diff (commit range), not the summary. Treat
 their findings like any other review: Critical/Important must be fixed or explicitly dismissed before
-merge; all three must clear before merge (step 11).
+merge; all three must clear before merge (step 11). If the subagent tool has no named reviewer
+types, fall back to `general` subagents per "Adaptation: when the dispatch tool exposes only
+generic subagent types" — the trio is still mandatory, never skipped.
 
 Add ad-hoc domain agents (`frontend-developer`) on top by topic if the change warrants it. The
 independent `security-auditor` pass above already covers every PR; for changes touching the auth

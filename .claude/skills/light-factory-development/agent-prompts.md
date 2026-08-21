@@ -271,6 +271,13 @@ Agent tool:
 
 ## Mandatory Review Trio — Phase 4 Step 8 — `subagent_type: rust-pro` / `architect-reviewer` / `security-auditor`
 
+> **Generic-subagent fallback.** If the dispatcher's subagent tool exposes only generic types
+> (e.g. opencode's `explore`/`general`, with no `rust-pro`/`architect-reviewer`/`security-auditor`
+> registered), dispatch each of the three reviewers below as a `general` subagent carrying the
+> same prompt body. The security review still receives ONLY `gh pr diff <N>` — never the spec,
+> plan, brief, or PR body — and you must say so in that dispatch. See "Adaptation: when the
+> dispatch tool exposes only generic subagent types" in SKILL.md.
+
 Every PR gets all three reviews, no exceptions (Non-Negotiable Rules 4–5). Capture the diff range
 first: `git log --oneline <merge-base>..HEAD` from inside the worktree, or use `gh pr diff <PR>`.
 Dispatch all three in the same parallel batch, each reading the actual diff, not the summary.
