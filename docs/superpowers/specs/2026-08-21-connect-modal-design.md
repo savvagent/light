@@ -111,11 +111,13 @@ variants resolve the base URL (env override → production default, reusing the 
 
 ```rust
 /// List model ids for a keyed provider against `base_url`. Normalizes ids, stable-sorts, dedups.
-pub async fn list_models_at(provider: &str, base_url: &str, key: &str) -> anyhow::Result<Vec<String>>
+/// `pub(crate)`: takes an already-validated base URL, so external callers cannot hit it with an
+/// unvalidated host. The public, validating entry point is [`list_models`].
+pub(crate) async fn list_models_at(provider: &str, base_url: &str, key: &str) -> anyhow::Result<Vec<String>>
 /// Resolve the base URL for `provider` and delegate to `list_models_at`.
 pub async fn list_models(provider: &str, key: &str) -> anyhow::Result<Vec<String>>
-/// List model ids from the local Ollama server at `base_url`.
-pub async fn list_ollama_models_at(base_url: &str) -> anyhow::Result<Vec<String>>
+/// List model ids from the local Ollama server at `base_url`. `pub(crate)` for the same reason.
+pub(crate) async fn list_ollama_models_at(base_url: &str) -> anyhow::Result<Vec<String>>
 /// Resolve the Ollama base URL and delegate to `list_ollama_models_at`.
 pub async fn list_ollama_models() -> anyhow::Result<Vec<String>>
 ```
