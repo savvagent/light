@@ -10,6 +10,11 @@ use crate::types::{CompleteRequest, CompleteResponse, Edit};
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn id(&self) -> &str;
+    /// Whether this provider is the offline fallback (performs no real completion). The engine
+    /// uses this to reject a turn up front rather than failing later on plan parsing.
+    fn is_offline(&self) -> bool {
+        false
+    }
     async fn complete(&self, req: CompleteRequest) -> anyhow::Result<CompleteResponse>;
 }
 

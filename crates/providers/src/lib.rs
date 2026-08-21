@@ -20,7 +20,7 @@ pub use local::LocalProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 pub use scripted::ScriptedProvider;
-pub use selection::{BuiltProvider, build_provider_from_env};
+pub use selection::{BuiltProvider, OfflineReason, build_provider_from_env};
 
 // Re-export the seam from engine-core for consumer convenience.
 pub use light_factory_engine_core::{CompleteRequest, CompleteResponse, Provider, Usage};
