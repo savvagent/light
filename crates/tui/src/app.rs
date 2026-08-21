@@ -645,7 +645,9 @@ impl App {
                 selected,
                 fetching: false,
                 ..
-            }) if !models.is_empty() => Some((provider.clone(), models[*selected].clone())),
+            }) => models
+                .get(*selected)
+                .map(|model| (provider.clone(), model.clone())),
             _ => None,
         };
         if let Some((provider, model)) = apply {
