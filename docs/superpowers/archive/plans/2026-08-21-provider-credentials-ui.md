@@ -61,13 +61,13 @@ UI wiring and i18n (depends on everything). Each task compiles and tests green b
 
 **Interfaces:** consumes `keyring`; produces `CredentialStore` trait + `KeyringStore`.
 
-- [ ] Add `keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service"] }` to `crates/tui/Cargo.toml`.
-- [ ] Add a failing test in `credentials.rs`: `CredentialStore` implemented for `HashMap<String,String>` round-trips `get`/`set`/`delete`; `delete` on a missing key is a no-op; `get` on a missing key returns `None`.
-- [ ] Run `cargo test -p light-factory-tui credentials` — expect it to fail to compile (trait/impl not yet written).
-- [ ] Implement `pub trait CredentialStore: Send + Sync` (`get`/`set`/`delete`), `pub struct KeyringStore` (service `"light-factory"`, account `<provider>` via `keyring::Entry`), and `impl CredentialStore for HashMap<String, String>`.
-- [ ] Run `cargo build -p light-factory-tui` — this validates the `sync-secret-service` backend compiles headlessly (the spec's build-risk check). If it fails to compile here, STOP and escalate per the spec's Risks § (do not weaken storage).
-- [ ] Export `pub mod credentials;` from `crates/tui/src/lib.rs`.
-- [ ] Run `cargo test -p light-factory-tui credentials` and `cargo fmt --all`, then commit `tui: add a keyring-backed credential store`.
+- [x] Add `keyring = { version = "3.6", features = ["apple-native", "windows-native", "sync-secret-service"] }` to `crates/tui/Cargo.toml`.
+- [x] Add a failing test in `credentials.rs`: `CredentialStore` implemented for `HashMap<String,String>` round-trips `get`/`set`/`delete`; `delete` on a missing key is a no-op; `get` on a missing key returns `None`.
+- [x] Run `cargo test -p light-factory-tui credentials` — expect it to fail to compile (trait/impl not yet written).
+- [x] Implement `pub trait CredentialStore: Send + Sync` (`get`/`set`/`delete`), `pub struct KeyringStore` (service `"light-factory"`, account `<provider>` via `keyring::Entry`), and `impl CredentialStore for HashMap<String, String>`.
+- [x] Run `cargo build -p light-factory-tui` — this validates the `sync-secret-service` backend compiles headlessly (the spec's build-risk check). If it fails to compile here, STOP and escalate per the spec's Risks § (do not weaken storage).
+- [x] Export `pub mod credentials;` from `crates/tui/src/lib.rs`.
+- [x] Run `cargo test -p light-factory-tui credentials` and `cargo fmt --all`, then commit `tui: add a keyring-backed credential store`.
 
 ### Task 2: Injectable `Selection` + `SelectedBy` in `providers`
 
@@ -76,17 +76,17 @@ UI wiring and i18n (depends on everything). Each task compiles and tests green b
 **Interfaces:** consumes nothing new (stays a leaf); produces `Selection`, `SelectedBy`,
 `build_provider(&Selection)`, `env_key_var(provider)`; preserves `build_provider_from_env()`.
 
-- [ ] Add failing tests to `selection.rs` `mod tests` for the new pure surface:
+- [x] Add failing tests to `selection.rs` `mod tests` for the new pure surface:
       (a) `build_provider` with `preferred = Some("openai")` + an openai key → `id()=="openai"` and `selected_by == Some(StoredPreference)`;
       (b) `preferred = Some("openai")` with no openai key but an anthropic key → offline with `NamedProviderMissingKey{selector:"openai",..}` (never misroutes), `selected_by == None`;
       (c) a `Selection` whose only key is `gemini` → `selected_by == Some(KeyPrecedence)`;
       (d) `ollama == true` → `selected_by == Some(OllamaEnv)` regardless of keys;
       (e) `env_key_var("openai") == Some("OPENAI_API_KEY")`, `env_key_var("ollama") == None`;
       (f) `build_provider_from_env()` still compiles and yields a `BuiltProvider` whose `provider.id()` is a known non-empty id (deterministic regardless of the ambient env — **no** assertion on `offline`, since the wrapper reads the real process env).
-- [ ] Run `cargo test -p light-factory-providers` — expect failures on the not-yet-added items.
-- [ ] Implement: add `pub enum SelectedBy { OllamaEnv, RemoteSelectorEnv, StoredPreference, KeyPrecedence }`; add `pub struct Selection { ollama, selector, preferred, keys, models, base_urls }`; add `pub fn build_provider(&Selection) -> BuiltProvider`; add `selected_by: Option<SelectedBy>` to `BuiltProvider`; rework `build_provider_from_env` to build a `Selection` from env and delegate to `build_provider`; add `pub fn env_key_var(provider: &str) -> Option<&'static str>`. **Drive every env read from `Selection`, not `std::env`:** thread the resolved key/model/base-url through `build_remote`, and replace the `std::env` reads in `select_remote`/`has_key`/`env_model`/`env_base_url` with lookups from the `Selection` (the env wrapper populates `Selection` from `std::env` in exactly one place). Keep the existing pure helpers (`choose`, `select_remote_from`, `resolve_base_url`, `default_model_*`) and their tests unchanged.
-- [ ] Re-export the new items from `crates/providers/src/lib.rs`.
-- [ ] Run `cargo test -p light-factory-providers`, `cargo clippy -p light-factory-providers --all-targets -D warnings`, `cargo fmt --all`, then commit `providers: add injectable provider selection`.
+- [x] Run `cargo test -p light-factory-providers` — expect failures on the not-yet-added items.
+- [x] Implement: add `pub enum SelectedBy { OllamaEnv, RemoteSelectorEnv, StoredPreference, KeyPrecedence }`; add `pub struct Selection { ollama, selector, preferred, keys, models, base_urls }`; add `pub fn build_provider(&Selection) -> BuiltProvider`; add `selected_by: Option<SelectedBy>` to `BuiltProvider`; rework `build_provider_from_env` to build a `Selection` from env and delegate to `build_provider`; add `pub fn env_key_var(provider: &str) -> Option<&'static str>`. **Drive every env read from `Selection`, not `std::env`:** thread the resolved key/model/base-url through `build_remote`, and replace the `std::env` reads in `select_remote`/`has_key`/`env_model`/`env_base_url` with lookups from the `Selection` (the env wrapper populates `Selection` from `std::env` in exactly one place). Keep the existing pure helpers (`choose`, `select_remote_from`, `resolve_base_url`, `default_model_*`) and their tests unchanged.
+- [x] Re-export the new items from `crates/providers/src/lib.rs`.
+- [x] Run `cargo test -p light-factory-providers`, `cargo clippy -p light-factory-providers --all-targets -D warnings`, `cargo fmt --all`, then commit `providers: add injectable provider selection`.
 
 ### Task 3: Extend persisted `Settings` with provider + models
 
@@ -94,10 +94,10 @@ UI wiring and i18n (depends on everything). Each task compiles and tests green b
 
 **Interfaces:** consumes serde; produces `Settings { lang, provider, models }` load/save.
 
-- [ ] Add failing tests to `settings.rs`: round-trip `provider` + `models`; a legacy `{"lang":"es"}` file still loads with `provider == None` and empty `models`; a corrupt file loads defaults (or `None` for the whole struct, matching current behavior).
-- [ ] Run `cargo test -p light-factory-tui settings` — expect failures.
-- [ ] Implement: make `Settings` public with `#[serde(default)] provider: Option<String>` and `#[serde(default)] models: BTreeMap<String,String>`; add `load()` / `save()` for the whole struct; **keep `load_lang`/`save_lang` as shims** — `load_lang` returns `load().lang`, `save_lang` does a load→set-`lang`→save round-trip so `/lang` never clobbers the new `provider`/`models` fields (call sites in `main.rs` and `app.rs:411` keep working unchanged).
-- [ ] Run `cargo test -p light-factory-tui settings` and `cargo fmt --all`, then commit `tui: persist provider and model preferences`.
+- [x] Add failing tests to `settings.rs`: round-trip `provider` + `models`; a legacy `{"lang":"es"}` file still loads with `provider == None` and empty `models`; a corrupt file loads defaults (or `None` for the whole struct, matching current behavior).
+- [x] Run `cargo test -p light-factory-tui settings` — expect failures.
+- [x] Implement: make `Settings` public with `#[serde(default)] provider: Option<String>` and `#[serde(default)] models: BTreeMap<String,String>`; add `load()` / `save()` for the whole struct; **keep `load_lang`/`save_lang` as shims** — `load_lang` returns `load().lang`, `save_lang` does a load→set-`lang`→save round-trip so `/lang` never clobbers the new `provider`/`models` fields (call sites in `main.rs` and `app.rs:411` keep working unchanged).
+- [x] Run `cargo test -p light-factory-tui settings` and `cargo fmt --all`, then commit `tui: persist provider and model preferences`.
 
 ### Task 4: TUI composition (`crates/tui/src/selection.rs`) + `ProviderInfo.selected_by`
 
@@ -108,11 +108,11 @@ UI wiring and i18n (depends on everything). Each task compiles and tests green b
 `build_selection`, `rebuild`. `main.rs` constructs the store + settings and calls `rebuild`, never
 `provider::build`.
 
-- [ ] Add failing tests: `resolve_key` returns the env value when set, else the store value, else `None`; `key_status` distinguishes `Env`/`Keyring`/`None`; `build_selection` maps persisted `provider` into `preferred` and merges env models over persisted models; `rebuild` with no keys yields `id()=="local"` + `offline == Some(NothingConfigured)`.
-- [ ] Run `cargo test -p light-factory-tui selection` — expect compile failure (module not wired).
-- [ ] Implement `selection.rs` (per spec §5), move `build()` out of `provider.rs`, and add `selected_by: Option<SelectedBy>` to `ProviderInfo` with a `reason_suffix(locale)` display helper.
-- [ ] Update `crates/tui/src/main.rs`: replace `let (provider, info) = provider::build();` with `settings::load()` + `KeyringStore` + `selection::rebuild(&prefs, &store)`, and thread the store and current prefs through `App::new`/`app::run` (their signatures grow to accept `Arc<dyn CredentialStore>` and the prefs) so `/provider`/`/model`/`/key` can reach them.
-- [ ] Run `cargo test -p light-factory-tui` (full crate), `cargo fmt --all`, then commit `tui: compose provider selection from env, prefs, and keyring`.
+- [x] Add failing tests: `resolve_key` returns the env value when set, else the store value, else `None`; `key_status` distinguishes `Env`/`Keyring`/`None`; `build_selection` maps persisted `provider` into `preferred` and merges env models over persisted models; `rebuild` with no keys yields `id()=="local"` + `offline == Some(NothingConfigured)`.
+- [x] Run `cargo test -p light-factory-tui selection` — expect compile failure (module not wired).
+- [x] Implement `selection.rs` (per spec §5), move `build()` out of `provider.rs`, and add `selected_by: Option<SelectedBy>` to `ProviderInfo` with a `reason_suffix(locale)` display helper.
+- [x] Update `crates/tui/src/main.rs`: replace `let (provider, info) = provider::build();` with `settings::load()` + `KeyringStore` + `selection::rebuild(&prefs, &store)`, and thread the store and current prefs through `App::new`/`app::run` (their signatures grow to accept `Arc<dyn CredentialStore>` and the prefs) so `/provider`/`/model`/`/key` can reach them.
+- [x] Run `cargo test -p light-factory-tui` (full crate), `cargo fmt --all`, then commit `tui: compose provider selection from env, prefs, and keyring`.
 
 ### Task 5: Commands, masked `/key` entry, header reason, i18n
 
@@ -121,9 +121,9 @@ UI wiring and i18n (depends on everything). Each task compiles and tests green b
 **Interfaces:** consumes `selection::{rebuild, key_status, resolve_key}` and `credentials::KeyringStore`;
 produces the `/provider` `/model` `/key` command surface.
 
-- [ ] Add failing i18n/parsing tests first: pure `parse_provider_command` / `parse_key_command` / `parse_model_command` helpers (exact file: `app.rs` `mod tests`), and the EN/ES parity test (already exists; it fails until the ES entries are added).
-- [ ] Run `cargo test -p light-factory-tui` — expect failures.
-- [ ] Implement in `app.rs`: a `Mode::Key` masked-entry mode with `key_target`/`key_input`/`key_return` fields; `run_command` branches for `/provider`, `/provider <name>`, `/model <id>`, `/key`, `/key <provider>`, `/key <provider> clear`; `rebuild` on each mutation, updating `self.provider`/`self.provider_info`; `enter_engine` clones `self.provider`/`self.provider_info` instead of rebuilding; the connected header shows the `reason_suffix`. Masked rendering shows placeholder characters, never the typed key; status messages never echo the value.
-- [ ] Add all new EN + ES keys to `i18n.rs` (parity test-enforced): provider active/available/key-status/reason strings, `status.provider_set`/`provider_invalid`, `status.model_set`/`model_invalid`, `status.key_set`/`key_cleared`/`key_failed`/`key_enter`, `field.key`, a masked-entry hint (`hint.key`), and an updated `hint.connected` that advertises the new `/provider`, `/model`, `/key` commands.
-- [ ] Run `cargo test -p light-factory-tui`, then `cargo test --workspace`, `cargo clippy --workspace --all-targets -D warnings`, `cargo fmt --all`.
-- [ ] Commit `tui: add provider, model, and key commands`.
+- [x] Add failing i18n/parsing tests first: pure `parse_provider_command` / `parse_key_command` / `parse_model_command` helpers (exact file: `app.rs` `mod tests`), and the EN/ES parity test (already exists; it fails until the ES entries are added).
+- [x] Run `cargo test -p light-factory-tui` — expect failures.
+- [x] Implement in `app.rs`: a `Mode::Key` masked-entry mode with `key_target`/`key_input`/`key_return` fields; `run_command` branches for `/provider`, `/provider <name>`, `/model <id>`, `/key`, `/key <provider>`, `/key <provider> clear`; `rebuild` on each mutation, updating `self.provider`/`self.provider_info`; `enter_engine` clones `self.provider`/`self.provider_info` instead of rebuilding; the connected header shows the `reason_suffix`. Masked rendering shows placeholder characters, never the typed key; status messages never echo the value.
+- [x] Add all new EN + ES keys to `i18n.rs` (parity test-enforced): provider active/available/key-status/reason strings, `status.provider_set`/`provider_invalid`, `status.model_set`/`model_invalid`, `status.key_set`/`key_cleared`/`key_failed`/`key_enter`, `field.key`, a masked-entry hint (`hint.key`), and an updated `hint.connected` that advertises the new `/provider`, `/model`, `/key` commands.
+- [x] Run `cargo test -p light-factory-tui`, then `cargo test --workspace`, `cargo clippy --workspace --all-targets -D warnings`, `cargo fmt --all`.
+- [x] Commit `tui: add provider, model, and key commands`.

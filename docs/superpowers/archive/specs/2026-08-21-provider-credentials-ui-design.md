@@ -1,8 +1,8 @@
 # Provider selection & credential supply in the client — design
 
-> **Status:** DRAFT — add an in-client surface to see, select, and switch the LLM provider and to
-> supply a credential that persists across runs, while keeping env-driven selection and headless
-> behavior unchanged.
+> **Status:** IMPLEMENTED (2026-08-21) — add an in-client surface to see, select, and switch the
+> LLM provider and to supply a credential that persists across runs, while keeping env-driven
+> selection and headless behavior unchanged.
 
 > **Implements:** GitHub issue savvagent/light-factory#23
 
