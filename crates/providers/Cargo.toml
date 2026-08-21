@@ -1,0 +1,18 @@
+[package]
+name = "light-factory-providers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+light-factory-engine-core = { path = "../engine-core" }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+tempfile = "3"

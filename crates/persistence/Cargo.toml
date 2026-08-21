@@ -9,7 +9,7 @@ light-factory-auth = { path = "../auth" }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-async-trait = "0.1"
+async-trait = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
