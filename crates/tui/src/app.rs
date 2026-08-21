@@ -66,6 +66,7 @@ enum Mode {
     Connected,
     Engine,
     Key,
+    Help,
 }
 
 const LOG_CAPACITY: usize = 200;
@@ -97,6 +98,7 @@ pub struct App {
     key_target: Option<String>,
     key_input: String,
     key_return: Mode,
+    help_return: Mode,
     engine: Option<Engine>,
     engine_session: Option<SessionId>,
     engine_forward_task: Option<tokio::task::JoinHandle<()>>,
@@ -148,6 +150,7 @@ impl App {
             key_target: None,
             key_input: String::new(),
             key_return: Mode::SignIn,
+            help_return: Mode::SignIn,
             engine: None,
             engine_session: None,
             engine_forward_task: None,
@@ -177,6 +180,16 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if self.mode == Mode::Help {
+            return self.handle_help_key(key);
+        }
+        if key.code == KeyCode::Char('p')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !self.command_mode
+        {
+            self.open_help();
+            return false;
+        }
         if self.command_mode {
             return self.handle_command_key(key).await;
         }
@@ -211,6 +224,7 @@ impl App {
                 Mode::Connected => {}
                 Mode::Engine => {}
                 Mode::Key => {}
+                Mode::Help => {}
             },
             KeyCode::Char('/')
                 if matches!(
@@ -256,6 +270,27 @@ impl App {
                 Some(approved) => self.engine_answer(approved),
                 None => self.engine_prompt.push(c),
             },
+            _ => {}
+        }
+        false
+    }
+
+    fn open_help(&mut self) {
+        self.help_return = self.mode;
+        self.mode = Mode::Help;
+    }
+
+    fn close_help(&mut self) {
+        self.mode = self.help_return;
+    }
+
+    fn handle_help_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.close_help()
+            }
+            KeyCode::Esc => self.close_help(),
             _ => {}
         }
         false
@@ -781,6 +816,7 @@ impl App {
             Mode::Connected => {}
             Mode::Engine => {}
             Mode::Key => {}
+            Mode::Help => {}
         }
     }
 
@@ -931,6 +967,7 @@ impl App {
             Mode::Connected => {}
             Mode::Engine => {}
             Mode::Key => {}
+            Mode::Help => {}
         }
     }
 
@@ -977,17 +1014,17 @@ impl App {
             Mode::Connected => self.draw_connected(frame, chunks[1]),
             Mode::Engine => self.draw_engine(frame, chunks[1]),
             Mode::Key => self.draw_key(frame, chunks[1]),
+            Mode::Help => self.draw_help(frame, chunks[1]),
         }
 
         let hints = if self.command_mode {
             format!("> {}", self.command)
+        } else if self.mode == Mode::Help {
+            self.t("hint.help_close").to_string()
+        } else if self.mode == Mode::Device {
+            self.t("hint.device_cancel").to_string()
         } else {
-            match self.mode {
-                Mode::Connected => self.t("hint.connected").to_string(),
-                Mode::Device => self.t("hint.device_cancel").to_string(),
-                Mode::Engine => self.t("hint.engine").to_string(),
-                _ => self.t("hint.default").to_string(),
-            }
+            self.t("hint.help").to_string()
         };
         frame.render_widget(
             Paragraph::new(hints).style(Style::default().fg(Color::DarkGray)),
@@ -1280,6 +1317,22 @@ impl App {
             .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
     }
+
+    fn draw_help(&self, frame: &mut Frame, area: Rect) {
+        let modal = centered_rect(80, 90, area);
+        let lines: Vec<Line> = help_lines(self.config.lang)
+            .into_iter()
+            .map(Line::from)
+            .collect();
+        let paragraph = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {} ", self.t("title.help"))),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, modal);
+    }
 }
 
 /// Run the terminal UI until the user quits.
@@ -1502,14 +1555,128 @@ fn word_boundary(rest: &str) -> bool {
     rest.chars().next().map(char::is_whitespace).unwrap_or(true)
 }
 
+/// Assemble the help modal body for `locale`: section headers followed by their indented entries,
+/// with a blank line between sections. Pure and unit-testable (no ratatui types).
+fn help_lines(locale: Locale) -> Vec<String> {
+    const SECTIONS: &[(&str, &[&str])] = &[
+        (
+            "help.section.global",
+            &["help.global.help", "help.global.quit"],
+        ),
+        (
+            "help.section.forms",
+            &[
+                "help.forms.navigate",
+                "help.forms.submit",
+                "help.forms.command",
+                "help.forms.back",
+            ],
+        ),
+        (
+            "help.section.connected",
+            &[
+                "help.connected.ping",
+                "help.connected.signout",
+                "help.connected.engine",
+                "help.connected.quit",
+            ],
+        ),
+        (
+            "help.section.engine",
+            &[
+                "help.engine.send",
+                "help.engine.back",
+                "help.engine.approve",
+            ],
+        ),
+        (
+            "help.section.commands",
+            &[
+                "help.commands.ask",
+                "help.commands.provider",
+                "help.commands.model",
+                "help.commands.key",
+                "help.commands.auth",
+                "help.commands.lang",
+            ],
+        ),
+    ];
+
+    let mut lines = Vec::new();
+    for (section, entries) in SECTIONS {
+        lines.push(i18n::t(locale, section).to_string());
+        for entry in *entries {
+            lines.push(format!("  {}", i18n::t(locale, entry)));
+        }
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// Center a rectangle of `percent_x` by `percent_y` within `area` (a standard ratatui modal
+/// helper).
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
     use super::{
-        EngineForward, KeyCommand, engine_approval_key, engine_forward_step, parse_ask_command,
-        parse_key_command, parse_model_command, parse_provider_command,
+        App, EngineForward, KeyCommand, Mode, UiEvent, engine_approval_key, engine_forward_step,
+        help_lines, parse_ask_command, parse_key_command, parse_model_command,
+        parse_provider_command,
     };
+    use crate::config::Config;
+    use crate::provider::ProviderInfo;
+    use crate::settings::Settings;
     use light_factory_protocol::session::{Event as EngineEvent, EventKind, SessionId};
+    use light_factory_providers::{LocalProvider, Provider};
+    use light_factory_tui::credentials::{CredentialStore, MemStore};
+    use light_factory_tui::i18n::Locale;
     use tokio::sync::broadcast::error::RecvError;
+    use tokio::sync::mpsc;
+
+    fn test_app() -> App {
+        let config = Config::from_url("http://localhost:8080").unwrap();
+        let provider: Arc<dyn Provider> = Arc::new(LocalProvider::new());
+        let provider_info = ProviderInfo {
+            id: "local".to_string(),
+            model: None,
+            offline: None,
+            selected_by: None,
+            warnings: Vec::new(),
+        };
+        let store: Arc<dyn CredentialStore> = Arc::new(MemStore::new());
+        let (events, _rx) = mpsc::unbounded_channel::<UiEvent>();
+        App::new(
+            config,
+            provider,
+            provider_info,
+            store,
+            Settings::default(),
+            None,
+            events,
+        )
+    }
 
     #[test]
     fn approval_keys_only_fire_while_a_prompt_is_pending() {
@@ -1598,5 +1765,66 @@ mod tests {
             matches!(parse_key_command("/key clear"), Some(KeyCommand::Set(p)) if p == "clear")
         );
         assert!(parse_key_command("/keyx").is_none());
+    }
+
+    #[test]
+    fn help_lines_resolve_without_raw_key_fallback() {
+        let lines = help_lines(Locale::En);
+        assert!(!lines.is_empty(), "help body must not be empty");
+        for line in &lines {
+            assert!(
+                !line.contains("help."),
+                "untranslated key leaked into help body: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_lines_localize() {
+        let en = help_lines(Locale::En);
+        let es = help_lines(Locale::Es);
+        assert_eq!(
+            en.len(),
+            es.len(),
+            "EN and ES help bodies must have equal length"
+        );
+        assert_ne!(en, es, "EN and ES help bodies must differ");
+    }
+
+    #[test]
+    fn help_modal_opens_and_restores_the_prior_mode() {
+        let mut app = test_app();
+        assert!(matches!(app.mode, Mode::SignIn));
+        app.open_help();
+        assert!(matches!(app.mode, Mode::Help));
+        assert!(matches!(app.help_return, Mode::SignIn));
+        app.close_help();
+        assert!(matches!(app.mode, Mode::SignIn));
+    }
+
+    #[test]
+    fn help_modal_returns_to_the_mode_it_was_opened_from() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.open_help();
+        assert!(matches!(app.help_return, Mode::Connected));
+        app.close_help();
+        assert!(matches!(app.mode, Mode::Connected));
+    }
+
+    #[test]
+    fn esc_and_ctrl_p_close_help_but_ctrl_c_quits() {
+        let mut app = test_app();
+
+        app.open_help();
+        assert!(!app.handle_help_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(matches!(app.mode, Mode::SignIn));
+
+        app.open_help();
+        assert!(!app.handle_help_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+        assert!(matches!(app.mode, Mode::SignIn));
+
+        app.open_help();
+        assert!(app.handle_help_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
     }
 }
