@@ -91,6 +91,7 @@ pub struct App {
     provider_info: ProviderInfo,
     engine: Option<Engine>,
     engine_session: Option<SessionId>,
+    engine_forward_task: Option<tokio::task::JoinHandle<()>>,
     engine_log: Vec<String>,
     engine_prompt: String,
     pending: Option<(EventKind, String)>,
@@ -134,6 +135,7 @@ impl App {
             provider_info,
             engine: None,
             engine_session: None,
+            engine_forward_task: None,
             engine_log: Vec::new(),
             engine_prompt: String::new(),
             pending: None,
@@ -248,7 +250,7 @@ impl App {
 
         let mut events = engine.handle(session).expect("just created").subscribe();
         let tx = self.events.clone();
-        tokio::spawn(async move {
+        let forwarder = tokio::spawn(async move {
             loop {
                 match engine_forward_step(events.recv().await) {
                     EngineForward::Event(event) => {
@@ -268,6 +270,7 @@ impl App {
 
         self.engine = Some(engine);
         self.engine_session = Some(session);
+        self.engine_forward_task = Some(forwarder);
         self.engine_log.clear();
         self.engine_prompt.clear();
         self.pending = None;
@@ -277,6 +280,11 @@ impl App {
     }
 
     fn leave_engine(&mut self) {
+        if let Some(forwarder) = self.engine_forward_task.take() {
+            forwarder.abort();
+        }
+        self.engine = None;
+        self.engine_session = None;
         self.mode = Mode::Connected;
         self.engine_prompt.clear();
         self.pending = None;

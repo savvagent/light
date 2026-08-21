@@ -22,20 +22,6 @@ pub fn describe_event(locale: Locale, kind: &EventKind) -> String {
             },
         )
         .to_string(),
-        EventKind::StepStarted { description, .. } => i18n::t_with(
-            locale,
-            "engine.step_started",
-            &[("description", description)],
-        ),
-        EventKind::StepFinished { ok, .. } => i18n::t(
-            locale,
-            if *ok {
-                "engine.step_done"
-            } else {
-                "engine.step_failed"
-            },
-        )
-        .to_string(),
         EventKind::FileEdit {
             path,
             bytes_written,

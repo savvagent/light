@@ -246,3 +246,42 @@ async fn the_step_budget_stops_a_turn_that_never_finishes() {
     let kind = next_matching(&mut events, |k| matches!(k, EventKind::TurnComplete { .. })).await;
     assert!(matches!(kind, EventKind::TurnComplete { ok: false }));
 }
+
+#[tokio::test]
+async fn a_prompt_sent_mid_turn_is_rejected_not_silently_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Arc::new(LocalWorkspace::new(dir.path().to_path_buf()).unwrap());
+    let id = SessionId::new();
+    let handle = Session::spawn(id, ws, provider(DONE_JSON));
+    let mut events = handle.subscribe();
+
+    handle.send(Command::SendPrompt {
+        session: id,
+        text: "write a note".into(),
+    });
+    let kind = next_matching(&mut events, |k| matches!(k, EventKind::PlanProposed { .. })).await;
+    let EventKind::PlanProposed { plan_id, .. } = kind else {
+        unreachable!()
+    };
+
+    // A second prompt while the plan decision is pending must be visibly rejected.
+    handle.send(Command::SendPrompt {
+        session: id,
+        text: "another thing".into(),
+    });
+    let kind = next_matching(
+        &mut events,
+        |k| matches!(k, EventKind::Error { code, .. } if code == "turn_in_progress"),
+    )
+    .await;
+    assert!(matches!(kind, EventKind::Error { .. }));
+
+    // The turn is still parked awaiting the plan decision and proceeds normally.
+    handle.send(Command::ApprovePlan {
+        session: id,
+        plan_id,
+        approved: true,
+    });
+    let kind = next_matching(&mut events, |k| matches!(k, EventKind::TurnComplete { .. })).await;
+    assert!(matches!(kind, EventKind::TurnComplete { ok: true }));
+}

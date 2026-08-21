@@ -72,11 +72,9 @@ impl Session {
             return;
         }
 
-        self.approved = Some(plan.clone());
         let ok = self.execute(goal, &plan, commands).await;
         self.emit(EventKind::TurnComplete { ok });
     }
-
     async fn propose_plan(&mut self, goal: &str) -> Option<Plan> {
         let request = CompleteRequest {
             prompt: render_plan_prompt(goal),
@@ -128,6 +126,10 @@ impl Session {
                 Command::Pause { .. } => self.paused = true,
                 Command::Resume { .. } => self.paused = false,
                 Command::Abort { .. } => return false,
+                Command::SendPrompt { .. } => self.emit(EventKind::Error {
+                    code: "turn_in_progress".into(),
+                    message: "a turn is already running; prompt ignored".into(),
+                }),
                 _ => {}
             }
         }
@@ -252,6 +254,10 @@ impl Session {
                 Some(Command::Resume { .. }) => self.paused = false,
                 Some(Command::Pause { .. }) => {}
                 Some(Command::Abort { .. }) | None => return false,
+                Some(Command::SendPrompt { .. }) => self.emit(EventKind::Error {
+                    code: "turn_in_progress".into(),
+                    message: "a turn is already running; prompt ignored".into(),
+                }),
                 Some(_) => {}
             }
         }
@@ -275,6 +281,10 @@ impl Session {
                 Command::Pause { .. } => self.paused = true,
                 Command::Resume { .. } => self.paused = false,
                 Command::Abort { .. } => return false,
+                Command::SendPrompt { .. } => self.emit(EventKind::Error {
+                    code: "turn_in_progress".into(),
+                    message: "a turn is already running; prompt ignored".into(),
+                }),
                 _ => {}
             }
         }
