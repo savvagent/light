@@ -85,7 +85,7 @@ The otto port requires 1.97.0. Doing this first means every later task compiles 
 - Consumes: nothing.
 - Produces: a workspace that builds on 1.97.0.
 
-- [ ] **Step 1: Bump the pin**
+- [x] **Step 1: Bump the pin**
 
 ```toml
 [toolchain]
@@ -94,7 +94,7 @@ components = ["rustfmt", "clippy"]
 profile = "minimal"
 ```
 
-- [ ] **Step 2: Resolve the `dtolnay/rust-toolchain` SHA**
+- [x] **Step 2: Resolve the `dtolnay/rust-toolchain` SHA**
 
 Per repo convention, actions are pinned to full 40-char commit SHAs. `dtolnay/rust-toolchain` is pinned to a `stable` branch-tip commit and must be bumped explicitly on toolchain changes.
 
@@ -102,12 +102,12 @@ Run: `git ls-remote https://github.com/dtolnay/rust-toolchain.git refs/heads/sta
 
 Take the 40-char SHA from column 1 and replace the ref in `.github/workflows/deploy.yml` (the `uses: dtolnay/rust-toolchain@...` line). Leave every other `uses:` untouched.
 
-- [ ] **Step 3: Verify the workspace still builds and lints clean**
+- [x] **Step 3: Verify the workspace still builds and lints clean**
 
 Run: `cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace`
 Expected: PASS. A new toolchain can introduce new lints; fix any that appear rather than allowing them.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add rust-toolchain.toml .github/workflows/deploy.yml
@@ -126,7 +126,7 @@ git commit -m "chore: bump toolchain to 1.97.0 for the engine port"
 - Consumes: nothing.
 - Produces: `light_factory_protocol::sensitive::{SENSITIVE_MARKERS, is_sensitive}`, re-exported at the crate root as `light_factory_protocol::{SENSITIVE_MARKERS, is_sensitive}`. `is_sensitive(&str) -> bool`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `crates/protocol/src/sensitive.rs` containing only the test module for now:
 
@@ -150,12 +150,12 @@ mod tests {
 
 Add `pub mod sensitive;` and `pub use sensitive::{SENSITIVE_MARKERS, is_sensitive};` to `crates/protocol/src/lib.rs`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p light-factory-protocol sensitive`
 Expected: FAIL — `cannot find function 'is_sensitive' in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Prepend to `crates/protocol/src/sensitive.rs` (this is otto's `crates/protocol/src/sensitive.rs` verbatim apart from the doc comment, which is rewritten because otto's names enforcers that do not exist here):
 
@@ -179,12 +179,12 @@ pub fn is_sensitive(s: &str) -> bool {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test -p light-factory-protocol sensitive`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/protocol/src/sensitive.rs crates/protocol/src/lib.rs
@@ -204,7 +204,7 @@ git commit -m "feat(protocol): add the sensitive-path floor"
 - Consumes: nothing.
 - Produces: `SessionId`, `Command`, `Event`, `EventKind`, `Plan`, `PlanStep`, `Scope`, `CommandPattern`, `ArgPattern`, `GateReason`. Every type is `Serialize + Deserialize + Debug + Clone`. `SessionId` is a newtype over `Uuid` with `SessionId::new()`.
 
-- [ ] **Step 1: Add the uuid dependency**
+- [x] **Step 1: Add the uuid dependency**
 
 `crates/protocol/Cargo.toml` — add to `[dependencies]`:
 
@@ -218,7 +218,7 @@ Then in the root `Cargo.toml`, change the workspace uuid entry to include serde:
 uuid = { version = "1", features = ["v4", "serde"] }
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `crates/protocol/src/session.rs` with only this test module:
 
@@ -265,12 +265,12 @@ mod tests {
 
 Add `pub mod session;` to `crates/protocol/src/lib.rs`.
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `cargo test -p light-factory-protocol session`
 Expected: FAIL — `cannot find type 'SessionId' in this scope`.
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 Prepend to `crates/protocol/src/session.rs`:
 
@@ -389,12 +389,12 @@ pub struct Event {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p light-factory-protocol`
 Expected: PASS (3 new tests plus existing).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/protocol Cargo.toml
@@ -424,7 +424,7 @@ Ports otto's trait seams. This crate has no I/O and no web framework — it is t
 
 **Deviation from the spec, deliberate:** the spec has the session own a `ToolRegistry` that runs the gate and an `Approver` before dispatch. This plan omits both. The turn state machine (Task 10) must emit events and drive the approval round-trip through its own command receiver, which needs `&mut Session` — so routing dispatch through a registry would mean an `Approver` that calls back into the session it is owned by. The gate's *behavior* is unchanged, including fail-closed on a closed channel (`await_action_decision` returns `false`). `ToolRegistry`/`Approver` return when a second client type actually needs them. This keeps engine-core smaller, which is the project's stated discipline.
 
-- [ ] **Step 1: Create the manifest**
+- [x] **Step 1: Create the manifest**
 
 `crates/engine-core/Cargo.toml`:
 
@@ -453,7 +453,7 @@ Add to the root `Cargo.toml` `[workspace.dependencies]`:
 async-trait = "0.1"
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `crates/engine-core/src/tool.rs` — test module only:
 
@@ -505,12 +505,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `cargo test -p light-factory-engine-core`
 Expected: FAIL — the crate does not compile; `Tool`, `Decision`, `PermissionGate`, and `NeverPause` are undefined.
 
-- [ ] **Step 4: Write `types.rs`**
+- [x] **Step 4: Write `types.rs`**
 
 ```rust
 //! Plain data passed across the trait seams. No behavior.
@@ -546,7 +546,7 @@ pub struct Edit {
 }
 ```
 
-- [ ] **Step 5: Write `traits.rs`**
+- [x] **Step 5: Write `traits.rs`**
 
 ```rust
 //! The trait seams the engine drives.
@@ -579,7 +579,7 @@ pub trait Workspace: WorkspaceRead {
 }
 ```
 
-- [ ] **Step 6: Write `tool.rs`**
+- [x] **Step 6: Write `tool.rs`**
 
 Prepend above the test module written in Step 2:
 
@@ -644,12 +644,12 @@ pub use traits::{Provider, Workspace, WorkspaceRead};
 pub use types::{CompleteRequest, CompleteResponse, Edit, Usage};
 ```
 
-- [ ] **Step 7: Run tests to verify they pass**
+- [x] **Step 7: Run tests to verify they pass**
 
 Run: `cargo test -p light-factory-engine-core`
 Expected: PASS (3 tests).
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/engine-core Cargo.toml
@@ -671,7 +671,7 @@ git commit -m "feat(engine-core): port the provider, tool, and workspace seams"
 - Produces: `LocalWorkspace::new(root: PathBuf) -> anyhow::Result<Self>`, `LocalWorkspace::resolve(&self, path: &Path) -> anyhow::Result<PathBuf>` (canonicalizing, rejecting escapes), and tools `FsReadTool`, `FsListTool`, `FsWriteTool`, each `Tool` with names `fs.read`, `fs.list`, `fs.write`.
 - `fs.read` args: `{"path": String}` → `{"contents": String}`. `fs.list` args: `{"glob": String}` → `{"paths": [String]}`. `fs.write` args: `{"path": String, "contents": String}` → `{"bytes_written": u64}`.
 
-- [ ] **Step 1: Create the manifest**
+- [x] **Step 1: Create the manifest**
 
 `crates/tools/Cargo.toml`:
 
@@ -699,7 +699,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 Add `glob = "0.3"` and `tempfile = "3"` to the root `[workspace.dependencies]` if you prefer central management; this plan uses direct versions to keep the crate self-contained.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `crates/tools/tests/workspace.rs`:
 
@@ -744,12 +744,12 @@ async fn write_then_read_round_trips() {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `cargo test -p light-factory-tools`
 Expected: FAIL — `LocalWorkspace` undefined.
 
-- [ ] **Step 4: Write `workspace.rs`**
+- [x] **Step 4: Write `workspace.rs`**
 
 ```rust
 //! `LocalWorkspace`: the only `Workspace` implementation. Edits a real directory in place.
@@ -847,7 +847,7 @@ impl Workspace for LocalWorkspace {
 }
 ```
 
-- [ ] **Step 5: Write `fs.rs`**
+- [x] **Step 5: Write `fs.rs`**
 
 ```rust
 //! The filesystem tools. Each is a thin JSON adapter over the workspace; all gating happens
@@ -964,12 +964,12 @@ pub use workspace::LocalWorkspace;
 
 Task 6 adds `pub mod bash;` and `pub use bash::BashTool;` back.
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [x] **Step 6: Run tests to verify they pass**
 
 Run: `cargo test -p light-factory-tools`
 Expected: PASS (2 tests).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/tools
@@ -990,7 +990,7 @@ This is a security-critical task. The tool must never invoke a shell.
 - Consumes: `Tool`, `LocalWorkspace`.
 - Produces: `BashTool { workspace_root: PathBuf }`, tool name `bash`. Args: `{"program": String, "args": [String]}` → `{"exit_code": i32, "stdout": String, "stderr": String}`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/tools/tests/bash.rs`:
 
@@ -1056,12 +1056,12 @@ async fn non_zero_exit_is_reported_not_raised() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p light-factory-tools --test bash`
 Expected: FAIL — `BashTool` undefined.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `crates/tools/src/bash.rs`:
 
@@ -1128,12 +1128,12 @@ impl Tool for BashTool {
 
 Ensure `tokio` in `crates/tools/Cargo.toml` includes the `process` feature (the workspace `tokio` uses `features = ["full"]`, which already includes it).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p light-factory-tools`
 Expected: PASS (6 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/tools
@@ -1155,7 +1155,7 @@ The security core of the whole design. Test it hard.
 - Consumes: `PermissionGate`, `Decision`, `light_factory_protocol::session::{Scope, CommandPattern, ArgPattern, GateReason}`, `is_sensitive`.
 - Produces: `PlanGate::new(scope: Option<Scope>) -> Self` and `PlanGate::with_scope(&mut self, scope: Scope)`. Implements `PermissionGate`. With `None` scope, every write and command is `Ask(OutsideScope)`.
 
-- [ ] **Step 1: Create the manifest**
+- [x] **Step 1: Create the manifest**
 
 `crates/engine/Cargo.toml`:
 
@@ -1185,7 +1185,7 @@ tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `crates/engine/tests/gate.rs`:
 
@@ -1317,12 +1317,12 @@ fn unknown_tools_are_denied() {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `cargo test -p light-factory-engine --test gate`
 Expected: FAIL — `PlanGate` undefined.
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 `crates/engine/src/gate.rs`:
 
@@ -1482,12 +1482,12 @@ pub mod gate;
 pub use gate::PlanGate;
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test -p light-factory-engine --test gate`
 Expected: PASS (10 tests).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/engine
@@ -1506,7 +1506,7 @@ git commit -m "feat(engine): add the deterministic plan gate"
 - Consumes: `Plan`.
 - Produces: `extract_json<T: DeserializeOwned>(text: &str) -> anyhow::Result<T>`, `render_plan_prompt(goal: &str) -> String`, `render_execute_prompt(goal: &str, plan: &Plan, transcript: &[String]) -> String`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/engine/tests/prompt.rs`:
 
@@ -1551,12 +1551,12 @@ fn the_plan_prompt_states_the_goal_and_demands_json() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p light-factory-engine --test prompt`
 Expected: FAIL — `light_factory_engine::prompt` does not exist.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `crates/engine/src/prompt.rs`:
 
@@ -1649,12 +1649,12 @@ or, when the plan is complete:
 
 Add `pub mod prompt;` to `crates/engine/src/lib.rs`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p light-factory-engine --test prompt`
 Expected: PASS (4 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/engine
@@ -1673,7 +1673,7 @@ git commit -m "feat(engine): add prompt rendering and JSON extraction"
 - Consumes: `SessionId`, `Event`, `EventKind`, `LocalWorkspace`, `Provider`.
 - Produces: `SessionHandle { pub id: SessionId, commands: mpsc::UnboundedSender<Command>, events: broadcast::Sender<Event> }` with `SessionHandle::send(&self, cmd: Command)` and `SessionHandle::subscribe(&self) -> broadcast::Receiver<Event>`. `Session::spawn(id, workspace, provider) -> SessionHandle`. Internally `Session::emit(&mut self, kind: EventKind)` increments `seq` starting at 1.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/engine/tests/session.rs`:
 
@@ -1724,12 +1724,12 @@ async fn two_subscribers_both_observe_the_stream() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p light-factory-engine --test session`
 Expected: FAIL — `light_factory_engine::session` does not exist.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `crates/engine/src/session.rs`:
 
@@ -1847,12 +1847,12 @@ impl Session {
 
 Task 10 replaces this stub with the real turn state machine.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p light-factory-engine --test session`
 Expected: PASS (2 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/engine
@@ -1875,7 +1875,7 @@ Replaces the Task 9 stub with plan → approve → execute → complete.
 - Produces: `Session::run_turn(&mut self, goal: &str, commands: &mut mpsc::UnboundedReceiver<Command>)`. Constant `MAX_CONSECUTIVE_DENIALS: usize = 3`. `Session::paused: bool` field (add it to the struct in `session.rs`, initialized `false`).
 - Turn transcript entries are `String`s of the form `"<tool> -> <json result>"`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/engine/tests/turn.rs`:
 
@@ -2027,12 +2027,12 @@ async fn an_out_of_scope_write_asks_instead_of_executing() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p light-factory-engine --test turn`
 Expected: FAIL — the stub `run_turn` emits `TurnComplete` immediately, so `PlanProposed` never arrives and the first test hangs or errors.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 `crates/engine/src/turn.rs`:
 
@@ -2336,17 +2336,17 @@ Remove the stub `run_turn` from `session.rs` and change the command loop so `Sen
 
 Add `pub mod turn;` to `crates/engine/src/lib.rs`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p light-factory-engine`
 Expected: PASS (all gate, prompt, session, and turn tests — 5 turn tests).
 
-- [ ] **Step 5: Run the whole suite and lints**
+- [x] **Step 5: Run the whole suite and lints**
 
 Run: `cargo fmt && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/engine
@@ -2367,7 +2367,7 @@ The spec has `Engine` hold `HashMap<SessionId, SessionHandle>` so multiple sessi
 - Consumes: `Session::spawn`, `SessionHandle`, `Command`, `SessionId`, `LocalWorkspace`, `Provider`.
 - Produces: `Engine::new(provider: Arc<dyn Provider>) -> Self`, `Engine::create_session(&mut self, workspace: PathBuf) -> anyhow::Result<SessionId>`, `Engine::handle(&self, id: SessionId) -> Option<&SessionHandle>`, `Engine::dispatch(&mut self, command: Command) -> anyhow::Result<()>` routing every session-scoped command to its session, and `Engine::session_ids(&self) -> Vec<SessionId>`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/engine/tests/engine.rs`:
 
@@ -2428,12 +2428,12 @@ async fn create_session_rejects_a_missing_workspace() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p light-factory-engine --test engine`
 Expected: FAIL — `Engine` is undefined.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Replace `crates/engine/src/lib.rs` with:
 
@@ -2514,12 +2514,12 @@ impl Engine {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p light-factory-engine`
 Expected: PASS (all gate, prompt, session, turn, and engine tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/engine
@@ -2542,7 +2542,7 @@ git commit -m "feat(engine): add the session registry"
 
 **Every user-facing string goes through the existing i18n layer** (`crates/tui/src/i18n.rs`, added by the localize-tui work). Raw English literals in the engine view would break a convention deliberately established across both clients. Note `i18n.rs` has a test asserting `keys(ES) == keys(EN)`, so each new key must be added to **both** catalogs or the suite fails.
 
-- [ ] **Step 1: Add the dependencies**
+- [x] **Step 1: Add the dependencies**
 
 `crates/tui/Cargo.toml` — add to `[dependencies]`:
 
@@ -2555,7 +2555,7 @@ uuid = { workspace = true }
 
 `light-factory-providers` is already a TUI dependency at this point — the port-llm-providers plan added it.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `crates/tui/tests/engine_view.rs`:
 
@@ -2637,12 +2637,12 @@ name = "light_factory_tui"
 path = "src/lib.rs"
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `cargo test -p light-factory-tui --test engine_view`
 Expected: FAIL — `light_factory_tui::engine_view` does not exist.
 
-- [ ] **Step 4: Write the implementation**
+- [x] **Step 4: Write the implementation**
 
 `crates/tui/src/engine_view.rs`:
 
@@ -2744,7 +2744,7 @@ pub fn pending_prompt(locale: Locale, kind: &EventKind) -> Option<String> {
 }
 ```
 
-- [ ] **Step 5: Add the engine keys to both catalogs**
+- [x] **Step 5: Add the engine keys to both catalogs**
 
 In `crates/tui/src/i18n.rs`, append to `EN`:
 
@@ -2794,12 +2794,12 @@ and the matching entries to `ES`:
     ("engine.approve_keys", "[a] aprobar  [d] denegar"),
 ```
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [x] **Step 6: Run tests to verify they pass**
 
 Run: `cargo test -p light-factory-tui`
 Expected: PASS (5 engine-view tests, plus the existing `ES must define exactly the EN key set` assertion, which now covers the new keys).
 
-- [ ] **Step 7: Add the engine mode to the app**
+- [x] **Step 7: Add the engine mode to the app**
 
 In `crates/tui/src/app.rs`:
 
@@ -2850,7 +2850,7 @@ if let Some(command) = command {
 ```
 6. Render `engine_log` in the main pane and `pending` in a bordered footer block.
 
-- [ ] **Step 8: Verify the binary builds and runs**
+- [x] **Step 8: Verify the binary builds and runs**
 
 Run: `cargo run -p light-factory-tui`
 Expected: the TUI starts. Sign in, enter engine mode, and confirm the pane renders.
@@ -2864,7 +2864,7 @@ confirm a real plan is proposed.
 Run with `LIGHT_LANG=es` (or the setting the localize-tui work established) and confirm the engine
 pane renders Spanish while the plan summary itself stays as the model wrote it.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add crates/tui
@@ -2884,24 +2884,24 @@ git commit -m "feat(tui): drive the engine through Command/Event"
 - Consumes: the completed implementation.
 - Produces: documentation matching the code.
 
-- [ ] **Step 1: Update the "Current state" table in `ARCHITECTURE.md`**
+- [x] **Step 1: Update the "Current state" table in `ARCHITECTURE.md`**
 
 Change the `engine core` row from **Designed, not built** to `Built — thin vertical slice (plan → approve → execute)`. Change the `Command/Event protocol` row to `Built in crates/protocol/src/session.rs; wire.rs Ping/Pong still serves the fly server`. Add rows for the new crates in the **Crate layout** section, moving them out of the `planned` block.
 
-- [ ] **Step 2: Mark the spec implemented**
+- [x] **Step 2: Mark the spec implemented**
 
 Change the spec's `**Status:**` line to `IMPLEMENTED (2026-08-20)`.
 
-- [ ] **Step 3: Mark every task complete in this plan**
+- [x] **Step 3: Mark every task complete in this plan**
 
 Tick each `- [ ]` to `- [x]`.
 
-- [ ] **Step 4: Run the full verification**
+- [x] **Step 4: Run the full verification**
 
 Run: `cargo fmt --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ARCHITECTURE.md docs/superpowers

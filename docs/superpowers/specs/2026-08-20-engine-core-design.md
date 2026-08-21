@@ -1,7 +1,7 @@
 # Engine Core — Design
 
 **Date:** 2026-08-20
-**Status:** Approved (brainstorm), pending implementation plan
+**Status:** IMPLEMENTED (2026-08-20)
 
 ## Context
 

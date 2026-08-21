@@ -69,14 +69,13 @@ crates/auth          domain: TOTP, AES-GCM secrets-at-rest, session/device token
                      Store trait, AuthService — no I/O, no web framework
 crates/persistence   sqlx Postgres PgStore + migrations
 crates/server        axum HTTP + WebSocket
-crates/tui           ratatui client, binary `light-factory` (localized: en + es)
-web/                 Svelte 5 SPA — auth and device approval only (localized: en + es)
-
-planned (see the design record):
-crates/engine-core   ported seams: Provider, Tool, Workspace, PermissionGate
-crates/providers     ported: all seven otto providers + the base_url trust boundary
+crates/engine-core   ported seams: Provider, Tool, Workspace/WorkspaceRead, PermissionGate,
+                     PauseController, Decision
+crates/providers     all seven otto providers + the base_url trust boundary + env selection
 crates/tools         fs.read / fs.list / fs.write / bash
 crates/engine        Engine, Session actor, turn state machine, PlanGate
+crates/tui           ratatui client, binary `light-factory` (localized: en + es)
+web/                 Svelte 5 SPA — auth and device approval only (localized: en + es)
 ```
 
 **Localization.** Both clients are localized (English and Spanish). The TUI keeps its strings in
@@ -113,8 +112,8 @@ SHA-256 hashes. Single-use semantics for challenges and device grants are enforc
 
 ## Engine architecture
 
-Designed, not yet built. Full detail in
-`docs/superpowers/specs/2026-08-20-engine-core-design.md`.
+Built as a thin vertical slice — plan → approve → execute — running in-process in the TUI.
+Full detail in `docs/superpowers/specs/2026-08-20-engine-core-design.md`.
 
 - **Own agent loop** across pluggable providers, ported from otto — not a hosted subprocess
   agent.
@@ -164,17 +163,16 @@ ever takes on a stateful role (the agent bus), that setting has to be revisited.
 | TUI (sign-in, device login, WS) | Built, released as installers |
 | Localization (en + es, both clients) | Built |
 | CI/CD | Built |
-| LLM providers | Designed, in progress on `port-llm-providers` |
-| **engine core** | **Designed, not built** |
-| Command/Event protocol | Designed; `wire.rs` is still a ping/pong placeholder |
+| LLM providers | Built — all seven providers, the `base_url` trust boundary, env selection, TUI `/ask` |
+| **engine core** | **Built — thin vertical slice (plan → approve → execute)** |
+| Command/Event protocol | Built in `crates/protocol/src/session.rs`; `wire.rs` Ping/Pong still serves the fly server |
 | Agent-to-agent bus | Not started |
 
 ## Environment
 
 Operational facts for a fresh machine or session.
 
-- Rust 1.95.0 stable, pinned in `rust-toolchain.toml`. Edition 2024. **The otto port requires
-  1.97.0**, which also means re-resolving the `dtolnay/rust-toolchain` SHA pin.
+- Rust 1.97.0 stable, pinned in `rust-toolchain.toml`. Edition 2024.
 - Local PostgreSQL 16.14, no sudo. Data dir `/home/robhicks/dev/light/.pgdata`
   (`initdb -U light --auth=trust`, UTF8, C.UTF-8). Start it with:
   `pg_ctl -D /home/robhicks/dev/light/.pgdata -o "-p 5432 -k /tmp/opencode -c listen_addresses=127.0.0.1" -l /tmp/opencode/pg.log start`
