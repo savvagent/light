@@ -1636,13 +1636,47 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
     use super::{
-        EngineForward, KeyCommand, engine_approval_key, engine_forward_step, help_lines,
-        parse_ask_command, parse_key_command, parse_model_command, parse_provider_command,
+        App, EngineForward, KeyCommand, Mode, UiEvent, engine_approval_key, engine_forward_step,
+        help_lines, parse_ask_command, parse_key_command, parse_model_command,
+        parse_provider_command,
     };
+    use crate::config::Config;
+    use crate::provider::ProviderInfo;
+    use crate::settings::Settings;
     use light_factory_protocol::session::{Event as EngineEvent, EventKind, SessionId};
+    use light_factory_providers::{LocalProvider, Provider};
+    use light_factory_tui::credentials::{CredentialStore, MemStore};
     use light_factory_tui::i18n::Locale;
     use tokio::sync::broadcast::error::RecvError;
+    use tokio::sync::mpsc;
+
+    fn test_app() -> App {
+        let config = Config::from_url("http://localhost:8080").unwrap();
+        let provider: Arc<dyn Provider> = Arc::new(LocalProvider::new());
+        let provider_info = ProviderInfo {
+            id: "local".to_string(),
+            model: None,
+            offline: None,
+            selected_by: None,
+            warnings: Vec::new(),
+        };
+        let store: Arc<dyn CredentialStore> = Arc::new(MemStore::new());
+        let (events, _rx) = mpsc::unbounded_channel::<UiEvent>();
+        App::new(
+            config,
+            provider,
+            provider_info,
+            store,
+            Settings::default(),
+            None,
+            events,
+        )
+    }
 
     #[test]
     fn approval_keys_only_fire_while_a_prompt_is_pending() {
@@ -1755,5 +1789,42 @@ mod tests {
             "EN and ES help bodies must have equal length"
         );
         assert_ne!(en, es, "EN and ES help bodies must differ");
+    }
+
+    #[test]
+    fn help_modal_opens_and_restores_the_prior_mode() {
+        let mut app = test_app();
+        assert!(matches!(app.mode, Mode::SignIn));
+        app.open_help();
+        assert!(matches!(app.mode, Mode::Help));
+        assert!(matches!(app.help_return, Mode::SignIn));
+        app.close_help();
+        assert!(matches!(app.mode, Mode::SignIn));
+    }
+
+    #[test]
+    fn help_modal_returns_to_the_mode_it_was_opened_from() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.open_help();
+        assert!(matches!(app.help_return, Mode::Connected));
+        app.close_help();
+        assert!(matches!(app.mode, Mode::Connected));
+    }
+
+    #[test]
+    fn esc_and_ctrl_p_close_help_but_ctrl_c_quits() {
+        let mut app = test_app();
+
+        app.open_help();
+        assert!(!app.handle_help_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(matches!(app.mode, Mode::SignIn));
+
+        app.open_help();
+        assert!(!app.handle_help_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+        assert!(matches!(app.mode, Mode::SignIn));
+
+        app.open_help();
+        assert!(app.handle_help_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
     }
 }
