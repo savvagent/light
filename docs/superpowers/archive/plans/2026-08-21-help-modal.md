@@ -47,23 +47,23 @@ state-machine changes land together so the crate stays compiling and the parity 
 
 **Interfaces:** consumes `i18n::{self, Locale}`; produces `Mode::Help`, `help_lines(locale)`.
 
-- [ ] Add failing tests first in `app.rs` `mod tests`: a `help_lines` test asserting the EN body is
+- [x] Add failing tests first in `app.rs` `mod tests`: a `help_lines` test asserting the EN body is
       non-empty and no line contains the raw-key sentinel `"help."` (catches a typo'd key that would
       fall through `i18n::t`'s key-name fallback); a localization test asserting
       `help_lines(Locale::En)` and `help_lines(Locale::Es)` are non-empty, equal length, and differ.
       Run `cargo test -p light-factory-tui help_lines` — expect compile failure (`help_lines` not yet
       defined).
-- [ ] Add the EN help/hint keys to `i18n.rs` (`hint.help`, `hint.help_close`, `title.help`, the
+- [x] Add the EN help/hint keys to `i18n.rs` (`hint.help`, `hint.help_close`, `title.help`, the
       `help.section.*` / `help.global.*` / `help.forms.*` / `help.connected.*` / `help.engine.*` /
       `help.commands.*` keys), and remove `hint.connected` / `hint.engine` / `hint.default`.
-- [ ] Add the matching ES keys (parity) so `es_mirrors_en_exactly` passes.
-- [ ] Implement in `app.rs`: `Mode::Help` variant; `help_return: Mode` field (init `Mode::SignIn`);
+- [x] Add the matching ES keys (parity) so `es_mirrors_en_exactly` passes.
+- [x] Implement in `app.rs`: `Mode::Help` variant; `help_return: Mode` field (init `Mode::SignIn`);
       `open_help`/`close_help`/`handle_help_key`; a global Ctrl-P branch at the top of `handle_key`
       (opens help in every mode except while typing a command); `help_lines` free function; a
       `centered_rect` helper; `draw_help`; the `Mode::Help =>` arm in `draw`; no-op `Mode::Help` arms
       in the `Esc`, `submit`, and `cycle_focus` matches; and the collapsed status-line hint
       (`command_mode` → `> <cmd>`, `Help` → `hint.help_close`, `Device` → `hint.device_cancel`,
       else `hint.help`).
-- [ ] Run `cargo test -p light-factory-tui`, then `cargo test --workspace`,
+- [x] Run `cargo test -p light-factory-tui`, then `cargo test --workspace`,
       `cargo clippy --workspace --all-targets -D warnings`, `cargo fmt --all`.
-- [ ] Commit `tui: add a Ctrl-P help modal`.
+- [x] Commit `tui: add a Ctrl-P help modal`.

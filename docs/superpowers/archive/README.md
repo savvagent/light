@@ -28,3 +28,4 @@ belongs in the active directories.
 | `gate-bash-sensitive-floor` | `PlanGate` now floor-checks every command argument, so an `ArgPattern::Any` scope cannot read `.env` or overwrite `.git/config` (plan only) |
 | `tui-broadcast-lag` | Engine-event forwarder continues on `RecvError::Lagged` and surfaces a "dropped events" notice instead of terminating (plan only) |
 | `turn-step-budget-transcript` | Bounded the execute loop with `MAX_STEPS_PER_TURN` and truncated transcript entries with `MAX_TRANSCRIPT_ENTRY_CHARS` (plan only) |
+| `help-modal` | Moved the TUI's per-mode help hints into a Ctrl-P help modal and replaced the status line with a short "Ctrl-P: help" indicator (plan only; fast-path) |
