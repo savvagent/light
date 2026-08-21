@@ -194,7 +194,10 @@ and uses vocabulary that already exists.
 
 `PlanGate` implements `engine_core::PermissionGate`. It is deterministic and involves no LLM:
 
-1. Path or command matches the **sensitive floor** -> `Ask` with `GateReason::SensitiveFloor`.
+1. A path (for `fs.read`/`fs.list`/`fs.write`) or any command argument (for `bash`) matches the
+   **sensitive floor** -> `Ask` with `GateReason::SensitiveFloor`. The floor applies to every
+   element of a command's `args` vector, not just the program name, so a scope that authorizes
+   `cat` with `ArgPattern::Any` still asks before reading `.env`.
    Plan approval cannot silently unlock it; it is always surfaced to a human. It is `Ask` and
    not `Deny` so that legitimately editing a `.env` remains possible with one deliberate answer.
 2. A **read** (`fs.read`, `fs.list`) inside the workspace root -> `Allow`. Reads are not

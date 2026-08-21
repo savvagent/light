@@ -124,6 +124,10 @@ impl PermissionGate for PlanGate {
                     })
                     .unwrap_or_default();
 
+                if let Some(sensitive) = argv.iter().find(|a| is_sensitive(a)) {
+                    return Self::floor(PathBuf::from(sensitive));
+                }
+
                 let Some(scope) = &self.scope else {
                     return Self::outside(program);
                 };
