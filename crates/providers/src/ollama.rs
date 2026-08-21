@@ -6,6 +6,10 @@ use crate::{CompleteRequest, CompleteResponse};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// The default local Ollama server root, shared by provider construction and model listing so
+/// the localhost base is never duplicated or allowed to drift.
+pub(crate) const LOCAL_BASE: &str = "http://127.0.0.1:11434";
+
 pub struct OllamaProvider {
     client: reqwest::Client,
     base_url: String,
@@ -27,7 +31,7 @@ impl OllamaProvider {
 
     /// Convenience constructor pointing at the default local Ollama endpoint.
     pub fn local_default(model: impl Into<String>) -> Self {
-        Self::new("http://127.0.0.1:11434", model)
+        Self::new(LOCAL_BASE, model)
     }
 }
 

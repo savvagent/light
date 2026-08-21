@@ -189,15 +189,12 @@ const EN: Catalog = &[
     ("provider.key.env", "env"),
     ("provider.key.keyring", "keyring"),
     ("provider.key.none", "none"),
-    ("provider.list_active", "active: {provider} ({reason})"),
-    ("provider.list_available", "available: {list}"),
     ("key.list", "keys: {list}"),
-    ("status.provider_set", "Provider set to {provider}"),
-    (
-        "status.provider_invalid",
-        "Unknown provider; use anthropic|openai|gemini|deepseek|ollama",
-    ),
     ("status.model_set", "Model set to {model}"),
+    (
+        "status.settings_save_failed",
+        "Couldn't save settings: {error}",
+    ),
     ("status.model_empty", "Usage: /model <id>"),
     (
         "status.model_unsupported",
@@ -243,10 +240,7 @@ const EN: Catalog = &[
     ),
     ("help.section.commands", "Commands"),
     ("help.commands.ask", "/ask <prompt>  completion"),
-    (
-        "help.commands.provider",
-        "/provider [name]  select provider",
-    ),
+    ("help.commands.connect", "/connect  connect a provider"),
     ("help.commands.model", "/model <id>  set model"),
     ("help.commands.key", "/key [provider] [clear]  API key"),
     (
@@ -254,6 +248,24 @@ const EN: Catalog = &[
         "/auth/login  /auth/logout  sign in / out",
     ),
     ("help.commands.lang", "/lang <en|es>  language"),
+    (
+        "status.connect_not_connected",
+        "/connect is available after you sign in",
+    ),
+    ("connect.title", "Connect a provider"),
+    ("connect.key_heading", "API Key"),
+    ("connect.connected", "connected"),
+    ("connect.models_heading", "Models: {provider}"),
+    ("connect.fetching", "Fetching models..."),
+    ("connect.fetch_error", "Couldn't fetch models: {error}"),
+    ("connect.no_models", "No models reported"),
+    (
+        "connect.footer_list",
+        "Esc: close · Enter: select · \u{2191}/\u{2193}: navigate",
+    ),
+    ("connect.footer_key", "Enter: submit · Esc: back"),
+    ("connect.footer_models", "Enter: select · Esc: back"),
+    ("connect.footer_fetching", "Esc: cancel"),
 ];
 
 const ES: Catalog = &[
@@ -444,15 +456,12 @@ const ES: Catalog = &[
     ("provider.key.env", "entorno"),
     ("provider.key.keyring", "llavero"),
     ("provider.key.none", "ninguna"),
-    ("provider.list_active", "activo: {provider} ({reason})"),
-    ("provider.list_available", "disponibles: {list}"),
     ("key.list", "claves: {list}"),
-    ("status.provider_set", "Proveedor cambiado a {provider}"),
-    (
-        "status.provider_invalid",
-        "Proveedor desconocido; usa anthropic|openai|gemini|deepseek|ollama",
-    ),
     ("status.model_set", "Modelo cambiado a {model}"),
+    (
+        "status.settings_save_failed",
+        "No se pudieron guardar los ajustes: {error}",
+    ),
     ("status.model_empty", "Uso: /model <id>"),
     (
         "status.model_unsupported",
@@ -504,10 +513,7 @@ const ES: Catalog = &[
     ),
     ("help.section.commands", "Comandos"),
     ("help.commands.ask", "/ask <indicación>  completar"),
-    (
-        "help.commands.provider",
-        "/provider [nombre]  seleccionar proveedor",
-    ),
+    ("help.commands.connect", "/connect  conectar un proveedor"),
     ("help.commands.model", "/model <id>  configurar modelo"),
     (
         "help.commands.key",
@@ -518,6 +524,27 @@ const ES: Catalog = &[
         "/auth/login  /auth/logout  iniciar / cerrar sesión",
     ),
     ("help.commands.lang", "/lang <en|es>  idioma"),
+    (
+        "status.connect_not_connected",
+        "/connect está disponible después de iniciar sesión",
+    ),
+    ("connect.title", "Conectar un proveedor"),
+    ("connect.key_heading", "Clave de API"),
+    ("connect.connected", "conectado"),
+    ("connect.models_heading", "Modelos: {provider}"),
+    ("connect.fetching", "Obteniendo modelos..."),
+    (
+        "connect.fetch_error",
+        "No se pudieron obtener los modelos: {error}",
+    ),
+    ("connect.no_models", "No se informaron modelos"),
+    (
+        "connect.footer_list",
+        "Esc: cerrar · Enter: elegir · \u{2191}/\u{2193}: navegar",
+    ),
+    ("connect.footer_key", "Enter: enviar · Esc: volver"),
+    ("connect.footer_models", "Enter: elegir · Esc: volver"),
+    ("connect.footer_fetching", "Esc: cancelar"),
 ];
 
 fn lookup(catalog: Catalog, key: &str) -> Option<&'static str> {

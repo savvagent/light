@@ -46,6 +46,23 @@ pub fn key_status(provider: &str, store: &dyn CredentialStore) -> KeyStatus {
     classify(env_key, keyring_key)
 }
 
+/// Resolve a provider's API key: env wins over keyring; an empty env value is treated as absent
+/// (mirrors `classify`'s empty-string rule) so the connect flow never fetches with an empty key.
+/// Pure so it is unit-testable without the process env.
+fn resolve_key_from(env_key: Option<String>, keyring_key: Option<String>) -> Option<String> {
+    if let Some(key) = env_key.filter(|k| !k.is_empty()) {
+        Some(key)
+    } else {
+        keyring_key
+    }
+}
+
+/// The resolved API key for a provider (env over keyring), or `None` when no key is available.
+pub fn resolve_key(provider: &str, store: &dyn CredentialStore) -> Option<String> {
+    let (env_key, keyring_key) = sources(provider, store);
+    resolve_key_from(env_key, keyring_key)
+}
+
 /// Layer the persisted preferences and keyring keys over an env-derived [`Selection`]. Pure and
 /// testable: the caller supplies the base.
 pub fn apply_preferences(
@@ -127,6 +144,36 @@ mod tests {
         let store = MemStore::new();
         assert_eq!(key_status("ollama", &store), KeyStatus::None);
         assert_eq!(key_status("local", &store), KeyStatus::None);
+    }
+
+    #[test]
+    fn resolve_key_from_prefers_env_over_keyring() {
+        assert_eq!(
+            resolve_key_from(Some("env".to_string()), Some("ring".to_string())),
+            Some("env".to_string())
+        );
+        assert_eq!(
+            resolve_key_from(None, Some("ring".to_string())),
+            Some("ring".to_string())
+        );
+        assert_eq!(resolve_key_from(None, None), None);
+    }
+
+    #[test]
+    fn resolve_key_from_treats_an_empty_env_value_as_absent() {
+        assert_eq!(
+            resolve_key_from(Some(String::new()), Some("ring".to_string())),
+            Some("ring".to_string())
+        );
+        assert_eq!(resolve_key_from(Some(String::new()), None), None);
+    }
+
+    #[test]
+    fn resolve_key_reads_a_stored_keyring_key() {
+        let store = MemStore::new();
+        store.set("openai", "sk-ring").unwrap();
+        assert_eq!(resolve_key("openai", &store), Some("sk-ring".to_string()));
+        assert_eq!(resolve_key("openai", &MemStore::new()), None);
     }
 
     #[test]

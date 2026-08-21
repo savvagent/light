@@ -14,7 +14,7 @@ use light_factory_engine::Engine;
 use light_factory_protocol::auth::AuthResponse;
 use light_factory_protocol::session::{Command, Event as EngineEvent, EventKind, SessionId};
 use light_factory_protocol::wire::{ClientMessage, ServerMessage};
-use light_factory_providers::{CompleteRequest, Provider};
+use light_factory_providers::{CompleteRequest, Provider, list_models, list_ollama_models};
 use light_factory_tui::credentials::CredentialStore;
 use light_factory_tui::engine_view::{describe_event, pending_prompt};
 use light_factory_tui::i18n::{self, Locale};
@@ -24,7 +24,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
 use crate::api::{Api, ApiError};
@@ -46,6 +46,11 @@ pub enum UiEvent {
     Completion(Result<String, String>),
     Engine(EngineEvent),
     EngineDropped(u64),
+    Models {
+        nonce: u64,
+        provider: String,
+        result: Result<Vec<String>, String>,
+    },
 }
 
 /// Which field currently owns keyboard input.
@@ -67,6 +72,86 @@ enum Mode {
     Engine,
     Key,
     Help,
+}
+
+/// One row of the connect modal's provider list. Self-contained (id + connected flag) so the pure
+/// transition function needs no store/keyring/network state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderRow {
+    id: String,
+    connected: bool,
+}
+
+/// The connect modal's step. `rows` is carried through every step so "back" navigation can
+/// reconstruct the provider list without re-querying the keyring.
+#[derive(Clone, PartialEq, Eq)]
+enum ConnectStep {
+    ProviderList {
+        rows: Vec<ProviderRow>,
+        selected: usize,
+    },
+    KeyEntry {
+        rows: Vec<ProviderRow>,
+        provider: String,
+        input: String,
+    },
+    ModelList {
+        rows: Vec<ProviderRow>,
+        provider: String,
+        models: Vec<String>,
+        selected: usize,
+        fetching: bool,
+        error: Option<String>,
+        from_key: bool,
+    },
+}
+
+impl std::fmt::Debug for ConnectStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `KeyEntry.input` holds a plaintext API key and must never appear in a Debug rendering.
+        match self {
+            ConnectStep::ProviderList { rows, selected } => f
+                .debug_struct("ProviderList")
+                .field("rows", rows)
+                .field("selected", selected)
+                .finish(),
+            ConnectStep::KeyEntry {
+                rows,
+                provider,
+                input: _,
+            } => f
+                .debug_struct("KeyEntry")
+                .field("rows", rows)
+                .field("provider", provider)
+                .field("input", &"<redacted>")
+                .finish(),
+            ConnectStep::ModelList {
+                rows,
+                provider,
+                models,
+                selected,
+                fetching,
+                error,
+                from_key,
+            } => f
+                .debug_struct("ModelList")
+                .field("rows", rows)
+                .field("provider", provider)
+                .field("models", models)
+                .field("selected", selected)
+                .field("fetching", fetching)
+                .field("error", error)
+                .field("from_key", from_key)
+                .finish(),
+        }
+    }
+}
+
+/// The result of stepping the connect modal: advance to a new [`ConnectStep`], or close.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConnectTransition {
+    Step(ConnectStep),
+    Close,
 }
 
 const LOG_CAPACITY: usize = 200;
@@ -99,6 +184,9 @@ pub struct App {
     key_input: String,
     key_return: Mode,
     help_return: Mode,
+    connect: Option<ConnectStep>,
+    connect_return: Mode,
+    connect_nonce: u64,
     engine: Option<Engine>,
     engine_session: Option<SessionId>,
     engine_forward_task: Option<tokio::task::JoinHandle<()>>,
@@ -151,6 +239,9 @@ impl App {
             key_input: String::new(),
             key_return: Mode::SignIn,
             help_return: Mode::SignIn,
+            connect: None,
+            connect_return: Mode::Connected,
+            connect_nonce: 0,
             engine: None,
             engine_session: None,
             engine_forward_task: None,
@@ -186,6 +277,7 @@ impl App {
         if key.code == KeyCode::Char('p')
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && !self.command_mode
+            && self.connect.is_none()
         {
             self.open_help();
             return false;
@@ -198,6 +290,9 @@ impl App {
         }
         if self.mode == Mode::Key {
             return self.handle_key_entry(key);
+        }
+        if self.connect.is_some() {
+            return self.handle_connect_key(key);
         }
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
@@ -509,10 +604,11 @@ impl App {
             self.error = Some(self.t("status.ask_empty").to_string());
             return;
         }
-        if let Some(arg) = parse_provider_command(trimmed) {
-            match arg {
-                Some(name) => self.set_provider(name),
-                None => self.list_providers(),
+        if parse_connect_command(trimmed) {
+            if self.mode == Mode::Connected {
+                self.enter_connect();
+            } else {
+                self.error = Some(self.t("status.connect_not_connected").to_string());
             }
             return;
         }
@@ -552,30 +648,182 @@ impl App {
         }
     }
 
-    fn set_provider(&mut self, name: &str) {
-        if !is_valid_provider(name) {
-            self.error = Some(self.t("status.provider_invalid").to_string());
-            return;
-        }
-        self.settings.provider = Some(name.to_string());
-        let _ = crate::settings::save(&self.settings);
-        self.rebuild_provider();
-        self.status = self.t_with("status.provider_set", &[("provider", name)]);
+    fn enter_connect(&mut self) {
+        self.connect_return = self.mode;
+        let rows = self.build_provider_rows();
+        self.connect = Some(ConnectStep::ProviderList { rows, selected: 0 });
     }
 
-    fn list_providers(&mut self) {
-        let reason = self.provider_info.reason(self.config.lang);
-        let active = if reason.is_empty() {
-            self.provider_info.display()
-        } else {
-            format!("{} ({})", self.provider_info.display(), reason)
+    fn build_provider_rows(&self) -> Vec<ProviderRow> {
+        PROVIDER_NAMES
+            .iter()
+            .map(|id| {
+                let connected = if *id == "ollama" {
+                    std::env::var("LIGHT_OLLAMA").as_deref() == Ok("1")
+                } else {
+                    crate::selection::key_status(id, self.store.as_ref())
+                        != crate::selection::KeyStatus::None
+                };
+                ProviderRow {
+                    id: id.to_string(),
+                    connected,
+                }
+            })
+            .collect()
+    }
+
+    fn close_connect(&mut self) {
+        self.connect_nonce += 1;
+        self.connect = None;
+        self.mode = self.connect_return;
+    }
+
+    fn apply_and_close_connect(&mut self) {
+        let apply = match &self.connect {
+            Some(ConnectStep::ModelList {
+                provider,
+                models,
+                selected,
+                fetching: false,
+                ..
+            }) => models
+                .get(*selected)
+                .map(|model| (provider.clone(), model.clone())),
+            _ => None,
         };
-        self.push_log(self.t_with("provider.list_active", &[("provider", &active)]));
-        let mut parts = Vec::new();
-        for name in PROVIDER_NAMES {
-            parts.push(format!("{name}: {}", self.key_status_label(name)));
+        if let Some((provider, model)) = apply {
+            self.settings.models.insert(provider.clone(), model.clone());
+            self.settings.provider = Some(provider);
+            if let Err(e) = crate::settings::save(&self.settings) {
+                let err = e.to_string();
+                self.status = self.t_with("status.settings_save_failed", &[("error", &err)]);
+            } else {
+                self.rebuild_provider();
+                self.status = self.t_with("status.model_set", &[("model", model.as_str())]);
+            }
         }
-        self.push_log(self.t_with("provider.list_available", &[("list", &parts.join(", "))]));
+        self.close_connect();
+    }
+
+    fn begin_fetch(&mut self, provider: String, key: Option<String>) {
+        self.connect_nonce += 1;
+        let nonce = self.connect_nonce;
+        let events = self.events.clone();
+        let store = self.store.clone();
+        tokio::spawn(async move {
+            let result = if provider == "ollama" {
+                list_ollama_models().await.map_err(|e| e.to_string())
+            } else {
+                // The just-typed key wins; a connected provider resolves its stored key here.
+                let key = match key {
+                    Some(k) => Some(k),
+                    None => crate::selection::resolve_key(&provider, store.as_ref()),
+                };
+                match key {
+                    Some(k) => list_models(&provider, &k).await.map_err(|e| e.to_string()),
+                    None => Err(format!("no API key for {provider}")),
+                }
+            };
+            let _ = events.send(UiEvent::Models {
+                nonce,
+                provider,
+                result,
+            });
+        });
+    }
+
+    fn handle_models(&mut self, nonce: u64, provider: String, result: Result<Vec<String>, String>) {
+        if nonce != self.connect_nonce {
+            return;
+        }
+        let matches = matches!(
+            &self.connect,
+            Some(ConnectStep::ModelList {
+                provider: p,
+                fetching: true,
+                ..
+            }) if *p == provider
+        );
+        if !matches {
+            return;
+        }
+        let err_msg = result
+            .as_ref()
+            .err()
+            .map(|e| self.t_with("connect.fetch_error", &[("error", e)]));
+        if let Some(ConnectStep::ModelList {
+            models,
+            selected,
+            fetching,
+            error,
+            ..
+        }) = &mut self.connect
+        {
+            match result {
+                Ok(list) => {
+                    *models = list;
+                    *selected = 0;
+                    *fetching = false;
+                    *error = None;
+                }
+                Err(_) => {
+                    *fetching = false;
+                    *error = err_msg;
+                }
+            }
+        }
+    }
+
+    fn handle_connect_key(&mut self, key: KeyEvent) -> bool {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return true;
+        }
+        let Some(step) = self.connect.clone() else {
+            return false;
+        };
+        if matches!(&step, ConnectStep::KeyEntry { input, .. } if input.trim().is_empty())
+            && key.code == KeyCode::Enter
+        {
+            self.status = self.t("status.key_empty").to_string();
+            return false;
+        }
+        let transition = connect_step_next(&step, key);
+
+        let mut fetch_key = None;
+        if let (
+            ConnectStep::KeyEntry {
+                provider, input, ..
+            },
+            ConnectTransition::Step(ConnectStep::ModelList { from_key: true, .. }),
+        ) = (&step, &transition)
+        {
+            let key_value = input.trim().to_string();
+            if let Err(e) = self.store.set(provider, &key_value) {
+                let err = e.to_string();
+                self.error = Some(self.t_with(
+                    "status.key_failed",
+                    &[("provider", provider.as_str()), ("error", &err)],
+                ));
+                return false;
+            }
+            fetch_key = Some(key_value);
+        }
+
+        match transition {
+            ConnectTransition::Close => self.apply_and_close_connect(),
+            ConnectTransition::Step(next) => {
+                if let ConnectStep::ModelList {
+                    provider,
+                    fetching: true,
+                    ..
+                } = &next
+                {
+                    self.begin_fetch(provider.clone(), fetch_key);
+                }
+                self.connect = Some(next);
+            }
+        }
+        false
     }
 
     fn set_model(&mut self, model: &str) {
@@ -1017,6 +1265,10 @@ impl App {
             Mode::Help => self.draw_help(frame, chunks[1]),
         }
 
+        if self.connect.is_some() {
+            self.draw_connect(frame, chunks[1]);
+        }
+
         let hints = if self.command_mode {
             format!("> {}", self.command)
         } else if self.mode == Mode::Help {
@@ -1287,7 +1539,7 @@ impl App {
 
     fn draw_key(&self, frame: &mut Frame, area: Rect) {
         let provider = self.key_target.as_deref().unwrap_or("");
-        let masked: String = "*".repeat(self.key_input.chars().count());
+        let masked = mask(&self.key_input);
         let mut lines = vec![
             Line::from(Span::styled(
                 self.t_with("status.key_enter", &[("provider", provider)]),
@@ -1332,6 +1584,129 @@ impl App {
             )
             .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, modal);
+    }
+
+    fn draw_connect(&self, frame: &mut Frame, area: Rect) {
+        let Some(step) = &self.connect else {
+            return;
+        };
+        let mut lines: Vec<Line> = Vec::new();
+        let title: String;
+        match step {
+            ConnectStep::ProviderList { rows, selected } => {
+                title = self.t("connect.title").to_string();
+                for (i, row) in rows.iter().enumerate() {
+                    let marker = if i == *selected { "> " } else { "  " };
+                    let style = if i == *selected {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    };
+                    let suffix = if row.connected {
+                        format!(" ({})", self.t("connect.connected"))
+                    } else {
+                        String::new()
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!("{marker}{}{suffix}", row.id),
+                        style,
+                    )));
+                }
+            }
+            ConnectStep::KeyEntry {
+                provider, input, ..
+            } => {
+                title = self.t("connect.key_heading").to_string();
+                lines.push(Line::from(
+                    self.t_with("status.key_enter", &[("provider", provider)]),
+                ));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    mask(input),
+                    Style::default().add_modifier(Modifier::REVERSED),
+                )));
+                if let Some(err) = &self.error {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        err.clone(),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
+            }
+            ConnectStep::ModelList {
+                provider,
+                models,
+                selected,
+                fetching,
+                error,
+                ..
+            } => {
+                title = self.t_with("connect.models_heading", &[("provider", provider)]);
+                if *fetching {
+                    lines.push(Line::from(Span::styled(
+                        self.t("connect.fetching"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                } else if let Some(err) = error {
+                    lines.push(Line::from(Span::styled(
+                        err.clone(),
+                        Style::default().fg(Color::Red),
+                    )));
+                } else if models.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        self.t("connect.no_models"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                } else {
+                    for (i, model) in models.iter().enumerate() {
+                        let marker = if i == *selected { "> " } else { "  " };
+                        let style = if i == *selected {
+                            Style::default().fg(Color::Yellow)
+                        } else {
+                            Style::default()
+                        };
+                        lines.push(Line::from(Span::styled(format!("{marker}{model}"), style)));
+                    }
+                }
+            }
+        }
+
+        let footer = match step {
+            ConnectStep::ProviderList { .. } => self.t("connect.footer_list"),
+            ConnectStep::KeyEntry { .. } => self.t("connect.footer_key"),
+            ConnectStep::ModelList { fetching, .. } => {
+                if *fetching {
+                    self.t("connect.footer_fetching")
+                } else {
+                    self.t("connect.footer_models")
+                }
+            }
+        };
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            footer,
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+        let width = 60u16.min(area.width.saturating_sub(2));
+        let popup = Rect {
+            x: area.x + (area.width.saturating_sub(width)) / 2,
+            y: area.y + (area.height.saturating_sub(height)) / 2,
+            width,
+            height,
+        };
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!(" {} ", title)),
+                )
+                .wrap(Wrap { trim: false }),
+            popup,
+        );
     }
 }
 
@@ -1412,6 +1787,11 @@ pub async fn run(
                     UiEvent::Completion(result) => app.handle_completion(result),
                     UiEvent::Engine(event) => app.handle_engine_event(event),
                     UiEvent::EngineDropped(n) => app.handle_engine_dropped(n),
+                    UiEvent::Models {
+                        nonce,
+                        provider,
+                        result,
+                    } => app.handle_models(nonce, provider, result),
                 }
             }
             _ = tick.tick() => {
@@ -1482,7 +1862,7 @@ fn parse_ask_command(command: &str) -> Option<&str> {
 
 use crate::selection::REMOTE_IDS;
 
-/// Every provider a user can select with `/provider`.
+/// Every provider the connect modal can offer.
 const PROVIDER_NAMES: [&str; 5] = ["anthropic", "openai", "gemini", "deepseek", "ollama"];
 
 fn is_valid_provider(name: &str) -> bool {
@@ -1500,18 +1880,146 @@ enum KeyCommand {
     Clear(String),
 }
 
-/// Parse a `/provider [name]` command: `None` when the command is not `/provider`; `Some(None)`
-/// for a bare `/provider` (list); `Some(Some(name))` for `/provider <name>`.
-fn parse_provider_command(command: &str) -> Option<Option<&str>> {
-    let rest = command.strip_prefix("/provider")?;
-    if !word_boundary(rest) {
-        return None;
+/// Parse a `/connect` command: `true` for `/connect` (optionally followed by whitespace), `false`
+/// otherwise — including `/connectX` (no word boundary), mirroring `/ask`.
+fn parse_connect_command(command: &str) -> bool {
+    command
+        .trim()
+        .strip_prefix("/connect")
+        .map(word_boundary)
+        .unwrap_or(false)
+}
+
+/// Mask a secret for rendering: one `*` per character, never the input value.
+fn mask(input: &str) -> String {
+    "*".repeat(input.chars().count())
+}
+
+/// Move a list selection up (`-1`) or down (`+1`), wrapping at the ends.
+fn cycle_index(current: usize, len: usize, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
     }
-    let arg = rest.trim();
-    if arg.is_empty() {
-        Some(None)
+    let next = current as isize + delta;
+    if next < 0 {
+        len - 1
+    } else if next >= len as isize {
+        0
     } else {
-        Some(Some(arg))
+        next as usize
+    }
+}
+
+/// Pure step-transition for the connect modal: maps a key press in the current step to the next
+/// step (or close). No keyring, terminal, or network state — the `rows` carried in each step make
+/// "back" navigation total.
+fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ConnectTransition {
+    match step {
+        ConnectStep::ProviderList { rows, selected } => match key.code {
+            KeyCode::Esc => ConnectTransition::Close,
+            KeyCode::Up => ConnectTransition::Step(ConnectStep::ProviderList {
+                rows: rows.clone(),
+                selected: cycle_index(*selected, rows.len(), -1),
+            }),
+            KeyCode::Down => ConnectTransition::Step(ConnectStep::ProviderList {
+                rows: rows.clone(),
+                selected: cycle_index(*selected, rows.len(), 1),
+            }),
+            KeyCode::Enter => match rows.get(*selected) {
+                Some(row) if row.connected || row.id == "ollama" => {
+                    ConnectTransition::Step(ConnectStep::ModelList {
+                        rows: rows.clone(),
+                        provider: row.id.clone(),
+                        models: Vec::new(),
+                        selected: 0,
+                        fetching: true,
+                        error: None,
+                        from_key: false,
+                    })
+                }
+                Some(row) => ConnectTransition::Step(ConnectStep::KeyEntry {
+                    rows: rows.clone(),
+                    provider: row.id.clone(),
+                    input: String::new(),
+                }),
+                None => ConnectTransition::Step(step.clone()),
+            },
+            _ => ConnectTransition::Step(step.clone()),
+        },
+        ConnectStep::KeyEntry {
+            rows,
+            provider,
+            input,
+        } => match key.code {
+            KeyCode::Esc => ConnectTransition::Step(ConnectStep::ProviderList {
+                rows: rows.clone(),
+                selected: rows.iter().position(|r| r.id == *provider).unwrap_or(0),
+            }),
+            KeyCode::Enter if !input.trim().is_empty() => {
+                ConnectTransition::Step(ConnectStep::ModelList {
+                    rows: rows.clone(),
+                    provider: provider.clone(),
+                    models: Vec::new(),
+                    selected: 0,
+                    fetching: true,
+                    error: None,
+                    from_key: true,
+                })
+            }
+            KeyCode::Backspace => {
+                let mut next = input.clone();
+                next.pop();
+                ConnectTransition::Step(ConnectStep::KeyEntry {
+                    rows: rows.clone(),
+                    provider: provider.clone(),
+                    input: next,
+                })
+            }
+            KeyCode::Char(c) => ConnectTransition::Step(ConnectStep::KeyEntry {
+                rows: rows.clone(),
+                provider: provider.clone(),
+                input: format!("{input}{c}"),
+            }),
+            _ => ConnectTransition::Step(step.clone()),
+        },
+        ConnectStep::ModelList {
+            rows,
+            provider,
+            models,
+            selected,
+            fetching,
+            error,
+            from_key,
+        } => match key.code {
+            KeyCode::Esc => {
+                if !*fetching && takes_key(provider) && (*from_key || error.is_some()) {
+                    ConnectTransition::Step(ConnectStep::KeyEntry {
+                        rows: rows.clone(),
+                        provider: provider.clone(),
+                        input: String::new(),
+                    })
+                } else {
+                    ConnectTransition::Step(ConnectStep::ProviderList {
+                        rows: rows.clone(),
+                        selected: rows.iter().position(|r| r.id == *provider).unwrap_or(0),
+                    })
+                }
+            }
+            KeyCode::Enter if !*fetching && !models.is_empty() => ConnectTransition::Close,
+            KeyCode::Up | KeyCode::Down => {
+                let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                ConnectTransition::Step(ConnectStep::ModelList {
+                    rows: rows.clone(),
+                    provider: provider.clone(),
+                    models: models.clone(),
+                    selected: cycle_index(*selected, models.len(), delta),
+                    fetching: *fetching,
+                    error: error.clone(),
+                    from_key: *from_key,
+                })
+            }
+            _ => ConnectTransition::Step(step.clone()),
+        },
     }
 }
 
@@ -1593,7 +2101,7 @@ fn help_lines(locale: Locale) -> Vec<String> {
             "help.section.commands",
             &[
                 "help.commands.ask",
-                "help.commands.provider",
+                "help.commands.connect",
                 "help.commands.model",
                 "help.commands.key",
                 "help.commands.auth",
@@ -1641,9 +2149,9 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{
-        App, EngineForward, KeyCommand, Mode, UiEvent, engine_approval_key, engine_forward_step,
-        help_lines, parse_ask_command, parse_key_command, parse_model_command,
-        parse_provider_command,
+        App, ConnectStep, ConnectTransition, EngineForward, KeyCommand, Mode, ProviderRow, UiEvent,
+        connect_step_next, cycle_index, engine_approval_key, engine_forward_step, help_lines, mask,
+        parse_ask_command, parse_connect_command, parse_key_command, parse_model_command,
     };
     use crate::config::Config;
     use crate::provider::ProviderInfo;
@@ -1655,7 +2163,7 @@ mod tests {
     use tokio::sync::broadcast::error::RecvError;
     use tokio::sync::mpsc;
 
-    fn test_app() -> App {
+    fn test_app_with_store(store: Arc<dyn CredentialStore>) -> App {
         let config = Config::from_url("http://localhost:8080").unwrap();
         let provider: Arc<dyn Provider> = Arc::new(LocalProvider::new());
         let provider_info = ProviderInfo {
@@ -1665,7 +2173,6 @@ mod tests {
             selected_by: None,
             warnings: Vec::new(),
         };
-        let store: Arc<dyn CredentialStore> = Arc::new(MemStore::new());
         let (events, _rx) = mpsc::unbounded_channel::<UiEvent>();
         App::new(
             config,
@@ -1676,6 +2183,38 @@ mod tests {
             None,
             events,
         )
+    }
+
+    fn test_app() -> App {
+        test_app_with_store(Arc::new(MemStore::new()))
+    }
+
+    /// A store whose `set` always fails, for exercising the keyring-failure branch.
+    struct FailingStore;
+
+    impl CredentialStore for FailingStore {
+        fn get(&self, _provider: &str) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn set(&self, _provider: &str, _key: &str) -> anyhow::Result<()> {
+            anyhow::bail!("keyring unavailable")
+        }
+
+        fn delete(&self, _provider: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn row(id: &str, connected: bool) -> ProviderRow {
+        ProviderRow {
+            id: id.to_string(),
+            connected,
+        }
     }
 
     #[test]
@@ -1732,14 +2271,303 @@ mod tests {
     }
 
     #[test]
-    fn parses_provider_commands() {
-        assert_eq!(parse_provider_command("/provider"), Some(None));
+    fn parses_connect_command() {
+        assert!(parse_connect_command("/connect"));
+        assert!(parse_connect_command("/connect   "));
+        assert!(!parse_connect_command("/connectx"));
+        assert!(!parse_connect_command("/provider"));
+        assert!(!parse_connect_command("/ask hello"));
+    }
+
+    #[test]
+    fn mask_never_echoes_input() {
+        assert_eq!(mask(""), "");
+        assert_eq!(mask("abc"), "***");
+        assert_eq!(mask("sk-secret"), "*********");
+    }
+
+    #[test]
+    fn cycle_index_wraps_at_both_ends() {
+        assert_eq!(cycle_index(0, 3, -1), 2);
+        assert_eq!(cycle_index(2, 3, 1), 0);
+        assert_eq!(cycle_index(1, 3, 1), 2);
+        assert_eq!(cycle_index(0, 0, 1), 0);
+    }
+
+    #[test]
+    fn connect_provider_enter_routes_by_connection_state() {
+        let rows = vec![
+            row("openai", false),
+            row("ollama", true),
+            row("gemini", true),
+        ];
+        let step = ConnectStep::ProviderList {
+            rows: rows.clone(),
+            selected: 0,
+        };
+        assert!(matches!(
+            connect_step_next(&step, key(KeyCode::Enter)),
+            ConnectTransition::Step(ConnectStep::KeyEntry { provider, .. }) if provider == "openai"
+        ));
+        let step = ConnectStep::ProviderList {
+            rows: rows.clone(),
+            selected: 1,
+        };
+        assert!(matches!(
+            connect_step_next(&step, key(KeyCode::Enter)),
+            ConnectTransition::Step(ConnectStep::ModelList {
+                provider,
+                fetching: true,
+                ..
+            }) if provider == "ollama"
+        ));
+        let step = ConnectStep::ProviderList { rows, selected: 2 };
+        assert!(matches!(
+            connect_step_next(&step, key(KeyCode::Enter)),
+            ConnectTransition::Step(ConnectStep::ModelList {
+                provider,
+                fetching: true,
+                from_key: false,
+                ..
+            }) if provider == "gemini"
+        ));
+    }
+
+    #[test]
+    fn connect_ollama_skips_the_key_step_even_when_unconnected() {
+        let rows = vec![row("ollama", false)];
+        let step = ConnectStep::ProviderList { rows, selected: 0 };
+        assert!(matches!(
+            connect_step_next(&step, key(KeyCode::Enter)),
+            ConnectTransition::Step(ConnectStep::ModelList { provider, .. }) if provider == "ollama"
+        ));
+    }
+
+    #[test]
+    fn connect_esc_closes_from_provider_list() {
+        let step = ConnectStep::ProviderList {
+            rows: vec![row("openai", false)],
+            selected: 0,
+        };
         assert_eq!(
-            parse_provider_command("/provider openai"),
-            Some(Some("openai"))
+            connect_step_next(&step, key(KeyCode::Esc)),
+            ConnectTransition::Close
         );
-        assert_eq!(parse_provider_command("/providerx"), None);
-        assert_eq!(parse_provider_command("/ask hello"), None);
+    }
+
+    #[test]
+    fn connect_key_entry_enter_blank_stays_and_esc_returns_to_list() {
+        let rows = vec![row("openai", false)];
+        let step = ConnectStep::KeyEntry {
+            rows: rows.clone(),
+            provider: "openai".to_string(),
+            input: String::new(),
+        };
+        assert!(matches!(
+            connect_step_next(&step, key(KeyCode::Enter)),
+            ConnectTransition::Step(ConnectStep::KeyEntry { input, .. }) if input.is_empty()
+        ));
+        assert!(matches!(
+            connect_step_next(&step, key(KeyCode::Esc)),
+            ConnectTransition::Step(ConnectStep::ProviderList { selected: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn connect_key_entry_enter_with_key_fetches_models() {
+        let rows = vec![row("openai", false)];
+        let step = ConnectStep::KeyEntry {
+            rows,
+            provider: "openai".to_string(),
+            input: "sk-x".to_string(),
+        };
+        assert!(matches!(
+            connect_step_next(&step, key(KeyCode::Enter)),
+            ConnectTransition::Step(ConnectStep::ModelList {
+                provider,
+                fetching: true,
+                from_key: true,
+                ..
+            }) if provider == "openai"
+        ));
+    }
+
+    #[test]
+    fn connect_model_list_enter_selects_and_esc_routes_back() {
+        let step = ConnectStep::ModelList {
+            rows: vec![row("openai", false)],
+            provider: "openai".to_string(),
+            models: vec!["gpt-4o".to_string()],
+            selected: 0,
+            fetching: false,
+            error: None,
+            from_key: true,
+        };
+        assert_eq!(
+            connect_step_next(&step, key(KeyCode::Enter)),
+            ConnectTransition::Close
+        );
+
+        let step = ConnectStep::ModelList {
+            rows: vec![row("openai", false)],
+            provider: "openai".to_string(),
+            models: vec![],
+            selected: 0,
+            fetching: false,
+            error: Some("bad key".to_string()),
+            from_key: false,
+        };
+        assert!(matches!(
+            connect_step_next(&step, key(KeyCode::Esc)),
+            ConnectTransition::Step(ConnectStep::KeyEntry { provider, .. }) if provider == "openai"
+        ));
+
+        let step = ConnectStep::ModelList {
+            rows: vec![row("ollama", false)],
+            provider: "ollama".to_string(),
+            models: vec![],
+            selected: 0,
+            fetching: false,
+            error: Some("unreachable".to_string()),
+            from_key: false,
+        };
+        assert!(matches!(
+            connect_step_next(&step, key(KeyCode::Esc)),
+            ConnectTransition::Step(ConnectStep::ProviderList { .. })
+        ));
+    }
+
+    #[test]
+    fn connect_model_list_enter_is_a_noop_while_fetching() {
+        let step = ConnectStep::ModelList {
+            rows: vec![row("openai", false)],
+            provider: "openai".to_string(),
+            models: vec![],
+            selected: 0,
+            fetching: true,
+            error: None,
+            from_key: false,
+        };
+        assert!(matches!(
+            connect_step_next(&step, key(KeyCode::Enter)),
+            ConnectTransition::Step(ConnectStep::ModelList { fetching: true, .. })
+        ));
+    }
+
+    #[test]
+    fn connect_up_down_wrap_the_provider_selection() {
+        let rows = vec![row("a", false), row("b", false), row("c", false)];
+        let step = ConnectStep::ProviderList { rows, selected: 0 };
+        assert!(matches!(
+            connect_step_next(&step, key(KeyCode::Up)),
+            ConnectTransition::Step(ConnectStep::ProviderList { selected: 2, .. })
+        ));
+        assert!(matches!(
+            connect_step_next(&step, key(KeyCode::Down)),
+            ConnectTransition::Step(ConnectStep::ProviderList { selected: 1, .. })
+        ));
+    }
+
+    fn model_list_step(models: Vec<String>, fetching: bool) -> ConnectStep {
+        ConnectStep::ModelList {
+            rows: vec![],
+            provider: "openai".to_string(),
+            models,
+            selected: 0,
+            fetching,
+            error: None,
+            from_key: false,
+        }
+    }
+
+    #[test]
+    fn handle_models_ignores_stale_nonces() {
+        let mut app = test_app();
+        app.connect_nonce = 5;
+        app.connect = Some(model_list_step(vec![], true));
+        app.handle_models(4, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+        assert!(matches!(
+            app.connect,
+            Some(ConnectStep::ModelList {
+                fetching: true,
+                models,
+                ..
+            }) if models.is_empty()
+        ));
+    }
+
+    #[test]
+    fn handle_models_fills_models_for_a_matching_nonce() {
+        let mut app = test_app();
+        app.connect_nonce = 5;
+        app.connect = Some(model_list_step(vec![], true));
+        app.handle_models(
+            5,
+            "openai".to_string(),
+            Ok(vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]),
+        );
+        assert!(matches!(
+            app.connect,
+            Some(ConnectStep::ModelList {
+                fetching: false,
+                error: None,
+                models,
+                ..
+            }) if models == vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]
+        ));
+    }
+
+    #[test]
+    fn handle_models_surfaces_a_fetch_error() {
+        let mut app = test_app();
+        app.connect_nonce = 5;
+        app.connect = Some(model_list_step(vec![], true));
+        app.handle_models(5, "openai".to_string(), Err("bad key".to_string()));
+        assert!(matches!(
+            app.connect,
+            Some(ConnectStep::ModelList {
+                fetching: false,
+                error: Some(_),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn handle_connect_key_blank_key_stays_on_key_entry() {
+        let mut app = test_app();
+        app.connect = Some(ConnectStep::KeyEntry {
+            rows: vec![],
+            provider: "openai".to_string(),
+            input: "  ".to_string(),
+        });
+        app.handle_connect_key(key(KeyCode::Enter));
+        assert!(matches!(app.connect, Some(ConnectStep::KeyEntry { .. })));
+    }
+
+    #[test]
+    fn handle_connect_key_keyring_failure_sets_error_and_stays() {
+        let mut app = test_app_with_store(Arc::new(FailingStore));
+        app.connect = Some(ConnectStep::KeyEntry {
+            rows: vec![],
+            provider: "openai".to_string(),
+            input: "sk-x".to_string(),
+        });
+        app.handle_connect_key(key(KeyCode::Enter));
+        assert!(matches!(app.connect, Some(ConnectStep::KeyEntry { .. })));
+        assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn connect_step_debug_redacts_the_key() {
+        let step = ConnectStep::KeyEntry {
+            rows: vec![],
+            provider: "openai".to_string(),
+            input: "sk-super-secret".to_string(),
+        };
+        let rendered = format!("{step:?}");
+        assert!(!rendered.contains("sk-super-secret"));
+        assert!(rendered.contains("<redacted>"));
     }
 
     #[test]
