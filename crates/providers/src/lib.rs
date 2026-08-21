@@ -10,6 +10,7 @@ pub mod ollama;
 pub mod openai;
 mod openai_compatible;
 pub mod scripted;
+pub mod selection;
 
 pub use anthropic::AnthropicProvider;
 pub use base_url::{BaseUrlError, validate_base_url};
@@ -19,6 +20,7 @@ pub use local::LocalProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 pub use scripted::ScriptedProvider;
+pub use selection::{BuiltProvider, build_provider_from_env};
 
 // Re-export the seam from engine-core for consumer convenience.
 pub use light_factory_engine_core::{CompleteRequest, CompleteResponse, Provider, Usage};
