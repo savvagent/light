@@ -6,13 +6,34 @@
 //! vector structured is what makes the gate enforceable.
 
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use light_factory_engine_core::tool::Tool;
 use serde_json::{Value, json};
 
+/// The default wall-clock bound on a single command.
+pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub struct BashTool {
     pub workspace_root: PathBuf,
+    timeout: Duration,
+}
+
+impl BashTool {
+    pub fn new(workspace_root: PathBuf) -> Self {
+        Self {
+            workspace_root,
+            timeout: DEFAULT_COMMAND_TIMEOUT,
+        }
+    }
+
+    /// Override the command timeout (primarily for tests).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
 }
 
 #[async_trait]
@@ -43,11 +64,26 @@ impl Tool for BashTool {
             })
             .collect::<anyhow::Result<_>>()?;
 
-        let output = tokio::process::Command::new(program)
+        let mut command = tokio::process::Command::new(program);
+        command
             .args(&argv)
             .current_dir(&self.workspace_root)
-            .output()
-            .await?;
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+
+        // Bound the child so a blocked or long-running command cannot park the turn. On expiry
+        // the child is killed (via kill_on_drop when the future is dropped) and the tool
+        // returns a non-zero result the model can react to.
+        let output = match tokio::time::timeout(self.timeout, command.output()).await {
+            Ok(output) => output?,
+            Err(_) => {
+                return Ok(json!({
+                    "exit_code": -1,
+                    "stdout": "",
+                    "stderr": format!("command timed out after {}s", self.timeout.as_secs()),
+                }));
+            }
+        };
 
         Ok(json!({
             "exit_code": output.status.code().unwrap_or(-1),

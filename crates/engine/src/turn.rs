@@ -262,9 +262,7 @@ impl Session {
             "fs.write" => Box::new(FsWriteTool {
                 workspace: self.workspace.clone(),
             }),
-            "bash" => Box::new(BashTool {
-                workspace_root: self.workspace.root().to_path_buf(),
-            }),
+            "bash" => Box::new(BashTool::new(self.workspace.root().to_path_buf())),
             other => anyhow::bail!("unknown tool: {other}"),
         };
 
