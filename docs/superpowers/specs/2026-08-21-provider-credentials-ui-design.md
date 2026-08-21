@@ -133,13 +133,21 @@ question: between sessions only.
 
 ## §5 Client surface
 
-`crates/tui/src/selection.rs` (new module) owns the client-side composition:
+`crates/tui/src/selection.rs` (new module) owns the client-side composition, and **takes over the
+`build()` composition role** from `crates/tui/src/provider.rs`. There is exactly one composition site:
 
 - `resolve_key(provider_id, store)` → env then keyring (the §2 rule).
+- `key_status(provider_id, store) -> KeyStatus { Env, Keyring, None }` → which source, if any, holds a
+  key for a provider; used by the bare `/key` enumeration (§6), distinct from `resolve_key`.
 - `build_selection(prefs, store)` → assembles a `light_factory_providers::Selection` from env +
   persisted preferences + the keyring, applying the §2 precedence.
-- `rebuild()` wraps `build_provider(&Selection)` and returns the provider plus an enriched
+- `rebuild(prefs, store)` → `build_provider(&Selection)` plus an enriched
   `ProviderInfo { id, model, offline, selected_by, warnings }` for display (§6).
+
+`crates/tui/src/provider.rs` is retained but **only** for the display record — `ProviderInfo` (now
+with `selected_by`) and the `offline_notice`/reason-rendering helpers — its `build()` is removed, so
+no second composition path exists. `main.rs` and `App` call `selection::rebuild`, never
+`provider::build`.
 
 `crates/providers/src/selection.rs` gains (all additive, semver-minor — Non-Negotiable Rule 6):
 
@@ -185,9 +193,13 @@ argument needs parsing:
 
 The connected header (`info.connected`) already shows the provider id + model. It gains a short
 reason suffix derived from `selected_by` / `offline` (e.g. "env LIGHT_REMOTE_PROVIDER", "stored
-preference", "key precedence", "offline: <reason>"). `/provider` prints the full list with each
-provider's key status ("env" / "keyring" / "none") and marks the active one. New EN + ES i18n keys are
-added for every new user-facing string; ES mirrors EN exactly (test-enforced in `i18n.rs`).
+preference", "key precedence", "offline: <reason>"). When selection reached an offline fallback with
+a *known attempted selection* (steps 2–3 of §2), the reason renders the full
+`OfflineReason::NamedProviderMissingKey { selector, .. }`, so the user sees **which** provider they
+named and **which** key variable is missing — the attempted selection is not dropped to a bare
+"offline". `/provider` prints the full list with each provider's key status via `key_status`
+("env" / "keyring" / "none") and marks the active one. New EN + ES i18n keys are added for every new
+user-facing string; ES mirrors EN exactly (test-enforced in `i18n.rs`).
 
 ## Assumptions
 
@@ -243,6 +255,11 @@ with the credential masked on input, redacted everywhere, and env/CI behavior un
   reports failure and points to env; acceptable because that is already the documented headless path,
   but it means the "persists across runs" AC is met only where a keyring exists. Recorded as a
   deliberate trade, not a gap.
+- **Medium — `keyring` Linux backend may also require `libdbus`/`pkg-config` at *build* time.** The
+  plan's first task must verify `cargo build -p light-factory-tui` (and `cargo test --workspace`)
+  succeeds on this machine and in CI before any feature code lands; if the sync Secret-Service backend
+  does not build cleanly, the `CredentialStore` trait is the seam where a lighter backend is swapped in
+  without touching selection or the TUI.
 - **Low — dependency weight.** `keyring` pulls a D-Bus/Secret-Service stack on Linux. Isolated behind
   the `CredentialStore` trait; if the build proves heavy, the trait is the seam where an alternative
   backend would swap in without touching selection or the TUI.
