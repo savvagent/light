@@ -68,7 +68,7 @@ implements it exactly.
 **Interfaces:** produces `DEFAULT_LOCALE`, `SUPPORTED_LOCALES`, `STORAGE_KEY`, `catalogs`,
 `normalizeLocale`, `resolveLocale`, `translate`, `translateErrorCode` (all exported from `i18n.js`).
 
-- [ ] Write `web/src/lib/i18n.test.mjs` first (failing): import from `./i18n.js`; assert (a)
+- [x] Write `web/src/lib/i18n.test.mjs` first (failing): import from `./i18n.js`; assert (a)
   `catalogs.es` has every key in `catalogs.en` and no extra keys; (b) `normalizeLocale('es-MX') === 'es'`,
   `normalizeLocale('fr') === null`; (c) `resolveLocale({saved:'es', navigatorLanguage:'en'}) === 'es'`,
   `resolveLocale({}) === 'en'`; (d) `translate('es','signin.title')` returns a non-English value,
@@ -76,32 +76,32 @@ implements it exactly.
   falls back to `translate('en','nope')`; (f) interpolation `translate('en','device.approve.with_code',{code:'AB12'})`
   contains `AB12`; (g) `translateErrorCode('es','invalid_credentials')` is non-null and
   `translateErrorCode('es','unknown')` is `null`.
-- [ ] Run `node web/src/lib/i18n.test.mjs` — expect failure (module missing).
-- [ ] Implement `web/src/lib/i18n.js` with the full `en`/`es` catalogs (keys listed in §1 of the
+- [x] Run `node web/src/lib/i18n.test.mjs` — expect failure (module missing).
+- [x] Implement `web/src/lib/i18n.js` with the full `en`/`es` catalogs (keys listed in §1 of the
   spec; ensure every view string has a key).
-- [ ] Run `node web/src/lib/i18n.test.mjs` — expect green.
-- [ ] Format and commit: `git add web/src/lib/i18n.js web/src/lib/i18n.test.mjs && git commit -m "web: add i18n catalog and resolution"`.
+- [x] Run `node web/src/lib/i18n.test.mjs` — expect green.
+- [x] Format and commit: `git add web/src/lib/i18n.js web/src/lib/i18n.test.mjs && git commit -m "web: add i18n catalog and resolution"`.
 
 ## Task 2: Reactive glue
 
 **Files:** `web/src/lib/i18n.svelte.js`
 **Interfaces:** consumes `i18n.js`; produces `locale`, `setLocale`, `t`, `errorMessage`.
 
-- [ ] Implement `web/src/lib/i18n.svelte.js` per §3/§4 of the spec (rune `$state`, best-effort
+- [x] Implement `web/src/lib/i18n.svelte.js` per §3/§4 of the spec (rune `$state`, best-effort
   `localStorage` read/write, `t`, `errorMessage`).
-- [ ] Run `node web/src/lib/i18n.test.mjs` (unchanged) to confirm no regression.
-- [ ] Format and commit: `git commit -m "web: add reactive i18n store"`.
+- [x] Run `node web/src/lib/i18n.test.mjs` (unchanged) to confirm no regression.
+- [x] Format and commit: `git commit -m "web: add reactive i18n store"`.
 
 ## Task 3: App shell + language selector
 
 **Files:** `web/src/App.svelte`
 **Interfaces:** consumes `t`, `locale`, `setLocale` from `i18n.svelte.js`.
 
-- [ ] Replace subtitles and footer literals with `t(...)` calls.
-- [ ] Add a `<select>` bound to `locale.value` with `English`/`Español` options, wired to
+- [x] Replace subtitles and footer literals with `t(...)` calls.
+- [x] Add a `<select>` bound to `locale.value` with `English`/`Español` options, wired to
   `setLocale` on change.
-- [ ] Run `cd web && npm run build` — expect success.
-- [ ] Format and commit: `git commit -m "web: localize app shell and add language selector"`.
+- [x] Run `cd web && npm run build` — expect success.
+- [x] Format and commit: `git commit -m "web: localize app shell and add language selector"`.
 
 ## Task 4: Localize views
 
@@ -110,10 +110,10 @@ implements it exactly.
 `web/src/views/DeviceApprove.svelte`
 **Interfaces:** consumes `t`, `errorMessage`.
 
-- [ ] Replace every literal label/button/subtitle/alt/notice with `t(...)`.
-- [ ] Replace `error = e.message` with `error = errorMessage(e.code, e.message)` in every `catch`.
-- [ ] Run `cd web && npm run build` — expect success.
-- [ ] Format and commit: `git commit -m "web: externalize view strings to the i18n catalog"`.
+- [x] Replace every literal label/button/subtitle/alt/notice with `t(...)`.
+- [x] Replace `error = e.message` with `error = errorMessage(e.code, e.message)` in every `catch`.
+- [x] Run `cd web && npm run build` — expect success.
+- [x] Format and commit: `git commit -m "web: externalize view strings to the i18n catalog"`.
 
 ## Task 5: Verification
 
@@ -121,8 +121,8 @@ implements it exactly.
 **Reminders:** this change touches `web/` (deploy shape) — the out-of-band check is `npm run build`
 plus a grep that no English literal remains in the UI path.
 
-- [ ] `cd web && npm run build` — green.
-- [ ] Grep `web/src` for remaining hardcoded English literals (labels/buttons/subtitles) — none in
+- [x] `cd web && npm run build` — green.
+- [x] Grep `web/src` for remaining hardcoded English literals (labels/buttons/subtitles) — none in
   the UI path.
-- [ ] `node web/src/lib/i18n.test.mjs` — green.
-- [ ] Commit any remaining doc changes if needed.
+- [x] `node web/src/lib/i18n.test.mjs` — green.
+- [x] Commit any remaining doc changes if needed.

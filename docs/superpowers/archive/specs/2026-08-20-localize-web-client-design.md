@@ -1,6 +1,6 @@
 # Localize the web client design
 
-> **Status:** DRAFT — externalize every user-facing string in `web/` to an `en` + `es` catalog with locale resolution, persistence, fallback, and deliberate server-error handling.
+> **Status:** IMPLEMENTED — externalize every user-facing string in `web/` to an `en` + `es` catalog with locale resolution, persistence, fallback, and deliberate server-error handling.
 
 > **Implements:** https://github.com/savvagent/light/issues/1
 

@@ -24,7 +24,9 @@ The workflow below is the same loop applied to the repo itself: a plan document 
 approval gate), implementation against it (the mechanical execution), and the repo's own test
 suite as the Verifier. `ARCHITECTURE.md` describes the *intended* destination and marks what is
 built in its "Current state" table; `docs/superpowers/plans/` (latest plan) records where the build
-currently stands.
+currently stands. Shipped specs and plans move to `docs/superpowers/archive/` on close-out, so the
+active directories hold only work in flight — check the archive for the reasoning behind anything
+already delivered.
 
 ## The Iron Law
 
@@ -153,7 +155,7 @@ one-sentence AC → STOP. Write the spec. The fast-path is for genuine trivialit
 | Spec storage | **Repo file, committed.** `docs/superpowers/specs/YYYY-MM-DD-<slug>-design.md` — never a tracker comment, never uncommitted. |
 | Plan storage | **Repo file, committed.** `docs/superpowers/plans/YYYY-MM-DD-<slug>.md` — same rule. |
 | Plan format | Goal / Architecture / Tech Stack / "**Spec:** … read it first" / Global Constraints / File Structure table / Task Order & Rationale / per-task `- [ ]` steps with failing-test-first TDD and a final format-and-commit step. The plan opens with the "For agentic workers: REQUIRED SUB-SKILL" note pointing at `superpowers:subagent-driven-development` / `executing-plans`. |
-| Record-as-shipped | On completion, update the spec's `> **Status:**` to IMPLEMENTED, mark the plan's phases complete, and commit as `docs: record <…> as shipped` (e.g. `docs: record the device authorization grant as shipped`). |
+| Record-as-shipped | On completion, update the spec's `> **Status:**` to IMPLEMENTED, mark the plan's phases complete, `git mv` both into `docs/superpowers/archive/{specs,plans}/`, add a row to `docs/superpowers/archive/README.md`, and commit as `docs: record <…> as shipped` (e.g. `docs: record the device authorization grant as shipped`). |
 | Architecture caveat | `ARCHITECTURE.md` describes the full intended design, including the engine core that does not exist yet (plan-first approval, Command/Event protocol, agent-to-agent bus, Slack/JIRA/GitHub integrations) — its "Current state" table marks what is built, and the latest `docs/superpowers/plans/` records where the build stands. Docs can still lag the code. Read the code. |
 | Test command | `cargo test --workspace`. Per crate: `cargo test -p light-factory-<crate> [filter]`. The persistence integration test (`crates/persistence/tests/pg_store.rs`) reads `DATABASE_URL` and **skips** when PostgreSQL is unavailable — the suite is not fully offline; a local dev cluster is described in `ARCHITECTURE.md`. |
 | Lint / format | `cargo clippy --workspace --all-targets -D warnings` and `cargo fmt --all`. **Run `cargo fmt --all` before every Rust commit** (rustfmt is pinned in `rust-toolchain.toml`). |

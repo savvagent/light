@@ -1,6 +1,6 @@
 # Localize the TUI (ratatui client) design
 
-> **Status:** DRAFT — externalize every user-facing string in `crates/tui` to an `en` + `es` catalog with locale resolution (`--lang` → saved config → `LANG`/`LC_ALL` → `en`), persistence, fallback, and deliberate server-error handling.
+> **Status:** IMPLEMENTED — externalize every user-facing string in `crates/tui` to an `en` + `es` catalog with locale resolution (`--lang` → saved config → `LANG`/`LC_ALL` → `en`), persistence, fallback, and deliberate server-error handling.
 
 > **Implements:** https://github.com/savvagent/light/issues/2
 

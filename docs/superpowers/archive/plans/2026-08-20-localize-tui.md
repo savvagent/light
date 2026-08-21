@@ -62,7 +62,7 @@ it exactly.
 **Files:** `crates/tui/src/i18n.rs`
 **Interfaces:** produces `Locale`, `t`, `t_with`, `error_message`, `resolve_locale`.
 
-- [ ] Write the `#[cfg(test)] mod tests` first (failing): assert (a) every `ES` key exists in `EN`
+- [x] Write the `#[cfg(test)] mod tests` first (failing): assert (a) every `ES` key exists in `EN`
   and key sets are identical; (b) `Locale::parse` maps `en`, `EN`, `en-US`, `en_US.UTF-8` → `En`,
   `es-419` → `Es`, `fr`/`C.UTF-8` → `None`; (c) `resolve_locale` precedence
   (`Some("es"), _, _, _` → `Es`; `None, Some("es"), _, _` → `Es`; `None, None, Some("es"), _` →
@@ -71,49 +71,49 @@ it exactly.
   `t(Locale::Es, "definitely.missing")` == `t(Locale::En, "definitely.missing")`; (f) `t_with`
   interpolation; (g) `error_message(Locale::Es, "invalid_credentials")` is `Some` and
   `error_message(Locale::En, "no_such_code")` is `None`.
-- [ ] Run `cargo test -p light-factory-tui i18n` — expect compile failure (module missing).
-- [ ] Implement `i18n.rs` with full `EN`/`ES` catalogs (keys listed in §1/§3 of the spec).
-- [ ] Run `cargo test -p light-factory-tui i18n` — expect green.
-- [ ] `cargo fmt --all` and commit: `git commit -m "tui: add i18n catalog, lookup, and locale resolution"`.
+- [x] Run `cargo test -p light-factory-tui i18n` — expect compile failure (module missing).
+- [x] Implement `i18n.rs` with full `EN`/`ES` catalogs (keys listed in §1/§3 of the spec).
+- [x] Run `cargo test -p light-factory-tui i18n` — expect green.
+- [x] `cargo fmt --all` and commit: `git commit -m "tui: add i18n catalog, lookup, and locale resolution"`.
 
 ## Task 2: settings persistence
 
 **Files:** `crates/tui/src/settings.rs`
 **Interfaces:** produces `load_lang`, `save_lang`, and `_at(path)` variants.
 
-- [ ] Write the `#[cfg(test)] mod tests` first (failing): `save_lang_at`/`load_lang_at` round-trip
+- [x] Write the `#[cfg(test)] mod tests` first (failing): `save_lang_at`/`load_lang_at` round-trip
   against a temp path (use `std::env::temp_dir()` + unique suffix), and `load_lang_at` on a
   nonexistent path returns `None`.
-- [ ] Run `cargo test -p light-factory-tui settings` — expect compile failure.
-- [ ] Implement `settings.rs` (JSON `{ "lang": … }` at `~/.config/light-factory/config.json`).
-- [ ] Run `cargo test -p light-factory-tui settings` — expect green.
-- [ ] `cargo fmt --all` and commit: `git commit -m "tui: add locale settings persistence"`.
+- [x] Run `cargo test -p light-factory-tui settings` — expect compile failure.
+- [x] Implement `settings.rs` (JSON `{ "lang": … }` at `~/.config/light-factory/config.json`).
+- [x] Run `cargo test -p light-factory-tui settings` — expect green.
+- [x] `cargo fmt --all` and commit: `git commit -m "tui: add locale settings persistence"`.
 
 ## Task 3: config + CLI wiring
 
 **Files:** `crates/tui/src/config.rs`, `crates/tui/src/main.rs`
 **Interfaces:** `Config::with_lang`, `Config.lang`; `--lang` flag; `mod i18n; mod settings;`.
 
-- [ ] Add `lang: Locale` to `Config`, default `Locale::En` in `from_url`, plus `with_lang`.
-- [ ] Add `--lang <LANG>` to `Cli`; resolve via `resolve_locale` (CLI → `settings::load_lang` →
+- [x] Add `lang: Locale` to `Config`, default `Locale::En` in `from_url`, plus `with_lang`.
+- [x] Add `--lang <LANG>` to `Cli`; resolve via `resolve_locale` (CLI → `settings::load_lang` →
   `LC_ALL` → `LANG`), persist when `--lang` was passed, localize the `"Logged out."` path, and pass
   the resolved locale into `app::run`.
-- [ ] Run `cargo test -p light-factory-tui` — expect green.
-- [ ] `cargo fmt --all` and commit: `git commit -m "tui: wire locale resolution through config and CLI"`.
+- [x] Run `cargo test -p light-factory-tui` — expect green.
+- [x] `cargo fmt --all` and commit: `git commit -m "tui: wire locale resolution through config and CLI"`.
 
 ## Task 4: externalize app.rs strings
 
 **Files:** `crates/tui/src/app.rs`
 **Interfaces:** consumes `i18n::{t, t_with, error_message}` via `self.t`/`self.t_with`/`self.error_text`.
 
-- [ ] Add `self.t`/`self.t_with`/`self.error_text` helpers on `App`.
-- [ ] Replace every literal status line, screen title, field label, hint, footer bar, log line, and
+- [x] Add `self.t`/`self.t_with`/`self.error_text` helpers on `App`.
+- [x] Replace every literal status line, screen title, field label, hint, footer bar, log line, and
   validation/error message with the localized helper.
-- [ ] Add the `/lang en|es` command to `run_command` (mutate `config.lang`, persist, localized
+- [x] Add the `/lang en|es` command to `run_command` (mutate `config.lang`, persist, localized
   confirmation / invalid-language error).
-- [ ] Update `handle_server`'s `ws_closed` path to use localized status + `error_text`.
-- [ ] Run `cargo test -p light-factory-tui` — expect green.
-- [ ] `cargo fmt --all` and commit: `git commit -m "tui: externalize UI strings to the i18n catalog"`.
+- [x] Update `handle_server`'s `ws_closed` path to use localized status + `error_text`.
+- [x] Run `cargo test -p light-factory-tui` — expect green.
+- [x] `cargo fmt --all` and commit: `git commit -m "tui: externalize UI strings to the i18n catalog"`.
 
 ## Task 5: full verification
 
@@ -121,7 +121,7 @@ it exactly.
 **Reminders:** this change touches only `crates/tui` (no Fly image, no web bundle, no DB migration).
 Out-of-band check is vacuous — state it in the PR.
 
-- [ ] `cargo fmt --all --check` — clean.
-- [ ] `cargo clippy --workspace --all-targets -D warnings` — clean.
-- [ ] `cargo test --workspace` — green.
-- [ ] Grep `crates/tui/src/app.rs` for remaining hardcoded English literals — none in the UI path.
+- [x] `cargo fmt --all --check` — clean.
+- [x] `cargo clippy --workspace --all-targets -D warnings` — clean.
+- [x] `cargo test --workspace` — green.
+- [x] Grep `crates/tui/src/app.rs` for remaining hardcoded English literals — none in the UI path.

@@ -197,6 +197,8 @@ Operational facts for a fresh machine or session.
   clients; TOTP seeds and codes never logged.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` before calling a slice done.
 - Do not commit unless asked. No attribution/Co-Authored-By anywhere.
+- On close-out, mark the spec `IMPLEMENTED`, tick the plan's steps, and `git mv` both into
+  `docs/superpowers/archive/`. The active spec/plan directories hold only work in flight.
 - GitHub Actions pinned to full 40-char commit SHAs (never mutable tags/branches). To bump an
   action, resolve its tag with
   `git ls-remote https://github.com/<owner>/<repo>.git "refs/tags/<tag>^{}"` (the `^{}`
@@ -206,12 +208,19 @@ Operational facts for a fresh machine or session.
 ## Design record
 
 Design specs live in `docs/superpowers/specs/`, implementation plans in
-`docs/superpowers/plans/`.
+`docs/superpowers/plans/`. **On close-out both move to `docs/superpowers/archive/`**, so the
+active directories list only work in flight. Archiving is not deletion — the archive holds the
+reasoning behind decisions the code cannot express, and some of it still binds (the localization
+specs define the i18n contract every new user-facing string must follow). See
+`docs/superpowers/archive/README.md`.
+
+Active:
 
 - `2026-08-20-engine-core-design.md` — the engine: crate layout, Command/Event vocabulary,
   session lifetime, turn state machine, and the plan gate.
 - `2026-08-20-port-llm-providers-design.md` — porting otto's seven providers, the `base_url`
-  trust boundary, and env-driven provider selection.
+  trust boundary, and env-driven provider selection. **Currently only on the
+  `port-llm-providers` branch, not on master.**
 
 **These two interlock.** `engine-core` owns the `Provider` trait, so the engine plan's Task 4 runs
 first, then the whole providers plan, then the rest of the engine plan. Each plan states this in
