@@ -214,12 +214,5 @@ specs define the i18n contract every new user-facing string must follow). See
 
 Active:
 
-- `2026-08-20-engine-core-design.md` — the engine: crate layout, Command/Event vocabulary,
-  session lifetime, turn state machine, and the plan gate.
-- `2026-08-20-port-llm-providers-design.md` — porting otto's seven providers, the `base_url`
-  trust boundary, and env-driven provider selection. **Currently only on the
-  `port-llm-providers` branch, not on master.**
-
-**These two interlock.** `engine-core` owns the `Provider` trait, so the engine plan's Task 4 runs
-first, then the whole providers plan, then the rest of the engine plan. Each plan states this in
-its own header; do not run them independently.
+_None — the engine core slice and the providers port have shipped; their specs and plans are in
+`docs/superpowers/archive/`._

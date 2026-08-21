@@ -18,3 +18,5 @@ belongs in the active directories.
 | `pin-actions-to-shas` | Pinned every `uses:` ref to a full 40-char commit SHA; the convention now lives in `ARCHITECTURE.md` |
 | `localize-tui` | `en` + `es` catalogs, locale resolution, and persistence for the ratatui client |
 | `localize-web-client` | The same contract for the Svelte SPA |
+| `engine-core` | The engine thin vertical slice: Command/Event vocabulary, sensitive-path floor, `engine-core`/`providers`/`tools`/`engine` crates, `PlanGate`, session actor, turn state machine, and TUI wiring |
+| `port-llm-providers` | Ported otto's seven providers, the `base_url` trust boundary, and env-driven selection with a TUI `/ask` command |
