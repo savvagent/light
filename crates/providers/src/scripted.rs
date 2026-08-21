@@ -111,4 +111,9 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn scripted_provider_is_not_offline() {
+        assert!(!ScriptedProvider::new("X").is_offline());
+    }
 }
