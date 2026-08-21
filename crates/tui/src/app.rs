@@ -43,6 +43,7 @@ pub enum UiEvent {
     },
     Completion(Result<String, String>),
     Engine(EngineEvent),
+    EngineDropped(u64),
 }
 
 /// Which field currently owns keyboard input.
@@ -248,8 +249,20 @@ impl App {
         let mut events = engine.handle(session).expect("just created").subscribe();
         let tx = self.events.clone();
         tokio::spawn(async move {
-            while let Ok(event) = events.recv().await {
-                let _ = tx.send(UiEvent::Engine(event));
+            loop {
+                match engine_forward_step(events.recv().await) {
+                    EngineForward::Event(event) => {
+                        if tx.send(UiEvent::Engine(event)).is_err() {
+                            break;
+                        }
+                    }
+                    EngineForward::Dropped(n) => {
+                        if tx.send(UiEvent::EngineDropped(n)).is_err() {
+                            break;
+                        }
+                    }
+                    EngineForward::Stop => break,
+                }
             }
         });
 
@@ -319,6 +332,19 @@ impl App {
         }
         if let Some(prompt) = pending_prompt(self.config.lang, &event.kind) {
             self.pending = Some((event.kind, prompt));
+        }
+    }
+
+    fn handle_engine_dropped(&mut self, n: u64) {
+        let count = n.to_string();
+        let line = i18n::t_with(
+            self.config.lang,
+            "engine.dropped_events",
+            &[("count", &count)],
+        );
+        self.engine_log.push(line);
+        while self.engine_log.len() > LOG_CAPACITY {
+            self.engine_log.remove(0);
         }
     }
 
@@ -1089,6 +1115,7 @@ pub async fn run(
                     }
                     UiEvent::Completion(result) => app.handle_completion(result),
                     UiEvent::Engine(event) => app.handle_engine_event(event),
+                    UiEvent::EngineDropped(n) => app.handle_engine_dropped(n),
                 }
             }
             _ = tick.tick() => {
@@ -1121,6 +1148,25 @@ fn engine_approval_key(c: char, pending: bool) -> Option<bool> {
     }
 }
 
+/// One step of the engine-event forwarding loop, decoded from a `broadcast::Receiver::recv`
+/// result. `Lagged(n)` continues the loop (surfacing a "dropped n events" notice); only a
+/// closed channel ends forwarding.
+enum EngineForward {
+    Event(EngineEvent),
+    Dropped(u64),
+    Stop,
+}
+
+fn engine_forward_step(
+    result: Result<EngineEvent, tokio::sync::broadcast::error::RecvError>,
+) -> EngineForward {
+    match result {
+        Ok(event) => EngineForward::Event(event),
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => EngineForward::Dropped(n),
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => EngineForward::Stop,
+    }
+}
+
 /// Parse an `/ask <prompt>` command into the prompt, or `None` when the command is not an
 /// `/ask` with a non-empty prompt. `/ask` and `/ask   ` (empty prompt) are `None` so the caller
 /// can show a usage hint; `/askhello` (no word boundary) and other commands are also `None`.
@@ -1140,7 +1186,9 @@ fn parse_ask_command(command: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{engine_approval_key, parse_ask_command};
+    use super::{EngineForward, engine_approval_key, engine_forward_step, parse_ask_command};
+    use light_factory_protocol::session::{Event as EngineEvent, EventKind, SessionId};
+    use tokio::sync::broadcast::error::RecvError;
 
     #[test]
     fn approval_keys_only_fire_while_a_prompt_is_pending() {
@@ -1149,6 +1197,33 @@ mod tests {
         assert_eq!(engine_approval_key('a', false), None);
         assert_eq!(engine_approval_key('d', false), None);
         assert_eq!(engine_approval_key('x', true), None);
+    }
+
+    #[test]
+    fn a_lagged_broadcast_continues_instead_of_stopping() {
+        assert!(matches!(
+            engine_forward_step(Err(RecvError::Lagged(7))),
+            EngineForward::Dropped(7)
+        ));
+        assert!(matches!(
+            engine_forward_step(Err(RecvError::Closed)),
+            EngineForward::Stop
+        ));
+    }
+
+    #[test]
+    fn a_received_event_is_forwarded() {
+        let event = EngineEvent {
+            seq: 1,
+            session: SessionId::new(),
+            kind: EventKind::Log {
+                message: "hi".into(),
+            },
+        };
+        assert!(matches!(
+            engine_forward_step(Ok(event)),
+            EngineForward::Event(_)
+        ));
     }
 
     #[test]
