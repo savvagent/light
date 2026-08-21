@@ -1,6 +1,6 @@
 # Offline provider selection reason design
 
-> **Status:** DRAFT — surface *why* provider selection fell back to the offline `LocalProvider`,
+> **Status:** IMPLEMENTED (2026-08-21) — surface *why* provider selection fell back to the offline `LocalProvider`,
 > state it in the engine pane before the first turn, and report "no provider configured" instead
 > of `invalid_plan`.
 
