@@ -1745,6 +1745,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "glob",
+ "libc",
  "light-factory-engine-core",
  "light-factory-protocol",
  "serde",

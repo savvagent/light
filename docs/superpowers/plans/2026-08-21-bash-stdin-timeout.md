@@ -6,8 +6,9 @@
 and bound its wall-clock runtime, killing the child on expiry and returning a non-zero result.
 
 **Architecture:** Add `BashTool::new` / `with_timeout` and a `timeout` field; spawn with
-`Stdio::null()` stdin and `kill_on_drop`, and wrap `Command::output()` in
-`tokio::time::timeout`.
+`Stdio::null()` stdin, and bound runtime with `tokio::time::timeout`. On expiry the child and
+its whole process group are killed (Unix: `process_group(0)` + `kill(-pgid)`) so forking
+commands like `cargo test` leave no orphaned descendants.
 
 **Tech Stack:** Rust, tokio process + time.
 
@@ -31,8 +32,9 @@ public-interface break).
 
 - [x] Redirect stdin to `Stdio::null()`.
 - [x] Add `DEFAULT_COMMAND_TIMEOUT` + `timeout` field + `new`/`with_timeout` constructors.
-- [x] Wrap `output()` in `tokio::time::timeout`; on expiry return a non-zero result with a
-      "timed out" stderr message.
+- [x] Wrap execution in `tokio::time::timeout`; on expiry kill the child's whole process group
+      and return a non-zero result with a "timed out" stderr message.
 - [x] Update `turn.rs` to construct `BashTool` via `BashTool::new`.
-- [x] Add tests: `cat` reaches EOF (stdin null) and `sleep 60` is killed on a short timeout.
+- [x] Add tests: `cat` reaches EOF (stdin null), `sleep 60` is killed on a short timeout, and a
+      forking `sh -c` leaves no grandchild behind.
 - [x] Run `cargo fmt --all` and commit.

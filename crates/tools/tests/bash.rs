@@ -90,3 +90,23 @@ async fn a_command_longer_than_the_timeout_is_killed() {
     assert_ne!(out["exit_code"], 0);
     assert!(out["stderr"].as_str().unwrap().contains("timed out"));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_timed_out_command_kills_its_whole_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("marker");
+    let tool =
+        BashTool::new(dir.path().to_path_buf()).with_timeout(std::time::Duration::from_millis(50));
+
+    // `sh` forks `sleep` (a grandchild). Killing only the direct child would leave `sleep`
+    // running long enough to write the marker; killing the group must stop it.
+    let out = tool
+        .call(json!({ "program": "sh", "args": ["-c", "sleep 1; touch marker"] }))
+        .await
+        .unwrap();
+
+    assert_ne!(out["exit_code"], 0);
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    assert!(!marker.exists(), "grandchild survived the timeout kill");
+}

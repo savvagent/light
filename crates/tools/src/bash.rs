@@ -12,6 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use light_factory_engine_core::tool::Tool;
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
 
 /// The default wall-clock bound on a single command.
 pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
@@ -33,6 +34,31 @@ impl BashTool {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+}
+
+/// Drain a child's stdout/stderr handle into memory.
+async fn drain(
+    mut stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    Ok(buf)
+}
+
+/// Kill a spawned child and, on Unix, its whole process group. `process_group(0)` makes the
+/// child a group leader, so its pid is the pgid and `kill(-pgid)` reaches every descendant
+/// (e.g. a `cargo test` subprocess), not just the direct child.
+fn kill_child(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.start_kill();
     }
 }
 
@@ -69,14 +95,26 @@ impl Tool for BashTool {
             .args(&argv)
             .current_dir(&self.workspace_root)
             .stdin(Stdio::null())
-            .kill_on_drop(true);
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        #[cfg(unix)]
+        command.process_group(0);
+
+        let mut child = command.spawn()?;
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let out_task = tokio::spawn(drain(stdout));
+        let err_task = tokio::spawn(drain(stderr));
 
         // Bound the child so a blocked or long-running command cannot park the turn. On expiry
-        // the child is killed (via kill_on_drop when the future is dropped) and the tool
-        // returns a non-zero result the model can react to.
-        let output = match tokio::time::timeout(self.timeout, command.output()).await {
-            Ok(output) => output?,
+        // the child and its whole process group are killed, and the tool returns a non-zero
+        // result the model can react to.
+        let status = match tokio::time::timeout(self.timeout, child.wait()).await {
+            Ok(status) => status?,
             Err(_) => {
+                kill_child(&mut child);
+                let _ = child.wait().await;
                 return Ok(json!({
                     "exit_code": -1,
                     "stdout": "",
@@ -85,10 +123,13 @@ impl Tool for BashTool {
             }
         };
 
+        let stdout = out_task.await??;
+        let stderr = err_task.await??;
+
         Ok(json!({
-            "exit_code": output.status.code().unwrap_or(-1),
-            "stdout": String::from_utf8_lossy(&output.stdout),
-            "stderr": String::from_utf8_lossy(&output.stderr),
+            "exit_code": status.code().unwrap_or(-1),
+            "stdout": String::from_utf8_lossy(&stdout),
+            "stderr": String::from_utf8_lossy(&stderr),
         }))
     }
 }
