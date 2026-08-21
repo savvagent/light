@@ -1,0 +1,23 @@
+[package]
+name = "light-factory-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+light-factory-protocol = { path = "../protocol" }
+light-factory-engine-core = { path = "../engine-core" }
+light-factory-providers = { path = "../providers" }
+light-factory-tools = { path = "../tools" }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+glob = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
