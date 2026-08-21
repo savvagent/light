@@ -21,6 +21,13 @@ const OUT_OF_SCOPE_JSON: &str =
 const READ_JSON: &str = r#"{"tool":"fs.read","args":{"path":"notes.txt"}}"#;
 const DONE_JSON: &str = r#"{"done": true}"#;
 
+const ECHO_PLAN_JSON: &str = r#"```json
+{"id":"11111111-1111-1111-1111-111111111111","summary":"echo forever",
+ "steps":[],
+ "scope":{"write_paths":[],"commands":[{"program":"echo","args":["Any"]}]}}
+```"#;
+const ECHO_JSON: &str = r#"{"tool":"bash","args":{"program":"echo","args":["hi"]}}"#;
+
 fn provider(execute_response: &str) -> Arc<dyn Provider> {
     Arc::new(
         ScriptedProvider::new(DONE_JSON)
@@ -268,4 +275,90 @@ async fn the_step_budget_stops_a_turn_that_never_finishes() {
 
     let kind = next_matching(&mut events, |k| matches!(k, EventKind::TurnComplete { .. })).await;
     assert!(matches!(kind, EventKind::TurnComplete { ok: false }));
+}
+
+#[tokio::test]
+async fn a_prompt_sent_mid_turn_is_rejected_not_silently_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Arc::new(LocalWorkspace::new(dir.path().to_path_buf()).unwrap());
+    let id = SessionId::new();
+    let handle = Session::spawn(id, ws, provider(DONE_JSON));
+    let mut events = handle.subscribe();
+
+    handle.send(Command::SendPrompt {
+        session: id,
+        text: "write a note".into(),
+    });
+    let kind = next_matching(&mut events, |k| matches!(k, EventKind::PlanProposed { .. })).await;
+    let EventKind::PlanProposed { plan_id, .. } = kind else {
+        unreachable!()
+    };
+
+    // A second prompt while the plan decision is pending must be visibly rejected.
+    handle.send(Command::SendPrompt {
+        session: id,
+        text: "another thing".into(),
+    });
+    let kind = next_matching(
+        &mut events,
+        |k| matches!(k, EventKind::Error { code, .. } if code == "turn_in_progress"),
+    )
+    .await;
+    assert!(matches!(kind, EventKind::Error { .. }));
+
+    // The turn is still parked awaiting the plan decision and proceeds normally.
+    handle.send(Command::ApprovePlan {
+        session: id,
+        plan_id,
+        approved: true,
+    });
+    let kind = next_matching(&mut events, |k| matches!(k, EventKind::TurnComplete { .. })).await;
+    assert!(matches!(kind, EventKind::TurnComplete { ok: true }));
+}
+
+#[tokio::test]
+async fn a_prompt_sent_during_execution_is_rejected_not_queued() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Arc::new(LocalWorkspace::new(dir.path().to_path_buf()).unwrap());
+    let id = SessionId::new();
+    let provider: Arc<dyn Provider> = Arc::new(
+        ScriptedProvider::new(ECHO_JSON)
+            .on("You are the planner", ECHO_PLAN_JSON)
+            .on("You are executing", ECHO_JSON),
+    );
+    let handle = Session::spawn(id, ws, provider);
+    let mut events = handle.subscribe();
+
+    handle.send(Command::SendPrompt {
+        session: id,
+        text: "echo forever".into(),
+    });
+    let kind = next_matching(&mut events, |k| matches!(k, EventKind::PlanProposed { .. })).await;
+    let EventKind::PlanProposed { plan_id, .. } = kind else {
+        unreachable!()
+    };
+    handle.send(Command::ApprovePlan {
+        session: id,
+        plan_id,
+        approved: true,
+    });
+
+    // Wait for the turn to actually be executing (an in-scope command has run).
+    let kind = next_matching(&mut events, |k| matches!(k, EventKind::CommandRun { .. })).await;
+    assert!(matches!(kind, EventKind::CommandRun { .. }));
+
+    // A prompt sent now must be visibly rejected at the next iteration boundary, not silently
+    // queued to run as a fresh turn.
+    handle.send(Command::SendPrompt {
+        session: id,
+        text: "interrupting".into(),
+    });
+    let kind = next_matching(
+        &mut events,
+        |k| matches!(k, EventKind::Error { code, .. } if code == "turn_in_progress"),
+    )
+    .await;
+    assert!(matches!(kind, EventKind::Error { .. }));
+
+    handle.send(Command::Abort { session: id });
 }

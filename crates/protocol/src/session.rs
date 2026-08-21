@@ -116,14 +116,6 @@ pub enum EventKind {
         plan_id: Uuid,
         approved: bool,
     },
-    StepStarted {
-        step_id: Uuid,
-        description: String,
-    },
-    StepFinished {
-        step_id: Uuid,
-        ok: bool,
-    },
     FileEdit {
         path: PathBuf,
         bytes_written: u64,

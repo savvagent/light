@@ -1,9 +1,9 @@
-//! The session actor: owns a workspace, the approved plan, and the event sequence.
+//! The session actor: owns a workspace, the provider handle, and the event sequence.
 
 use std::sync::Arc;
 
 use light_factory_engine_core::traits::Provider;
-use light_factory_protocol::session::{Command, Event, EventKind, Plan, SessionId};
+use light_factory_protocol::session::{Command, Event, EventKind, SessionId};
 use light_factory_tools::LocalWorkspace;
 use tokio::sync::{broadcast, mpsc};
 
@@ -34,7 +34,6 @@ pub struct Session {
     pub(crate) id: SessionId,
     pub(crate) workspace: Arc<LocalWorkspace>,
     pub(crate) provider: Arc<dyn Provider>,
-    pub(crate) approved: Option<Plan>,
     pub(crate) paused: bool,
     pub(crate) seq: u64,
     pub(crate) events: broadcast::Sender<Event>,
@@ -54,7 +53,6 @@ impl Session {
             id,
             workspace,
             provider,
-            approved: None,
             paused: false,
             seq: 0,
             events: events_tx.clone(),

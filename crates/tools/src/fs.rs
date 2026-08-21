@@ -26,7 +26,9 @@ impl Tool for FsReadTool {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("fs.read requires a string `path`"))?;
         let bytes = self.workspace.read(Path::new(path)).await?;
-        Ok(json!({ "contents": String::from_utf8_lossy(&bytes) }))
+        let contents = String::from_utf8(bytes)
+            .map_err(|_| anyhow::anyhow!("fs.read: {path} is not valid UTF-8"))?;
+        Ok(json!({ "contents": contents }))
     }
 }
 

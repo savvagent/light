@@ -81,11 +81,9 @@ impl Session {
             return;
         }
 
-        self.approved = Some(plan.clone());
         let ok = self.execute(goal, &plan, commands).await;
         self.emit(EventKind::TurnComplete { ok });
     }
-
     async fn propose_plan(&mut self, goal: &str) -> Option<Plan> {
         let request = CompleteRequest {
             prompt: render_plan_prompt(goal),
@@ -134,10 +132,11 @@ impl Session {
                 } if id == plan_id => {
                     return approved;
                 }
-                Command::Pause { .. } => self.paused = true,
-                Command::Resume { .. } => self.paused = false,
-                Command::Abort { .. } => return false,
-                _ => {}
+                other => {
+                    if !self.apply_non_decision_command(other) {
+                        return false;
+                    }
+                }
             }
         }
         // The command channel closed with no answer: fail closed.
@@ -253,18 +252,56 @@ impl Session {
         }
     }
 
-    /// Park while paused. Returns `false` if the turn was aborted or the channel closed —
-    /// both fail closed, ending the turn rather than resuming unsupervised.
-    async fn wait_if_paused(&mut self, commands: &mut mpsc::UnboundedReceiver<Command>) -> bool {
-        while self.paused {
-            match commands.recv().await {
-                Some(Command::Resume { .. }) => self.paused = false,
-                Some(Command::Pause { .. }) => {}
-                Some(Command::Abort { .. }) | None => return false,
-                Some(_) => {}
+    /// Apply a command that is not the specific decision a park is waiting on. Returns `false`
+    /// when the turn must fail closed (an abort).
+    fn apply_non_decision_command(&mut self, command: Command) -> bool {
+        match command {
+            Command::Pause { .. } => self.paused = true,
+            Command::Resume { .. } => self.paused = false,
+            Command::SendPrompt { .. } => {
+                self.emit(EventKind::Error {
+                    code: "turn_in_progress".into(),
+                    message: "a turn is already running; prompt ignored".into(),
+                });
             }
+            Command::Abort { .. } => return false,
+            _ => {}
         }
         true
+    }
+
+    /// Drain buffered commands and park while paused. Returns `false` if the turn was aborted or
+    /// the channel closed — both fail closed, ending the turn rather than resuming unsupervised.
+    ///
+    /// Called at the top of every execute iteration, so a `SendPrompt` that arrives while the
+    /// turn is actively executing is rejected at the next iteration boundary rather than silently
+    /// queued to run as a new turn, and `Pause`/`Abort` are honored there too.
+    async fn wait_if_paused(&mut self, commands: &mut mpsc::UnboundedReceiver<Command>) -> bool {
+        loop {
+            // Drain anything already buffered without blocking.
+            loop {
+                match commands.try_recv() {
+                    Ok(command) => {
+                        if !self.apply_non_decision_command(command) {
+                            return false;
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return false,
+                }
+            }
+            if !self.paused {
+                return true;
+            }
+            match commands.recv().await {
+                Some(command) => {
+                    if !self.apply_non_decision_command(command) {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
     }
 
     async fn await_action_decision(
@@ -281,10 +318,11 @@ impl Session {
                 } if id == request_id => {
                     return approved;
                 }
-                Command::Pause { .. } => self.paused = true,
-                Command::Resume { .. } => self.paused = false,
-                Command::Abort { .. } => return false,
-                _ => {}
+                other => {
+                    if !self.apply_non_decision_command(other) {
+                        return false;
+                    }
+                }
             }
         }
         false
