@@ -482,7 +482,10 @@ impl App {
             return;
         }
         if let Some(model) = parse_model_command(trimmed) {
-            self.set_model(model);
+            match model {
+                Some(id) => self.set_model(id),
+                None => self.error = Some(self.t("status.model_empty").to_string()),
+            }
             return;
         }
         if let Some(key_command) = parse_key_command(trimmed) {
@@ -1424,8 +1427,7 @@ fn parse_ask_command(command: &str) -> Option<&str> {
     }
 }
 
-/// The remote provider ids, in key-precedence order.
-const REMOTE_IDS: [&str; 4] = ["anthropic", "openai", "gemini", "deepseek"];
+use crate::selection::REMOTE_IDS;
 
 /// Every provider a user can select with `/provider`.
 const PROVIDER_NAMES: [&str; 5] = ["anthropic", "openai", "gemini", "deepseek", "ollama"];
@@ -1460,14 +1462,19 @@ fn parse_provider_command(command: &str) -> Option<Option<&str>> {
     }
 }
 
-/// Parse a `/model <id>` command into the model id, or `None`.
-fn parse_model_command(command: &str) -> Option<&str> {
+/// Parse a `/model` command: `Some(Some(id))` for `/model <id>`, `Some(None)` for a bare `/model`
+/// (empty arg), or `None` when the command is not `/model`.
+fn parse_model_command(command: &str) -> Option<Option<&str>> {
     let rest = command.strip_prefix("/model")?;
     if !word_boundary(rest) {
         return None;
     }
     let arg = rest.trim();
-    if arg.is_empty() { None } else { Some(arg) }
+    if arg.is_empty() {
+        Some(None)
+    } else {
+        Some(Some(arg))
+    }
 }
 
 /// Parse a `/key` command: bare → `List`, `/key <provider>` → `Set`, `/key <provider> clear` →
@@ -1570,9 +1577,9 @@ mod tests {
 
     #[test]
     fn parses_model_commands() {
-        assert_eq!(parse_model_command("/model gpt-5"), Some("gpt-5"));
-        assert_eq!(parse_model_command("/model"), None);
-        assert_eq!(parse_model_command("/model   "), None);
+        assert_eq!(parse_model_command("/model gpt-5"), Some(Some("gpt-5")));
+        assert_eq!(parse_model_command("/model"), Some(None));
+        assert_eq!(parse_model_command("/model   "), Some(None));
         assert_eq!(parse_model_command("/modelx"), None);
     }
 

@@ -136,9 +136,11 @@ question: between sessions only.
 `crates/tui/src/selection.rs` (new module) owns the client-side composition, and **takes over the
 `build()` composition role** from `crates/tui/src/provider.rs`. There is exactly one composition site:
 
-- `resolve_key(provider_id, store)` → env then keyring (the §2 rule).
-- `key_status(provider_id, store) -> KeyStatus { Env, Keyring, None }` → which source, if any, holds a
-  key for a provider; used by the bare `/key` enumeration (§6), distinct from `resolve_key`.
+- Key resolution (env then keyring, the §2 rule) is split across two phases rather than a single
+  `resolve_key` helper: `providers::selection_from_env` resolves env keys into a `Selection`, and
+  `apply_preferences` fills the gaps from the keyring. `key_status(provider_id, store) ->
+  KeyStatus { Env, Keyring, None }` classifies which source, if any, holds a provider's key, for the
+  bare `/key` enumeration (§6).
 - `build_selection(prefs, store)` → assembles a `light_factory_providers::Selection` from env +
   persisted preferences + the keyring, applying the §2 precedence.
 - `rebuild(prefs, store)` → `build_provider(&Selection)` plus an enriched

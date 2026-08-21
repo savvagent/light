@@ -50,7 +50,7 @@ pub enum SelectedBy {
 
 /// The resolved inputs needed to build a single provider slot, independent of where they came
 /// from (environment, persisted settings, or the OS keyring). [`build_provider`] consumes it.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Selection {
     /// `LIGHT_OLLAMA=1` selects the local Ollama slot.
     pub ollama: bool,
@@ -67,6 +67,22 @@ pub struct Selection {
     /// Raw `*_BASE_URL` overrides by provider id (`"openai"`/`"deepseek"`): `Ok(value)` is a
     /// UTF-8 override to validate; `Err(var)` is a non-UTF-8 override (rejected, offline).
     pub base_urls: HashMap<String, Result<String, String>>,
+}
+
+impl std::fmt::Debug for Selection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Selection")
+            .field("ollama", &self.ollama)
+            .field("selector", &self.selector)
+            .field("preferred", &self.preferred)
+            .field(
+                "keys",
+                &format_args!("<redacted: {} key(s)>", self.keys.len()),
+            )
+            .field("models", &self.models)
+            .field("base_urls", &self.base_urls)
+            .finish()
+    }
 }
 
 /// The `*_API_KEY` environment variable for a remote provider id, or `None` for non-remote ids.
@@ -429,10 +445,15 @@ fn resolve_remote_directive(
 pub fn build_provider(selection: &Selection) -> BuiltProvider {
     let mut warnings = Vec::new();
 
-    // Ollama may be selected by `LIGHT_OLLAMA=1` or a stored "ollama" preference.
+    // A stored "ollama" preference is a step-3 fallback: it only applies when no env
+    // `LIGHT_REMOTE_PROVIDER` names a valid remote (step 2 wins over the stored preference).
+    let env_selector_valid = selection
+        .selector
+        .as_deref()
+        .is_some_and(|s| RemoteChoice::parse(s).is_some());
     let (ollama_on, ollama_selected_by) = if selection.ollama {
         (true, Some(SelectedBy::OllamaEnv))
-    } else if selection.preferred.as_deref() == Some("ollama") {
+    } else if !env_selector_valid && selection.preferred.as_deref() == Some("ollama") {
         (true, Some(SelectedBy::StoredPreference))
     } else {
         (false, None)
@@ -802,6 +823,30 @@ mod tests {
         let built = build_provider(&test_selection(Some("ollama"), &[]));
         assert_eq!(built.provider.id(), "ollama");
         assert_eq!(built.selected_by, Some(SelectedBy::StoredPreference));
+    }
+
+    #[test]
+    fn an_env_selector_beats_a_stored_ollama_preference() {
+        let mut selection = test_selection(Some("ollama"), &[("openai", "sk-o")]);
+        selection.selector = Some("openai".to_string());
+        let built = build_provider(&selection);
+        assert_eq!(built.provider.id(), "openai");
+        assert_eq!(built.selected_by, Some(SelectedBy::RemoteSelectorEnv));
+    }
+
+    #[test]
+    fn a_stored_ollama_preference_beats_key_precedence_when_no_valid_selector() {
+        let mut selection = test_selection(Some("ollama"), &[("openai", "sk-o")]);
+        selection.selector = Some("bogus".to_string());
+        let built = build_provider(&selection);
+        assert_eq!(built.provider.id(), "ollama");
+        assert_eq!(built.selected_by, Some(SelectedBy::StoredPreference));
+        assert!(
+            built
+                .warnings
+                .iter()
+                .any(|w| w.contains("not a known provider"))
+        );
     }
 
     #[test]

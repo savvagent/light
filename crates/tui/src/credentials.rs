@@ -21,6 +21,11 @@ const SERVICE: &str = "light-factory";
 /// The OS keyring backend. One entry per provider: service `light-factory`, account the provider
 /// id. On Linux this is the Secret Service (GNOME Keyring / KWallet); on macOS the Keychain; on
 /// Windows the Credential Manager.
+///
+/// The `keyring` backend is synchronous and performs D-Bus/Keychain/Credential-Manager I/O in the
+/// calling thread. The TUI only calls it at startup and on explicit `/provider`/`/key` commands
+/// (a handful of lookups per command), so the bounded blocking is accepted for now rather than
+/// moving the store to an async backend.
 pub struct KeyringStore;
 
 impl CredentialStore for KeyringStore {
@@ -51,6 +56,7 @@ impl CredentialStore for KeyringStore {
 
 /// In-memory store for tests and headless callers that want an ephemeral store.
 #[derive(Default)]
+#[doc(hidden)]
 pub struct MemStore(Mutex<HashMap<String, String>>);
 
 impl MemStore {

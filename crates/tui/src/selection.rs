@@ -12,7 +12,7 @@ use crate::provider::ProviderInfo;
 use crate::settings::Settings;
 
 /// The remote provider ids, in key-precedence order.
-const REMOTE_IDS: [&str; 4] = ["anthropic", "openai", "gemini", "deepseek"];
+pub const REMOTE_IDS: [&str; 4] = ["anthropic", "openai", "gemini", "deepseek"];
 
 /// Pure classification of a provider's key source.
 fn classify(env_key: Option<String>, keyring_key: Option<String>) -> KeyStatus {
