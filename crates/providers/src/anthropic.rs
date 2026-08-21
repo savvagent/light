@@ -6,7 +6,7 @@ use crate::{CompleteRequest, CompleteResponse};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 pub struct AnthropicProvider {
     client: reqwest::Client,

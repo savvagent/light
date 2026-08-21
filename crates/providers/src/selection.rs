@@ -111,7 +111,7 @@ pub struct BuiltProvider {
 
 /// Which remote provider the single remote slot uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RemoteChoice {
+pub(crate) enum RemoteChoice {
     Anthropic,
     OpenAi,
     Gemini,
@@ -130,7 +130,7 @@ impl RemoteChoice {
     }
 
     /// Parse a selector or preference value (case-insensitive), or `None` when unknown.
-    fn parse(raw: &str) -> Option<RemoteChoice> {
+    pub(crate) fn parse(raw: &str) -> Option<RemoteChoice> {
         match raw.to_ascii_lowercase().as_str() {
             "anthropic" => Some(RemoteChoice::Anthropic),
             "openai" => Some(RemoteChoice::OpenAi),
@@ -306,13 +306,33 @@ fn resolve_base_url(
 }
 
 /// The `LIGHT_<P>_BASE_URL` override variable for a provider, or `None` when it has none.
-fn base_url_var(choice: RemoteChoice) -> Option<&'static str> {
+pub(crate) fn base_url_var(choice: RemoteChoice) -> Option<&'static str> {
     match choice {
         RemoteChoice::OpenAi => Some("LIGHT_OPENAI_BASE_URL"),
         RemoteChoice::DeepSeek => Some("LIGHT_DEEPSEEK_BASE_URL"),
         // Fixed endpoints — `default_base()` only, no operator input reaches them.
         RemoteChoice::Anthropic | RemoteChoice::Gemini => None,
     }
+}
+
+/// Resolve the base URL for a provider id from an optional `*_BASE_URL` override — a pure, total
+/// helper shared by provider construction and the model-listing path, so the env→default
+/// resolution is never duplicated. `id` must be one of the four remotes or `"ollama"` (which has
+/// no override and always resolves to the local Ollama root). An invalid override is refused via
+/// [`validate_base_url`] before any API key is ever sent to it.
+pub(crate) fn resolve_base_url_for(
+    id: &str,
+    override_value: Option<String>,
+) -> anyhow::Result<String> {
+    if id == "ollama" {
+        return Ok(crate::ollama::LOCAL_BASE.to_string());
+    }
+    let choice = RemoteChoice::parse(id).ok_or_else(|| {
+        anyhow::anyhow!("unknown provider '{id}'; expected anthropic|openai|gemini|deepseek|ollama")
+    })?;
+    let var_name = base_url_var(choice).unwrap_or_default();
+    resolve_base_url(override_value, default_base(choice), var_name)
+        .map_err(|r| anyhow::anyhow!(r.warning))
 }
 
 /// The production endpoint for a provider.
@@ -742,6 +762,47 @@ mod tests {
             .unwrap(),
             "https://default"
         );
+    }
+
+    #[test]
+    fn resolve_base_url_for_uses_production_defaults_and_ollama_local() {
+        assert_eq!(
+            resolve_base_url_for("anthropic", None).unwrap(),
+            "https://api.anthropic.com"
+        );
+        assert_eq!(
+            resolve_base_url_for("openai", None).unwrap(),
+            "https://api.openai.com"
+        );
+        assert_eq!(
+            resolve_base_url_for("gemini", None).unwrap(),
+            "https://generativelanguage.googleapis.com"
+        );
+        assert_eq!(
+            resolve_base_url_for("deepseek", None).unwrap(),
+            "https://api.deepseek.com"
+        );
+        assert_eq!(
+            resolve_base_url_for("ollama", None).unwrap(),
+            crate::ollama::LOCAL_BASE
+        );
+    }
+
+    #[test]
+    fn resolve_base_url_for_validates_overrides() {
+        assert_eq!(
+            resolve_base_url_for("openai", Some("https://gw.example.com".to_string())).unwrap(),
+            "https://gw.example.com/"
+        );
+        assert!(
+            resolve_base_url_for("openai", Some("http://evil.example.com".to_string())).is_err()
+        );
+    }
+
+    #[test]
+    fn resolve_base_url_for_rejects_unknown_ids() {
+        assert!(resolve_base_url_for("local", None).is_err());
+        assert!(resolve_base_url_for("bogus", None).is_err());
     }
 
     #[test]
