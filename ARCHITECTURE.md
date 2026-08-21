@@ -69,15 +69,21 @@ crates/auth          domain: TOTP, AES-GCM secrets-at-rest, session/device token
                      Store trait, AuthService — no I/O, no web framework
 crates/persistence   sqlx Postgres PgStore + migrations
 crates/server        axum HTTP + WebSocket
-crates/tui           ratatui client, binary `light-factory`
-web/                 Svelte 5 SPA — auth and device approval only
+crates/tui           ratatui client, binary `light-factory` (localized: en + es)
+web/                 Svelte 5 SPA — auth and device approval only (localized: en + es)
 
-planned (engine core, see the design record):
-crates/engine-core   ported seams: Provider, Tool, Workspace, PermissionGate, Approver
-crates/providers     ported: Anthropic, Scripted, then the rest
+planned (see the design record):
+crates/engine-core   ported seams: Provider, Tool, Workspace, PermissionGate
+crates/providers     ported: all seven otto providers + the base_url trust boundary
 crates/tools         fs.read / fs.list / fs.write / bash
 crates/engine        Engine, Session actor, turn state machine, PlanGate
 ```
+
+**Localization.** Both clients are localized (English and Spanish). The TUI keeps its strings in
+`crates/tui/src/i18n.rs` as `EN`/`ES` catalogs of dotted keys with `{param}` interpolation,
+reached through `i18n::t` / `i18n::t_with`; a test asserts the two catalogs define exactly the
+same key set. The web client mirrors this in `web/src/lib/i18n.js`. Any new user-facing string
+goes through these catalogs — literals in client code are a convention violation, not a shortcut.
 
 `protocol` is the dependency-free leaf. The sensitive-path floor lives there, rather than in
 `engine-core`, so a tool that cannot take an engine-core dependency can still enforce it.
@@ -156,7 +162,9 @@ ever takes on a stateful role (the agent bus), that setting has to be revisited.
 | server (auth routes, `/ws`) | Built, deployed |
 | web SPA (auth + device approve) | Built, deployed |
 | TUI (sign-in, device login, WS) | Built, released as installers |
+| Localization (en + es, both clients) | Built |
 | CI/CD | Built |
+| LLM providers | Designed, in progress on `port-llm-providers` |
 | **engine core** | **Designed, not built** |
 | Command/Event protocol | Designed; `wire.rs` is still a ping/pong placeholder |
 | Agent-to-agent bus | Not started |
@@ -202,3 +210,9 @@ Design specs live in `docs/superpowers/specs/`, implementation plans in
 
 - `2026-08-20-engine-core-design.md` — the engine: crate layout, Command/Event vocabulary,
   session lifetime, turn state machine, and the plan gate.
+- `2026-08-20-port-llm-providers-design.md` — porting otto's seven providers, the `base_url`
+  trust boundary, and env-driven provider selection.
+
+**These two interlock.** `engine-core` owns the `Provider` trait, so the engine plan's Task 4 runs
+first, then the whole providers plan, then the rest of the engine plan. Each plan states this in
+its own header; do not run them independently.

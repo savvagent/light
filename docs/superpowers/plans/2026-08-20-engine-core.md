@@ -23,7 +23,24 @@
 - Ported files come from `/home/robhicks/dev/otto` (same author, same MIT/Apache-2.0 dual license). Porting means copy, rename `otto_*` → `light_factory_*`, strip anything the spec's non-goals exclude.
 - **Naming:** crate packages are `light-factory-<name>`; the crate identifier in code is `light_factory_<name>`.
 
-### Provider interface note (read before Task 5)
+### Execution order across two plans
+
+This plan interlocks with `docs/superpowers/plans/2026-08-20-port-llm-providers.md`, which ports
+otto's seven providers, the `base_url` trust boundary, and env-driven provider selection. Run them
+in this order:
+
+1. **This plan, Tasks 1–4** — toolchain, `protocol`, and `crates/engine-core`.
+2. **All of the port-llm-providers plan** — it depends on `engine-core` for the `Provider` trait
+   and now says so in its Task 1.
+3. **This plan, Tasks 5 onward** — tools, gate, session, turn machine, registry, TUI.
+
+This plan originally contained its own tasks porting `ScriptedProvider` and `AnthropicProvider`.
+They are removed: the other plan ports all seven providers plus the `base_url` trust boundary
+(cross-host redirect rejection and loopback checks), which is strictly better than the two-provider
+slice this plan had. From Task 5 onward, assume `light-factory-providers` exists and exposes
+`ScriptedProvider` for offline tests.
+
+### Provider interface note
 
 otto's `Provider` trait is **prompt-and-parse**, not native tool calling: `CompleteRequest { prompt: String }` in, `CompleteResponse { text, usage }` out, with structured data extracted from the model's text via `extract_json`. This plan keeps that interface unchanged. The engine renders prompts (including history) and parses JSON out of completions. Consequences, accepted deliberately:
 
@@ -43,8 +60,7 @@ otto's `Provider` trait is **prompt-and-parse**, not native tool calling: `Compl
 | `crates/engine-core/src/traits.rs` | `Provider`, `Workspace`, `WorkspaceRead` |
 | `crates/engine-core/src/types.rs` | `CompleteRequest`, `CompleteResponse`, `Usage`, `Edit` |
 | `crates/engine-core/src/tool.rs` | `Tool`, `Decision`, `PermissionGate`, `PauseController` |
-| `crates/providers/src/scripted.rs` | Deterministic offline provider for tests |
-| `crates/providers/src/anthropic.rs` | Anthropic Messages API provider |
+| `crates/providers/*` | Built by the port-llm-providers plan, not this one |
 | `crates/tools/src/workspace.rs` | `LocalWorkspace` — the only `Workspace` impl |
 | `crates/tools/src/fs.rs` | `fs.read`, `fs.list`, `fs.write` tools |
 | `crates/tools/src/bash.rs` | `bash` tool — program + args, no shell |
@@ -406,7 +422,7 @@ Ports otto's trait seams. This crate has no I/O and no web framework — it is t
   - `traits`: `Provider { fn id(&self) -> &str; async fn complete(&self, req: CompleteRequest) -> anyhow::Result<CompleteResponse> }`, `WorkspaceRead { async fn read(&self, path: &Path) -> anyhow::Result<Vec<u8>>; async fn list(&self, glob: &str) -> anyhow::Result<Vec<PathBuf>> }`, `Workspace: WorkspaceRead { async fn apply_edit(&self, edit: &Edit) -> anyhow::Result<u64> }`
   - `tool`: `Tool { fn name(&self) -> &str; async fn call(&self, args: Value) -> anyhow::Result<Value> }`, `Decision { Allow, Ask(GateReason), Deny }`, `PermissionGate { fn evaluate(&self, tool: &str, args: &Value) -> Decision }`, `PauseController { fn should_pause(&self) -> bool; async fn wait_for_resume(&self) }`, `NeverPause`
 
-**Deviation from the spec, deliberate:** the spec has the session own a `ToolRegistry` that runs the gate and an `Approver` before dispatch. This plan omits both. The turn state machine (Task 12) must emit events and drive the approval round-trip through its own command receiver, which needs `&mut Session` — so routing dispatch through a registry would mean an `Approver` that calls back into the session it is owned by. The gate's *behavior* is unchanged, including fail-closed on a closed channel (`await_action_decision` returns `false`). `ToolRegistry`/`Approver` return when a second client type actually needs them. This keeps engine-core smaller, which is the project's stated discipline.
+**Deviation from the spec, deliberate:** the spec has the session own a `ToolRegistry` that runs the gate and an `Approver` before dispatch. This plan omits both. The turn state machine (Task 10) must emit events and drive the approval round-trip through its own command receiver, which needs `&mut Session` — so routing dispatch through a registry would mean an `Approver` that calls back into the session it is owned by. The gate's *behavior* is unchanged, including fail-closed on a closed channel (`await_action_decision` returns `false`). `ToolRegistry`/`Approver` return when a second client type actually needs them. This keeps engine-core smaller, which is the project's stated discipline.
 
 - [ ] **Step 1: Create the manifest**
 
@@ -642,377 +658,7 @@ git commit -m "feat(engine-core): port the provider, tool, and workspace seams"
 
 ---
 
-### Task 5: Create the `providers` crate with `ScriptedProvider`
-
-**Files:**
-- Create: `crates/providers/Cargo.toml`
-- Create: `crates/providers/src/lib.rs`
-- Create: `crates/providers/src/scripted.rs`
-
-**Interfaces:**
-- Consumes: `light_factory_engine_core::{Provider, CompleteRequest, CompleteResponse, Usage}`.
-- Produces: `ScriptedProvider::new(default: impl Into<String>)`, builder methods `.on(needle, response)` and `.with_usage(input, output)`. `Provider::id()` returns `"scripted"`.
-
-- [ ] **Step 1: Create the manifest**
-
-`crates/providers/Cargo.toml`:
-
-```toml
-[package]
-name = "light-factory-providers"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-light-factory-engine-core = { path = "../engine-core" }
-async-trait = { workspace = true }
-anyhow = { workspace = true }
-reqwest = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-wiremock = "0.6"
-```
-
-- [ ] **Step 2: Write the failing test**
-
-`crates/providers/src/scripted.rs` — test module only:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn returns_matching_rule_then_default() {
-        let p = ScriptedProvider::new("DEFAULT")
-            .on("plan", "PLAN")
-            .on("execute", "EXEC");
-
-        let planned = p.complete(CompleteRequest { prompt: "please plan this".into() }).await.unwrap();
-        assert_eq!(planned.text, "PLAN");
-
-        let other = p.complete(CompleteRequest { prompt: "hello".into() }).await.unwrap();
-        assert_eq!(other.text, "DEFAULT");
-        assert_eq!(p.id(), "scripted");
-    }
-
-    #[tokio::test]
-    async fn with_usage_propagates_to_responses() {
-        let p = ScriptedProvider::new("X").with_usage(7, 11);
-        let out = p.complete(CompleteRequest { prompt: "anything".into() }).await.unwrap();
-        assert_eq!(out.usage, Some(Usage { input_tokens: 7, output_tokens: 11 }));
-    }
-}
-```
-
-`crates/providers/src/lib.rs`:
-
-```rust
-//! Provider implementations behind `light_factory_engine_core::Provider`.
-
-pub mod scripted;
-
-pub use scripted::ScriptedProvider;
-```
-
-- [ ] **Step 3: Run test to verify it fails**
-
-Run: `cargo test -p light-factory-providers`
-Expected: FAIL — `ScriptedProvider` undefined.
-
-- [ ] **Step 4: Write the implementation**
-
-Prepend to `crates/providers/src/scripted.rs`:
-
-```rust
-//! `ScriptedProvider`: a deterministic provider returning canned responses keyed by a
-//! substring of the prompt. For tests of prompt-and-parse code. Performs no network I/O.
-
-use async_trait::async_trait;
-use light_factory_engine_core::traits::Provider;
-use light_factory_engine_core::types::{CompleteRequest, CompleteResponse, Usage};
-
-/// Returns the first rule whose `needle` is found in the prompt, else `default`.
-pub struct ScriptedProvider {
-    rules: Vec<(String, String)>,
-    default: String,
-    usage: Option<Usage>,
-}
-
-impl ScriptedProvider {
-    pub fn new(default: impl Into<String>) -> Self {
-        Self { rules: Vec::new(), default: default.into(), usage: None }
-    }
-
-    /// Add a rule: if the prompt contains `needle`, return `response`. First match wins.
-    pub fn on(mut self, needle: impl Into<String>, response: impl Into<String>) -> Self {
-        self.rules.push((needle.into(), response.into()));
-        self
-    }
-
-    /// Make every response report this token usage.
-    pub fn with_usage(mut self, input_tokens: u32, output_tokens: u32) -> Self {
-        self.usage = Some(Usage { input_tokens, output_tokens });
-        self
-    }
-}
-
-#[async_trait]
-impl Provider for ScriptedProvider {
-    fn id(&self) -> &str {
-        "scripted"
-    }
-
-    async fn complete(&self, req: CompleteRequest) -> anyhow::Result<CompleteResponse> {
-        let text = self
-            .rules
-            .iter()
-            .find(|(needle, _)| req.prompt.contains(needle.as_str()))
-            .map(|(_, resp)| resp.clone())
-            .unwrap_or_else(|| self.default.clone());
-        Ok(CompleteResponse { text, usage: self.usage })
-    }
-}
-```
-
-- [ ] **Step 5: Run tests to verify they pass**
-
-Run: `cargo test -p light-factory-providers`
-Expected: PASS (2 tests).
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add crates/providers
-git commit -m "feat(providers): add the scripted offline provider"
-```
-
----
-
-### Task 6: Add `AnthropicProvider`
-
-**Files:**
-- Create: `crates/providers/src/anthropic.rs`
-- Modify: `crates/providers/src/lib.rs`
-
-**Interfaces:**
-- Consumes: `Provider`, `CompleteRequest`, `CompleteResponse`, `Usage`.
-- Produces: `AnthropicProvider::new(base_url, api_key, model)`, `AnthropicProvider::api_base_default() -> &'static str`. `id()` returns `"anthropic"`.
-
-- [ ] **Step 1: Write the failing test**
-
-`crates/providers/tests/anthropic.rs`:
-
-```rust
-use light_factory_engine_core::traits::Provider;
-use light_factory_engine_core::types::CompleteRequest;
-use light_factory_providers::AnthropicProvider;
-use wiremock::matchers::{header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
-
-#[tokio::test]
-async fn sends_the_prompt_and_parses_text_and_usage() {
-    let server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .and(header("x-api-key", "test-key"))
-        .and(header("anthropic-version", "2023-06-01"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "content": [{ "type": "text", "text": "hello from claude" }],
-            "usage": { "input_tokens": 12, "output_tokens": 5 }
-        })))
-        .mount(&server)
-        .await;
-
-    let provider = AnthropicProvider::new(server.uri(), "test-key", "claude-sonnet-5");
-    let out = provider
-        .complete(CompleteRequest { prompt: "hi".into() })
-        .await
-        .unwrap();
-
-    assert_eq!(out.text, "hello from claude");
-    let usage = out.usage.unwrap();
-    assert_eq!(usage.input_tokens, 12);
-    assert_eq!(usage.output_tokens, 5);
-    assert_eq!(provider.id(), "anthropic");
-}
-
-#[tokio::test]
-async fn non_2xx_is_an_error() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
-        .mount(&server)
-        .await;
-
-    let provider = AnthropicProvider::new(server.uri(), "k", "m");
-    let err = provider
-        .complete(CompleteRequest { prompt: "hi".into() })
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("429"));
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p light-factory-providers --test anthropic`
-Expected: FAIL — `AnthropicProvider` undefined.
-
-- [ ] **Step 3: Write the implementation**
-
-`crates/providers/src/anthropic.rs`:
-
-```rust
-//! `AnthropicProvider`: the Anthropic Messages API over HTTP. `base_url` is configurable
-//! so tests can point it at a local mock.
-
-use async_trait::async_trait;
-use light_factory_engine_core::traits::Provider;
-use light_factory_engine_core::types::{CompleteRequest, CompleteResponse, Usage};
-use serde::{Deserialize, Serialize};
-
-const ANTHROPIC_VERSION: &str = "2023-06-01";
-
-pub struct AnthropicProvider {
-    client: reqwest::Client,
-    base_url: String,
-    api_key: String,
-    model: String,
-    max_tokens: u32,
-}
-
-impl AnthropicProvider {
-    pub fn new(
-        base_url: impl Into<String>,
-        api_key: impl Into<String>,
-        model: impl Into<String>,
-    ) -> Self {
-        Self {
-            // Redirects are disabled: this provider authenticates with `x-api-key`, which is
-            // not in reqwest's strip list and would be forwarded on a cross-host redirect.
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("reqwest client builds"),
-            base_url: base_url.into(),
-            api_key: api_key.into(),
-            model: model.into(),
-            max_tokens: 4096,
-        }
-    }
-
-    /// The production API base URL.
-    pub fn api_base_default() -> &'static str {
-        "https://api.anthropic.com"
-    }
-}
-
-#[derive(Serialize)]
-struct MessagesRequest<'a> {
-    model: &'a str,
-    max_tokens: u32,
-    messages: Vec<RequestMessage<'a>>,
-}
-
-#[derive(Serialize)]
-struct RequestMessage<'a> {
-    role: &'a str,
-    content: &'a str,
-}
-
-#[derive(Deserialize)]
-struct MessagesResponse {
-    content: Vec<ContentBlock>,
-    usage: Option<ApiUsage>,
-}
-
-#[derive(Deserialize)]
-struct ContentBlock {
-    #[serde(default)]
-    text: String,
-}
-
-#[derive(Deserialize)]
-struct ApiUsage {
-    input_tokens: u32,
-    output_tokens: u32,
-}
-
-#[async_trait]
-impl Provider for AnthropicProvider {
-    fn id(&self) -> &str {
-        "anthropic"
-    }
-
-    async fn complete(&self, req: CompleteRequest) -> anyhow::Result<CompleteResponse> {
-        let body = MessagesRequest {
-            model: &self.model,
-            max_tokens: self.max_tokens,
-            messages: vec![RequestMessage { role: "user", content: &req.prompt }],
-        };
-
-        let resp = self
-            .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&body)
-            .send()
-            .await?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            anyhow::bail!("anthropic request failed: {status}");
-        }
-
-        let parsed: MessagesResponse = resp.json().await?;
-        let text = parsed
-            .content
-            .iter()
-            .map(|b| b.text.as_str())
-            .collect::<Vec<_>>()
-            .join("");
-
-        Ok(CompleteResponse {
-            text,
-            usage: parsed.usage.map(|u| Usage {
-                input_tokens: u.input_tokens,
-                output_tokens: u.output_tokens,
-            }),
-        })
-    }
-}
-```
-
-Add to `crates/providers/src/lib.rs`:
-
-```rust
-pub mod anthropic;
-pub use anthropic::AnthropicProvider;
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `cargo test -p light-factory-providers`
-Expected: PASS (4 tests).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add crates/providers
-git commit -m "feat(providers): add the Anthropic provider"
-```
-
----
-
-### Task 7: Create the `tools` crate with `LocalWorkspace` and the fs tools
+### Task 5: Create the `tools` crate with `LocalWorkspace` and the fs tools
 
 **Files:**
 - Create: `crates/tools/Cargo.toml`
@@ -1304,7 +950,7 @@ pub use fs::{FsListTool, FsReadTool, FsWriteTool};
 pub use workspace::LocalWorkspace;
 ```
 
-`bash` is written in Task 8. To keep this task's deliverable compiling on its own, omit the two bash lines from `lib.rs` for now — write it as:
+`bash` is written in Task 6. To keep this task's deliverable compiling on its own, omit the two bash lines from `lib.rs` for now — write it as:
 
 ```rust
 //! Tools the engine exposes to the agent, plus the local workspace they operate on.
@@ -1316,7 +962,7 @@ pub use fs::{FsListTool, FsReadTool, FsWriteTool};
 pub use workspace::LocalWorkspace;
 ```
 
-Task 8 adds `pub mod bash;` and `pub use bash::BashTool;` back.
+Task 6 adds `pub mod bash;` and `pub use bash::BashTool;` back.
 
 - [ ] **Step 6: Run tests to verify they pass**
 
@@ -1332,7 +978,7 @@ git commit -m "feat(tools): add LocalWorkspace and the fs tools"
 
 ---
 
-### Task 8: Add the `bash` tool with no shell interpretation
+### Task 6: Add the `bash` tool with no shell interpretation
 
 This is a security-critical task. The tool must never invoke a shell.
 
@@ -1496,7 +1142,7 @@ git commit -m "feat(tools): add the bash tool with no shell interpretation"
 
 ---
 
-### Task 9: Build `PlanGate` — the deterministic guardrail
+### Task 7: Build `PlanGate` — the deterministic guardrail
 
 The security core of the whole design. Test it hard.
 
@@ -1850,7 +1496,7 @@ git commit -m "feat(engine): add the deterministic plan gate"
 
 ---
 
-### Task 10: Prompt rendering and plan extraction
+### Task 8: Prompt rendering and plan extraction
 
 **Files:**
 - Create: `crates/engine/src/prompt.rs`
@@ -2017,7 +1663,7 @@ git commit -m "feat(engine): add prompt rendering and JSON extraction"
 
 ---
 
-### Task 11: The `Session` actor and event sequencing
+### Task 9: The `Session` actor and event sequencing
 
 **Files:**
 - Create: `crates/engine/src/session.rs`
@@ -2189,7 +1835,7 @@ impl Session {
 
 Add `pub mod session;` to `crates/engine/src/lib.rs`.
 
-Note: `run_turn` is written in Task 12. To keep this task independently testable, add a temporary stub in `session.rs`:
+Note: `run_turn` is written in Task 10. To keep this task independently testable, add a temporary stub in `session.rs`:
 
 ```rust
 impl Session {
@@ -2199,7 +1845,7 @@ impl Session {
 }
 ```
 
-Task 12 replaces this stub with the real turn state machine.
+Task 10 replaces this stub with the real turn state machine.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -2215,9 +1861,9 @@ git commit -m "feat(engine): add the session actor and event sequencing"
 
 ---
 
-### Task 12: The turn state machine
+### Task 10: The turn state machine
 
-Replaces the Task 11 stub with plan → approve → execute → complete.
+Replaces the Task 9 stub with plan → approve → execute → complete.
 
 **Files:**
 - Create: `crates/engine/src/turn.rs`
@@ -2225,7 +1871,7 @@ Replaces the Task 11 stub with plan → approve → execute → complete.
 - Modify: `crates/engine/src/lib.rs`
 
 **Interfaces:**
-- Consumes: everything from Tasks 9–11.
+- Consumes: everything from Tasks 7–9.
 - Produces: `Session::run_turn(&mut self, goal: &str, commands: &mut mpsc::UnboundedReceiver<Command>)`. Constant `MAX_CONSECUTIVE_DENIALS: usize = 3`. `Session::paused: bool` field (add it to the struct in `session.rs`, initialized `false`).
 - Turn transcript entries are `String`s of the form `"<tool> -> <json result>"`.
 
@@ -2709,7 +2355,7 @@ git commit -m "feat(engine): add the turn state machine with plan approval and g
 
 ---
 
-### Task 13: The `Engine` session registry
+### Task 11: The `Engine` session registry
 
 The spec has `Engine` hold `HashMap<SessionId, SessionHandle>` so multiple sessions work from day one and a later socket transport touches only the routing layer. Without it the TUI would hold a bare `SessionHandle` and `Command::CreateSession` would have nowhere to land.
 
@@ -2882,7 +2528,7 @@ git commit -m "feat(engine): add the session registry"
 
 ---
 
-### Task 14: Wire the engine into the TUI
+### Task 12: Wire the engine into the TUI
 
 **Files:**
 - Create: `crates/tui/src/engine_view.rs`
@@ -2890,8 +2536,11 @@ git commit -m "feat(engine): add the session registry"
 - Modify: `crates/tui/Cargo.toml`
 
 **Interfaces:**
-- Consumes: `Engine::new`, `Engine::create_session`, `Engine::handle`, `Engine::dispatch`, `Command`, `Event`, `EventKind`.
+- Consumes: `Engine::new`, `Engine::create_session`, `Engine::handle`, `Engine::dispatch`, `Command`, `Event`, `EventKind`, and `crate::provider::build()` (added by the port-llm-providers plan's Task 4).
 - Produces: a new `Mode::Engine` in the TUI, rendering the event log and the pending gate, with `a` to approve and `d` to deny.
+- `describe_event(locale: Locale, kind: &EventKind) -> String` and `pending_prompt(locale: Locale, kind: &EventKind) -> Option<String>`.
+
+**Every user-facing string goes through the existing i18n layer** (`crates/tui/src/i18n.rs`, added by the localize-tui work). Raw English literals in the engine view would break a convention deliberately established across both clients. Note `i18n.rs` has a test asserting `keys(ES) == keys(EN)`, so each new key must be added to **both** catalogs or the suite fails.
 
 - [ ] **Step 1: Add the dependencies**
 
@@ -2900,10 +2549,11 @@ git commit -m "feat(engine): add the session registry"
 ```toml
 light-factory-engine = { path = "../engine" }
 light-factory-engine-core = { path = "../engine-core" }
-light-factory-providers = { path = "../providers" }
 light-factory-tools = { path = "../tools" }
 uuid = { workspace = true }
 ```
+
+`light-factory-providers` is already a TUI dependency at this point — the port-llm-providers plan added it.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -2912,11 +2562,24 @@ uuid = { workspace = true }
 ```rust
 use light_factory_protocol::session::{EventKind, GateReason, Plan, Scope};
 use light_factory_tui::engine_view::{describe_event, pending_prompt};
+use light_factory_tui::i18n::Locale;
 use uuid::Uuid;
 
+fn plan_event() -> EventKind {
+    EventKind::PlanProposed {
+        plan_id: Uuid::nil(),
+        plan: Plan {
+            id: Uuid::nil(),
+            summary: "do the thing".into(),
+            steps: vec![],
+            scope: Scope::default(),
+        },
+    }
+}
+
 #[test]
-fn describes_a_file_edit() {
-    let line = describe_event(&EventKind::FileEdit {
+fn describes_a_file_edit_with_interpolated_values() {
+    let line = describe_event(Locale::En, &EventKind::FileEdit {
         path: "src/main.rs".into(),
         bytes_written: 42,
     });
@@ -2926,34 +2589,32 @@ fn describes_a_file_edit() {
 
 #[test]
 fn a_proposed_plan_prompts_for_approval() {
-    let kind = EventKind::PlanProposed {
-        plan_id: Uuid::nil(),
-        plan: Plan {
-            id: Uuid::nil(),
-            summary: "do the thing".into(),
-            steps: vec![],
-            scope: Scope::default(),
-        },
-    };
-    let prompt = pending_prompt(&kind).unwrap();
+    let prompt = pending_prompt(Locale::En, &plan_event()).unwrap();
     assert!(prompt.contains("do the thing"));
-    assert!(prompt.contains("approve"));
 }
 
 #[test]
-fn an_approval_request_names_the_reason() {
+fn an_approval_request_names_the_offending_path() {
     let kind = EventKind::ApprovalRequest {
         request_id: Uuid::nil(),
         reason: GateReason::SensitiveFloor { path: ".env".into() },
         detail: "fs.write".into(),
     };
-    let prompt = pending_prompt(&kind).unwrap();
-    assert!(prompt.contains("sensitive"));
+    let prompt = pending_prompt(Locale::En, &kind).unwrap();
+    assert!(prompt.contains(".env"));
 }
 
 #[test]
 fn ordinary_events_do_not_prompt() {
-    assert!(pending_prompt(&EventKind::Log { message: "hi".into() }).is_none());
+    assert!(pending_prompt(Locale::En, &EventKind::Log { message: "hi".into() }).is_none());
+}
+
+#[test]
+fn spanish_differs_from_english_and_still_interpolates() {
+    let en = pending_prompt(Locale::En, &plan_event()).unwrap();
+    let es = pending_prompt(Locale::Es, &plan_event()).unwrap();
+    assert_ne!(en, es, "the engine prompts must be translated, not passed through");
+    assert!(es.contains("do the thing"), "the plan summary is data, not a translated string");
 }
 ```
 
@@ -2963,7 +2624,10 @@ fn ordinary_events_do_not_prompt() {
 //! Library surface of the TUI, exposed so its pure rendering helpers are testable.
 
 pub mod engine_view;
+pub mod i18n;
 ```
+
+`i18n` is already a module of the binary; adding it to the library target lets the engine-view tests select a locale. Ensure `main.rs` continues to reference it through the same path.
 
 and add to `crates/tui/Cargo.toml`:
 
@@ -2988,67 +2652,154 @@ Expected: FAIL — `light_factory_tui::engine_view` does not exist.
 
 use light_factory_protocol::session::{EventKind, GateReason};
 
-/// One log line for an engine event.
-pub fn describe_event(kind: &EventKind) -> String {
+use crate::i18n::{self, Locale};
+
+/// One log line for an engine event, translated for `locale`.
+pub fn describe_event(locale: Locale, kind: &EventKind) -> String {
     match kind {
-        EventKind::PlanProposed { plan, .. } => format!("plan proposed: {}", plan.summary),
-        EventKind::PlanDecided { approved, .. } => {
-            format!("plan {}", if *approved { "approved" } else { "rejected" })
+        EventKind::PlanProposed { plan, .. } => {
+            i18n::t_with(locale, "engine.plan_proposed", &[("summary", &plan.summary)])
         }
-        EventKind::StepStarted { description, .. } => format!("step: {description}"),
-        EventKind::StepFinished { ok, .. } => {
-            format!("step {}", if *ok { "done" } else { "failed" })
+        EventKind::PlanDecided { approved, .. } => i18n::t(
+            locale,
+            if *approved { "engine.plan_approved" } else { "engine.plan_rejected" },
+        )
+        .to_string(),
+        EventKind::StepStarted { description, .. } => {
+            i18n::t_with(locale, "engine.step_started", &[("description", description)])
         }
-        EventKind::FileEdit { path, bytes_written } => {
-            format!("wrote {} ({bytes_written} bytes)", path.display())
+        EventKind::StepFinished { ok, .. } => i18n::t(
+            locale,
+            if *ok { "engine.step_done" } else { "engine.step_failed" },
+        )
+        .to_string(),
+        EventKind::FileEdit { path, bytes_written } => i18n::t_with(
+            locale,
+            "engine.file_edit",
+            &[
+                ("path", &path.display().to_string()),
+                ("bytes", &bytes_written.to_string()),
+            ],
+        ),
+        EventKind::CommandRun { command, exit_code } => i18n::t_with(
+            locale,
+            "engine.command_run",
+            &[("command", command), ("code", &exit_code.to_string())],
+        ),
+        EventKind::ApprovalRequest { detail, .. } => {
+            i18n::t_with(locale, "engine.approval_needed", &[("detail", detail)])
         }
-        EventKind::CommandRun { command, exit_code } => {
-            format!("ran {command} (exit {exit_code})")
-        }
-        EventKind::ApprovalRequest { detail, .. } => format!("approval needed: {detail}"),
         EventKind::Log { message } => message.clone(),
-        EventKind::TokenUsage { input_tokens, output_tokens } => {
-            format!("tokens: {input_tokens} in / {output_tokens} out")
-        }
-        EventKind::TurnComplete { ok } => {
-            format!("turn {}", if *ok { "complete" } else { "ended" })
-        }
-        EventKind::Error { code, message } => format!("error [{code}]: {message}"),
+        EventKind::TokenUsage { input_tokens, output_tokens } => i18n::t_with(
+            locale,
+            "engine.token_usage",
+            &[
+                ("input", &input_tokens.to_string()),
+                ("output", &output_tokens.to_string()),
+            ],
+        ),
+        EventKind::TurnComplete { ok } => i18n::t(
+            locale,
+            if *ok { "engine.turn_complete" } else { "engine.turn_ended" },
+        )
+        .to_string(),
+        EventKind::Error { code, message } => i18n::error_message(locale, code)
+            .map(str::to_string)
+            .unwrap_or_else(|| message.clone()),
     }
 }
 
 /// The prompt to show when an event needs a human answer, or `None` when it does not.
-pub fn pending_prompt(kind: &EventKind) -> Option<String> {
+pub fn pending_prompt(locale: Locale, kind: &EventKind) -> Option<String> {
+    let keys = i18n::t(locale, "engine.approve_keys");
     match kind {
-        EventKind::PlanProposed { plan, .. } => Some(format!(
-            "Plan: {}\n{} step(s), {} write path(s), {} command(s)\n[a] approve  [d] deny",
-            plan.summary,
-            plan.steps.len(),
-            plan.scope.write_paths.len(),
-            plan.scope.commands.len(),
-        )),
+        EventKind::PlanProposed { plan, .. } => {
+            let body = i18n::t_with(
+                locale,
+                "engine.plan_prompt",
+                &[
+                    ("summary", &plan.summary),
+                    ("steps", &plan.steps.len().to_string()),
+                    ("paths", &plan.scope.write_paths.len().to_string()),
+                    ("commands", &plan.scope.commands.len().to_string()),
+                ],
+            );
+            Some(format!("{body}\n{keys}"))
+        }
         EventKind::ApprovalRequest { reason, detail, .. } => {
             let why = match reason {
                 GateReason::OutsideScope { what } => {
-                    format!("outside the approved scope: {what}")
+                    i18n::t_with(locale, "engine.reason_outside_scope", &[("what", what)])
                 }
-                GateReason::SensitiveFloor { path } => {
-                    format!("sensitive path: {}", path.display())
-                }
+                GateReason::SensitiveFloor { path } => i18n::t_with(
+                    locale,
+                    "engine.reason_sensitive",
+                    &[("path", &path.display().to_string())],
+                ),
             };
-            Some(format!("{detail}\n{why}\n[a] approve  [d] deny"))
+            Some(format!("{detail}\n{why}\n{keys}"))
         }
         _ => None,
     }
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [ ] **Step 5: Add the engine keys to both catalogs**
+
+In `crates/tui/src/i18n.rs`, append to `EN`:
+
+```rust
+    ("engine.plan_proposed", "plan proposed: {summary}"),
+    ("engine.plan_approved", "plan approved"),
+    ("engine.plan_rejected", "plan rejected"),
+    ("engine.step_started", "step: {description}"),
+    ("engine.step_done", "step done"),
+    ("engine.step_failed", "step failed"),
+    ("engine.file_edit", "wrote {path} ({bytes} bytes)"),
+    ("engine.command_run", "ran {command} (exit {code})"),
+    ("engine.approval_needed", "approval needed: {detail}"),
+    ("engine.token_usage", "tokens: {input} in / {output} out"),
+    ("engine.turn_complete", "turn complete"),
+    ("engine.turn_ended", "turn ended"),
+    (
+        "engine.plan_prompt",
+        "Plan: {summary}\n{steps} step(s), {paths} write path(s), {commands} command(s)",
+    ),
+    ("engine.reason_outside_scope", "outside the approved scope: {what}"),
+    ("engine.reason_sensitive", "sensitive path: {path}"),
+    ("engine.approve_keys", "[a] approve  [d] deny"),
+```
+
+and the matching entries to `ES`:
+
+```rust
+    ("engine.plan_proposed", "plan propuesto: {summary}"),
+    ("engine.plan_approved", "plan aprobado"),
+    ("engine.plan_rejected", "plan rechazado"),
+    ("engine.step_started", "paso: {description}"),
+    ("engine.step_done", "paso completado"),
+    ("engine.step_failed", "paso fallido"),
+    ("engine.file_edit", "escrito {path} ({bytes} bytes)"),
+    ("engine.command_run", "ejecutado {command} (salida {code})"),
+    ("engine.approval_needed", "se requiere aprobación: {detail}"),
+    ("engine.token_usage", "tokens: {input} entrada / {output} salida"),
+    ("engine.turn_complete", "turno completado"),
+    ("engine.turn_ended", "turno finalizado"),
+    (
+        "engine.plan_prompt",
+        "Plan: {summary}\n{steps} paso(s), {paths} ruta(s) de escritura, {commands} comando(s)",
+    ),
+    ("engine.reason_outside_scope", "fuera del alcance aprobado: {what}"),
+    ("engine.reason_sensitive", "ruta sensible: {path}"),
+    ("engine.approve_keys", "[a] aprobar  [d] denegar"),
+```
+
+- [ ] **Step 6: Run tests to verify they pass**
 
 Run: `cargo test -p light-factory-tui`
-Expected: PASS (4 tests).
+Expected: PASS (5 engine-view tests, plus the existing `ES must define exactly the EN key set` assertion, which now covers the new keys).
 
-- [ ] **Step 6: Add the engine mode to the app**
+- [ ] **Step 7: Add the engine mode to the app**
 
 In `crates/tui/src/app.rs`:
 
@@ -3057,12 +2808,9 @@ In `crates/tui/src/app.rs`:
 3. On entering `Mode::Engine`, build the session:
 
 ```rust
-let provider = Arc::new(AnthropicProvider::new(
-    AnthropicProvider::api_base_default(),
-    std::env::var("LIGHT_ANTHROPIC_API_KEY")
-        .map_err(|_| anyhow::anyhow!("LIGHT_ANTHROPIC_API_KEY is not set"))?,
-    "claude-sonnet-5",
-));
+// Reuse the selection built by the port-llm-providers plan. It never fails: with no
+// key configured it degrades to the offline LocalProvider rather than erroring.
+let provider = crate::provider::build();
 
 let mut engine = Engine::new(provider);
 let session = engine.create_session(std::env::current_dir()?)?;
@@ -3079,7 +2827,7 @@ self.engine = Some(engine);
 self.session = Some(session);
 ```
 
-4. Add `UiEvent::Engine(Event)` to the existing `UiEvent` enum and handle it by pushing `describe_event(&event.kind)` onto `engine_log` and setting `pending` from `pending_prompt(&event.kind)`.
+4. Add `UiEvent::Engine(Event)` to the existing `UiEvent` enum and handle it by pushing `describe_event(self.config.lang, &event.kind)` onto `engine_log` and setting `pending` from `pending_prompt(self.config.lang, &event.kind)`. `self.config.lang` is the `Locale` the existing `t`/`t_with` helpers already use.
 5. Bind `a` and `d` in `Mode::Engine` to build the matching command from the id carried in `pending` and route it with `engine.dispatch(...)`, then clear `pending`:
 
 ```rust
@@ -3102,12 +2850,21 @@ if let Some(command) = command {
 ```
 6. Render `engine_log` in the main pane and `pending` in a bordered footer block.
 
-- [ ] **Step 7: Verify the binary builds and runs**
+- [ ] **Step 8: Verify the binary builds and runs**
 
 Run: `cargo run -p light-factory-tui`
-Expected: the TUI starts. Sign in, enter engine mode, and confirm the pane renders. Without `LIGHT_ANTHROPIC_API_KEY` set, entering engine mode should surface a clear error rather than panicking.
+Expected: the TUI starts. Sign in, enter engine mode, and confirm the pane renders.
 
-- [ ] **Step 8: Commit**
+With no API key configured, `build_provider_from_env` selects the offline `LocalProvider`, so
+engine mode must still open and the turn must still reach `TurnComplete` — it will simply fail to
+produce a parseable plan and surface `EventKind::Error { code: "invalid_plan", .. }`. Confirm that
+path renders as an error line rather than hanging or panicking. Then set `ANTHROPIC_API_KEY` and
+confirm a real plan is proposed.
+
+Run with `LIGHT_LANG=es` (or the setting the localize-tui work established) and confirm the engine
+pane renders Spanish while the plan summary itself stays as the model wrote it.
+
+- [ ] **Step 9: Commit**
 
 ```bash
 git add crates/tui
@@ -3116,7 +2873,7 @@ git commit -m "feat(tui): drive the engine through Command/Event"
 
 ---
 
-### Task 15: Update the documentation
+### Task 13: Update the documentation
 
 **Files:**
 - Modify: `ARCHITECTURE.md`
