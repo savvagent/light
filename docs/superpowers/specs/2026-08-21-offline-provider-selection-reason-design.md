@@ -79,14 +79,23 @@ The three reasons map to the three offline paths in `build_provider_from_env`
 (`selection.rs:266`):
 
 - **`NothingConfigured`** — `choose(false, None) => Slot::Local` (`selection.rs:292`), i.e. key
-  precedence found no key and no selector was usable.
+  precedence found no key and no selector was usable. Produced in `build_provider_from_env` and
+  in `select_remote_from`'s key-precedence fallthrough.
 - **`NamedProviderMissingKey`** — `present_or_warn` (`selection.rs:109`) returns `None` when a
-  named selector's key is absent.
+  named selector's key is absent. Its `selector` field is the normalized `RemoteChoice::id()`
+  (`"openai"`, etc.), not the raw `LIGHT_REMOTE_PROVIDER` value (which `present_or_warn` never
+  sees); `key` is the concrete env var name (`OPENAI_API_KEY`, …).
 - **`BaseUrlRejected`** — `build_remote` (`selection.rs:233`) returns `None` when `env_base_url`
-  rejects a `LIGHT_*_BASE_URL` override.
+  rejects a `LIGHT_*_BASE_URL` override. Produced in `build_remote`, not `select_remote_from`.
+
+`RemoteSelection.offline` (the internal record from `select_remote_from`) therefore carries only
+`NothingConfigured` / `NamedProviderMissingKey`; the `BaseUrlRejected` reason originates in
+`build_remote` and is merged onto the final `BuiltProvider` by `build_provider_from_env`.
 
 Both new members are additive fields on a public struct and a new public enum — semver-minor, no
-`Cargo.toml` bump (Non-Negotiable Rule 6).
+`Cargo.toml` bump (Non-Negotiable Rule 6). `OfflineReason` is re-exported from
+`crates/providers/src/lib.rs` (alongside `BuiltProvider`) so the TUI imports it from
+`light_factory_providers`.
 
 ## §2 Warning collection instead of `eprintln!`
 
@@ -163,6 +172,9 @@ discards its info (`let (provider, _info) = crate::provider::build()`), now:
 2. when `info.offline` is `Some(reason)`, pushes `offline_notice(lang, reason)` naming the
    variable(s) to set.
 
+The warnings/notice are pushed **after** the existing `self.engine_log.clear()` (`app.rs:271`) —
+which currently runs near the end of `enter_engine` — so the clear does not wipe the notice.
+
 `crates/tui/src/i18n.rs` gains EN + ES entries (ES must mirror EN exactly — test-enforced):
 
 - `provider.offline.nothing` — "No provider configured — set ANTHROPIC_API_KEY (or another
@@ -170,8 +182,10 @@ discards its info (`let (provider, _info) = crate::provider::build()`), now:
 - `provider.offline.missing_key` — "Provider '{selector}' selected but {key} is not set — falling
   back to offline"
 - `provider.offline.base_url` — "{var} was rejected — falling back to offline"
-- `error.no_provider_configured` — translated by `describe_event` via `error_message(locale, code)`
-  (`engine_view.rs:79`) when the engine emits the guard error.
+- `error.no_provider_configured` — EN: "No provider configured — set an API key or LIGHT_OLLAMA=1";
+  ES: "No hay proveedor configurado — define una clave de API o LIGHT_OLLAMA=1". Translated by
+  `describe_event` via `error_message(locale, code)` (`engine_view.rs:79`) when the engine emits
+  the guard error; the engine's `message` field is only the fallback for a catalog miss.
 
 ## Assumptions
 
