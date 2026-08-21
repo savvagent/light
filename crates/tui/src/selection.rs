@@ -1,5 +1,5 @@
 //! Compose the active provider from the environment, persisted preferences, and the OS keyring,
-//! and expose the pieces the commands need (`resolve_key`, `key_status`, `rebuild`).
+//! and expose the pieces the commands need (`key_status`, `rebuild`).
 
 use std::sync::Arc;
 
@@ -13,15 +13,6 @@ use crate::settings::Settings;
 
 /// The remote provider ids, in key-precedence order.
 const REMOTE_IDS: [&str; 4] = ["anthropic", "openai", "gemini", "deepseek"];
-
-/// Pure key precedence: an env key (even empty) loses to nothing; a non-empty env key beats the
-/// keyring; otherwise the keyring key is used.
-fn pick_key(env_key: Option<String>, keyring_key: Option<String>) -> Option<String> {
-    match env_key.filter(|k| !k.is_empty()) {
-        Some(key) => Some(key),
-        None => keyring_key,
-    }
-}
 
 /// Pure classification of a provider's key source.
 fn classify(env_key: Option<String>, keyring_key: Option<String>) -> KeyStatus {
@@ -39,12 +30,6 @@ fn sources(provider: &str, store: &dyn CredentialStore) -> (Option<String>, Opti
     let env_key = env_key_var(provider).and_then(|var| std::env::var(var).ok());
     let keyring_key = store.get(provider).ok().flatten();
     (env_key, keyring_key)
-}
-
-/// Resolve a provider's key: the environment wins, then the keyring, else absent.
-pub fn resolve_key(provider: &str, store: &dyn CredentialStore) -> Option<String> {
-    let (env_key, keyring_key) = sources(provider, store);
-    pick_key(env_key, keyring_key)
 }
 
 /// Where a provider's key comes from, for the `/key` listing.
@@ -127,23 +112,6 @@ mod tests {
     }
 
     #[test]
-    fn pick_key_prefers_a_nonempty_env_key_then_keyring_then_none() {
-        assert_eq!(
-            pick_key(Some("env".to_string()), Some("ring".to_string())),
-            Some("env".to_string())
-        );
-        assert_eq!(
-            pick_key(None, Some("ring".to_string())),
-            Some("ring".to_string())
-        );
-        assert_eq!(
-            pick_key(Some(String::new()), Some("ring".to_string())),
-            Some("ring".to_string())
-        );
-        assert_eq!(pick_key(None, None), None);
-    }
-
-    #[test]
     fn classify_distinguishes_env_keyring_and_none() {
         assert_eq!(classify(Some("k".to_string()), None), KeyStatus::Env);
         assert_eq!(
@@ -157,9 +125,8 @@ mod tests {
     #[test]
     fn non_remote_providers_have_no_key() {
         let store = MemStore::new();
-        assert_eq!(resolve_key("ollama", &store), None);
-        assert_eq!(resolve_key("local", &store), None);
         assert_eq!(key_status("ollama", &store), KeyStatus::None);
+        assert_eq!(key_status("local", &store), KeyStatus::None);
     }
 
     #[test]
@@ -195,8 +162,10 @@ mod tests {
 
     #[test]
     fn build_and_info_with_a_stored_key_selects_that_provider() {
-        let mut base = Selection::default();
-        base.preferred = Some("deepseek".to_string());
+        let mut base = Selection {
+            preferred: Some("deepseek".to_string()),
+            ..Default::default()
+        };
         base.keys.insert("deepseek".to_string(), "sk-d".to_string());
         let (provider, info) = build_and_info(&base);
         assert_eq!(provider.id(), "deepseek");

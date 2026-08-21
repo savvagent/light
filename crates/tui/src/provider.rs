@@ -114,6 +114,34 @@ mod tests {
     }
 
     #[test]
+    fn reason_names_the_selection_source() {
+        assert_eq!(
+            info(None, Some(SelectedBy::KeyPrecedence)).reason(Locale::En),
+            "key precedence"
+        );
+        assert_eq!(
+            info(None, Some(SelectedBy::StoredPreference)).reason(Locale::En),
+            "stored preference"
+        );
+        assert_eq!(
+            info(None, Some(SelectedBy::OllamaEnv)).reason(Locale::En),
+            "LIGHT_OLLAMA"
+        );
+        assert_eq!(
+            info(None, Some(SelectedBy::RemoteSelectorEnv)).reason(Locale::En),
+            "LIGHT_REMOTE_PROVIDER"
+        );
+    }
+
+    #[test]
+    fn reason_reports_offline() {
+        assert_eq!(
+            info(Some(OfflineReason::NothingConfigured), None).reason(Locale::En),
+            "offline"
+        );
+    }
+
+    #[test]
     fn reason_is_empty_without_a_source() {
         assert_eq!(info(None, None).reason(Locale::En), "");
     }

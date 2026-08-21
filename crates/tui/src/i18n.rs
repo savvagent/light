@@ -110,7 +110,7 @@ const EN: Catalog = &[
     ),
     (
         "hint.connected",
-        "p: ping · o: sign out · /ask: completion · q/Ctrl-C: quit",
+        "p: ping · o: sign out · /ask: completion · /provider|/model|/key: configure · q/Ctrl-C: quit",
     ),
     ("hint.device_cancel", "Esc: cancel device login"),
     (
@@ -191,6 +191,45 @@ const EN: Catalog = &[
         "Enter: send prompt · Esc: back · a/d: approve/deny only while a prompt is pending",
     ),
     ("status.engine_started", "Engine session started"),
+    ("provider.reason.ollama_env", "LIGHT_OLLAMA"),
+    ("provider.reason.selector_env", "LIGHT_REMOTE_PROVIDER"),
+    ("provider.reason.stored", "stored preference"),
+    ("provider.reason.key_precedence", "key precedence"),
+    ("provider.reason.offline", "offline"),
+    ("provider.key.env", "env"),
+    ("provider.key.keyring", "keyring"),
+    ("provider.key.none", "none"),
+    ("provider.list_active", "active: {provider} ({reason})"),
+    ("provider.list_available", "available: {list}"),
+    ("key.list", "keys: {list}"),
+    ("status.provider_set", "Provider set to {provider}"),
+    (
+        "status.provider_invalid",
+        "Unknown provider; use anthropic|openai|gemini|deepseek|ollama",
+    ),
+    ("status.model_set", "Model set to {model}"),
+    ("status.model_empty", "Usage: /model <id>"),
+    (
+        "status.model_unsupported",
+        "The active provider has no model to set",
+    ),
+    ("status.key_set", "API key saved for {provider}"),
+    ("status.key_cleared", "API key cleared for {provider}"),
+    (
+        "status.key_failed",
+        "Could not save the API key for {provider}: {error}",
+    ),
+    (
+        "status.key_unsupported",
+        "{provider} does not take an API key",
+    ),
+    (
+        "status.key_enter",
+        "Enter API key for {provider} (input hidden)",
+    ),
+    ("status.key_empty", "No key entered; nothing saved"),
+    ("field.key", "API key"),
+    ("hint.key", "Enter: save · Esc: cancel"),
 ];
 
 const ES: Catalog = &[
@@ -284,7 +323,7 @@ const ES: Catalog = &[
     ),
     (
         "hint.connected",
-        "p: ping · o: cerrar sesión · /ask: completar · q/Ctrl-C: salir",
+        "p: ping · o: cerrar sesión · /ask: completar · /provider|/model|/key: configurar · q/Ctrl-C: salir",
     ),
     (
         "hint.device_cancel",
@@ -383,6 +422,51 @@ const ES: Catalog = &[
         "Enter: enviar indicación · Esc: volver · a/d: aprobar/denegar solo con una aprobación pendiente",
     ),
     ("status.engine_started", "Sesión del motor iniciada"),
+    ("provider.reason.ollama_env", "LIGHT_OLLAMA"),
+    ("provider.reason.selector_env", "LIGHT_REMOTE_PROVIDER"),
+    ("provider.reason.stored", "preferencia guardada"),
+    ("provider.reason.key_precedence", "precedencia de claves"),
+    ("provider.reason.offline", "sin conexión"),
+    ("provider.key.env", "entorno"),
+    ("provider.key.keyring", "llavero"),
+    ("provider.key.none", "ninguna"),
+    ("provider.list_active", "activo: {provider} ({reason})"),
+    ("provider.list_available", "disponibles: {list}"),
+    ("key.list", "claves: {list}"),
+    ("status.provider_set", "Proveedor cambiado a {provider}"),
+    (
+        "status.provider_invalid",
+        "Proveedor desconocido; usa anthropic|openai|gemini|deepseek|ollama",
+    ),
+    ("status.model_set", "Modelo cambiado a {model}"),
+    ("status.model_empty", "Uso: /model <id>"),
+    (
+        "status.model_unsupported",
+        "El proveedor activo no tiene modelo que configurar",
+    ),
+    ("status.key_set", "Clave de API guardada para {provider}"),
+    (
+        "status.key_cleared",
+        "Clave de API eliminada para {provider}",
+    ),
+    (
+        "status.key_failed",
+        "No se pudo guardar la clave de API para {provider}: {error}",
+    ),
+    (
+        "status.key_unsupported",
+        "{provider} no usa una clave de API",
+    ),
+    (
+        "status.key_enter",
+        "Introduce la clave de API para {provider} (entrada oculta)",
+    ),
+    (
+        "status.key_empty",
+        "No se introdujo ninguna clave; no se guardó nada",
+    ),
+    ("field.key", "Clave de API"),
+    ("hint.key", "Enter: guardar · Esc: cancelar"),
 ];
 
 fn lookup(catalog: Catalog, key: &str) -> Option<&'static str> {

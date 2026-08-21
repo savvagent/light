@@ -40,11 +40,6 @@ pub fn save(settings: &Settings) -> anyhow::Result<()> {
     save_at(&path(), settings)
 }
 
-/// Persist the chosen locale without disturbing the provider/model preferences.
-pub fn save_lang(lang: &str) -> anyhow::Result<()> {
-    save_lang_at(&path(), lang)
-}
-
 fn load_at(path: &Path) -> Option<Settings> {
     let raw = fs::read_to_string(path).ok()?;
     serde_json::from_str::<Settings>(&raw).ok()
@@ -56,12 +51,6 @@ fn save_at(path: &Path, settings: &Settings) -> anyhow::Result<()> {
     }
     fs::write(path, serde_json::to_string_pretty(settings)?)?;
     Ok(())
-}
-
-fn save_lang_at(path: &Path, lang: &str) -> anyhow::Result<()> {
-    let mut settings = load_at(path).unwrap_or_default();
-    settings.lang = lang.to_string();
-    save_at(path, &settings)
 }
 
 #[cfg(test)]
@@ -78,7 +67,12 @@ mod tests {
     #[test]
     fn round_trips_locale() {
         let path = temp("lang");
-        save_lang_at(&path, "es").unwrap();
+        let settings = Settings {
+            lang: "es".to_string(),
+            provider: None,
+            models: BTreeMap::new(),
+        };
+        save_at(&path, &settings).unwrap();
         assert_eq!(load_at(&path).unwrap().lang, "es");
         let _ = fs::remove_file(&path);
     }
@@ -106,22 +100,6 @@ mod tests {
         assert_eq!(loaded.lang, "es");
         assert_eq!(loaded.provider, None);
         assert!(loaded.models.is_empty());
-        let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn save_lang_preserves_preferences() {
-        let path = temp("preserve");
-        let settings = Settings {
-            lang: "en".to_string(),
-            provider: Some("openai".to_string()),
-            models: BTreeMap::new(),
-        };
-        save_at(&path, &settings).unwrap();
-        save_lang_at(&path, "es").unwrap();
-        let loaded = load_at(&path).unwrap();
-        assert_eq!(loaded.lang, "es");
-        assert_eq!(loaded.provider, Some("openai".to_string()));
         let _ = fs::remove_file(&path);
     }
 
