@@ -82,22 +82,12 @@ impl Session {
     async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
         while let Some(command) = commands.recv().await {
             match command {
-                Command::SendPrompt { text, .. } => self.run_turn(&text).await,
-                Command::Abort { .. } => self.emit(EventKind::TurnComplete { ok: false }),
-                Command::CreateSession { .. }
-                | Command::ApprovePlan { .. }
-                | Command::ApproveAction { .. }
-                | Command::Pause { .. }
-                | Command::Resume { .. } => {
-                    // Handled inside `run_turn` while a turn is in flight; ignored otherwise.
+                Command::SendPrompt { text, .. } => {
+                    self.run_turn(&text, &mut commands).await;
                 }
+                Command::Abort { .. } => self.emit(EventKind::TurnComplete { ok: false }),
+                _ => {}
             }
         }
-    }
-}
-
-impl Session {
-    async fn run_turn(&mut self, _goal: &str) {
-        self.emit(EventKind::TurnComplete { ok: false });
     }
 }

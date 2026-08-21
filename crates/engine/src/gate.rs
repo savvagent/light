@@ -56,14 +56,10 @@ impl PlanGate {
         if pattern.program != program || pattern.args.len() != args.len() {
             return false;
         }
-        pattern
-            .args
-            .iter()
-            .zip(args)
-            .all(|(p, a)| match p {
-                ArgPattern::Any => true,
-                ArgPattern::Exact(want) => want == a,
-            })
+        pattern.args.iter().zip(args).all(|(p, a)| match p {
+            ArgPattern::Any => true,
+            ArgPattern::Exact(want) => want == a,
+        })
     }
 }
 
@@ -106,11 +102,18 @@ impl PermissionGate for PlanGate {
                         .unwrap_or(false)
                 });
 
-                if permitted { Decision::Allow } else { Self::outside(raw) }
+                if permitted {
+                    Decision::Allow
+                } else {
+                    Self::outside(raw)
+                }
             }
 
             "bash" => {
-                let program = args.get("program").and_then(Value::as_str).unwrap_or_default();
+                let program = args
+                    .get("program")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 let argv: Vec<String> = args
                     .get("args")
                     .and_then(Value::as_array)

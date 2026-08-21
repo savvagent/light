@@ -3,5 +3,6 @@
 pub mod gate;
 pub mod prompt;
 pub mod session;
+pub mod turn;
 
 pub use gate::PlanGate;

@@ -16,8 +16,14 @@ fn scope() -> Scope {
 #[test]
 fn reads_are_allowed_anywhere_in_the_workspace() {
     let gate = PlanGate::new(Some(scope()));
-    assert_eq!(gate.evaluate("fs.read", &json!({"path": "docs/whatever.md"})), Decision::Allow);
-    assert_eq!(gate.evaluate("fs.list", &json!({"glob": "**/*.rs"})), Decision::Allow);
+    assert_eq!(
+        gate.evaluate("fs.read", &json!({"path": "docs/whatever.md"})),
+        Decision::Allow
+    );
+    assert_eq!(
+        gate.evaluate("fs.list", &json!({"glob": "**/*.rs"})),
+        Decision::Allow
+    );
 }
 
 #[test]
@@ -36,8 +42,14 @@ fn reads_of_sensitive_paths_still_ask() {
 #[test]
 fn writes_inside_scope_are_allowed() {
     let gate = PlanGate::new(Some(scope()));
-    assert_eq!(gate.evaluate("fs.write", &json!({"path": "src/main.rs"})), Decision::Allow);
-    assert_eq!(gate.evaluate("fs.write", &json!({"path": "README.md"})), Decision::Allow);
+    assert_eq!(
+        gate.evaluate("fs.write", &json!({"path": "src/main.rs"})),
+        Decision::Allow
+    );
+    assert_eq!(
+        gate.evaluate("fs.write", &json!({"path": "README.md"})),
+        Decision::Allow
+    );
 }
 
 #[test]
@@ -78,11 +90,17 @@ fn sensitive_writes_ask_even_when_a_glob_would_match() {
 fn commands_match_program_and_arg_patterns() {
     let gate = PlanGate::new(Some(scope()));
     assert_eq!(
-        gate.evaluate("bash", &json!({"program": "cargo", "args": ["test", "--workspace"]})),
+        gate.evaluate(
+            "bash",
+            &json!({"program": "cargo", "args": ["test", "--workspace"]})
+        ),
         Decision::Allow
     );
     assert!(matches!(
-        gate.evaluate("bash", &json!({"program": "cargo", "args": ["publish", "--x"]})),
+        gate.evaluate(
+            "bash",
+            &json!({"program": "cargo", "args": ["publish", "--x"]})
+        ),
         Decision::Ask(GateReason::OutsideScope { .. })
     ));
     assert!(matches!(
@@ -99,7 +117,10 @@ fn arity_must_match_the_pattern() {
         Decision::Ask(GateReason::OutsideScope { .. })
     ));
     assert!(matches!(
-        gate.evaluate("bash", &json!({"program": "cargo", "args": ["test", "a", "b"]})),
+        gate.evaluate(
+            "bash",
+            &json!({"program": "cargo", "args": ["test", "a", "b"]})
+        ),
         Decision::Ask(GateReason::OutsideScope { .. })
     ));
 }
@@ -115,7 +136,10 @@ fn no_approved_plan_means_nothing_is_authorized() {
         gate.evaluate("bash", &json!({"program": "cargo", "args": ["test", "x"]})),
         Decision::Ask(GateReason::OutsideScope { .. })
     ));
-    assert_eq!(gate.evaluate("fs.read", &json!({"path": "src/main.rs"})), Decision::Allow);
+    assert_eq!(
+        gate.evaluate("fs.read", &json!({"path": "src/main.rs"})),
+        Decision::Allow
+    );
 }
 
 #[test]
