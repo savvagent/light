@@ -29,3 +29,4 @@ belongs in the active directories.
 | `tui-broadcast-lag` | Engine-event forwarder continues on `RecvError::Lagged` and surfaces a "dropped events" notice instead of terminating (plan only) |
 | `turn-step-budget-transcript` | Bounded the execute loop with `MAX_STEPS_PER_TURN` and truncated transcript entries with `MAX_TRANSCRIPT_ENTRY_CHARS` (plan only) |
 | `help-modal` | Moved the TUI's per-mode help hints into a Ctrl-P help modal and replaced the status line with a short "Ctrl-P: help" indicator (plan only; fast-path) |
+| `connect-modal` | Guided `/connect` modal (provider → API key → model) replacing `/provider`, plus a `providers::models` module that lists provider model ids behind the base-URL trust boundary |
