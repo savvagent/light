@@ -122,14 +122,24 @@ impl Store for MemStore {
         &self,
         device_code_hash: &str,
     ) -> Result<Option<DeviceGrant>, StoreError> {
-        Ok(self.device_grants.lock().unwrap().get(device_code_hash).cloned())
+        Ok(self
+            .device_grants
+            .lock()
+            .unwrap()
+            .get(device_code_hash)
+            .cloned())
     }
 
     async fn get_device_grant_by_user_code(
         &self,
         user_code: &str,
     ) -> Result<Option<DeviceGrant>, StoreError> {
-        let hash = self.device_by_user_code.lock().unwrap().get(user_code).cloned();
+        let hash = self
+            .device_by_user_code
+            .lock()
+            .unwrap()
+            .get(user_code)
+            .cloned();
         Ok(match hash {
             Some(h) => self.device_grants.lock().unwrap().get(&h).cloned(),
             None => None,
@@ -141,7 +151,12 @@ impl Store for MemStore {
         user_code: &str,
         user_id: Uuid,
     ) -> Result<bool, StoreError> {
-        let hash = self.device_by_user_code.lock().unwrap().get(user_code).cloned();
+        let hash = self
+            .device_by_user_code
+            .lock()
+            .unwrap()
+            .get(user_code)
+            .cloned();
         let Some(hash) = hash else {
             return Ok(false);
         };

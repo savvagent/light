@@ -114,7 +114,11 @@ async fn device_grant_round_trip() {
     store.create_device_grant(&grant).await.unwrap();
 
     // Fetch by device code and by user code.
-    let fetched = store.get_device_grant(&device_code_hash).await.unwrap().unwrap();
+    let fetched = store
+        .get_device_grant(&device_code_hash)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.user_code, user_code);
     assert!(fetched.user_id.is_none());
     let by_code = store
@@ -125,22 +129,35 @@ async fn device_grant_round_trip() {
     assert_eq!(by_code.device_code_hash, device_code_hash);
 
     // Approve sets the user_id.
-    assert!(store.approve_device_grant(&user_code, user_id).await.unwrap());
-    let fetched = store.get_device_grant(&device_code_hash).await.unwrap().unwrap();
+    assert!(
+        store
+            .approve_device_grant(&user_code, user_id)
+            .await
+            .unwrap()
+    );
+    let fetched = store
+        .get_device_grant(&device_code_hash)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.user_id, Some(user_id));
 
     // Approving again returns false (no pending grant left to update).
-    assert!(!store.approve_device_grant(&user_code, user_id).await.unwrap());
+    assert!(
+        !store
+            .approve_device_grant(&user_code, user_id)
+            .await
+            .unwrap()
+    );
 
     // Consume is single-use.
-    let consumed = store
-        .consume_device_grant(&device_code_hash)
-        .await
-        .unwrap();
+    let consumed = store.consume_device_grant(&device_code_hash).await.unwrap();
     assert!(consumed.is_some());
-    assert!(store
-        .consume_device_grant(&device_code_hash)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        store
+            .consume_device_grant(&device_code_hash)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

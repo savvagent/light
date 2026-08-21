@@ -77,7 +77,10 @@ mod tests {
     #[test]
     fn a_gate_returns_its_verdict() {
         let gate = FixedGate(Decision::Deny);
-        assert_eq!(gate.evaluate("anything", &serde_json::json!({})), Decision::Deny);
+        assert_eq!(
+            gate.evaluate("anything", &serde_json::json!({})),
+            Decision::Deny
+        );
     }
 
     #[tokio::test]

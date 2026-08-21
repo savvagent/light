@@ -76,30 +76,81 @@ pub enum GateReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
-    CreateSession { workspace: PathBuf },
-    SendPrompt { session: SessionId, text: String },
-    ApprovePlan { session: SessionId, plan_id: Uuid, approved: bool },
-    ApproveAction { session: SessionId, request_id: Uuid, approved: bool },
-    Pause { session: SessionId },
-    Resume { session: SessionId },
-    Abort { session: SessionId },
+    CreateSession {
+        workspace: PathBuf,
+    },
+    SendPrompt {
+        session: SessionId,
+        text: String,
+    },
+    ApprovePlan {
+        session: SessionId,
+        plan_id: Uuid,
+        approved: bool,
+    },
+    ApproveAction {
+        session: SessionId,
+        request_id: Uuid,
+        approved: bool,
+    },
+    Pause {
+        session: SessionId,
+    },
+    Resume {
+        session: SessionId,
+    },
+    Abort {
+        session: SessionId,
+    },
 }
 
 /// The body of an event emitted by the engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventKind {
-    PlanProposed { plan_id: Uuid, plan: Plan },
-    PlanDecided { plan_id: Uuid, approved: bool },
-    StepStarted { step_id: Uuid, description: String },
-    StepFinished { step_id: Uuid, ok: bool },
-    FileEdit { path: PathBuf, bytes_written: u64 },
-    CommandRun { command: String, exit_code: i32 },
-    ApprovalRequest { request_id: Uuid, reason: GateReason, detail: String },
-    Log { message: String },
-    TokenUsage { input_tokens: u64, output_tokens: u64 },
-    TurnComplete { ok: bool },
-    Error { code: String, message: String },
+    PlanProposed {
+        plan_id: Uuid,
+        plan: Plan,
+    },
+    PlanDecided {
+        plan_id: Uuid,
+        approved: bool,
+    },
+    StepStarted {
+        step_id: Uuid,
+        description: String,
+    },
+    StepFinished {
+        step_id: Uuid,
+        ok: bool,
+    },
+    FileEdit {
+        path: PathBuf,
+        bytes_written: u64,
+    },
+    CommandRun {
+        command: String,
+        exit_code: i32,
+    },
+    ApprovalRequest {
+        request_id: Uuid,
+        reason: GateReason,
+        detail: String,
+    },
+    Log {
+        message: String,
+    },
+    TokenUsage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
+    TurnComplete {
+        ok: bool,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 /// A sequenced, session-scoped event. `seq` is monotonic per session so a reattaching

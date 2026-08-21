@@ -1,8 +1,8 @@
 //! HTTP client for the auth endpoints, mirroring `web/src/lib/api.js`.
 
 use light_factory_protocol::auth::{
-    AuthResponse, DeviceAuthResponse, ErrorBody, ErrorDetail, LoginRequest,
-    RegisterConfirmRequest, RegisterRequest, RegisterResponse, UserView,
+    AuthResponse, DeviceAuthResponse, ErrorBody, ErrorDetail, LoginRequest, RegisterConfirmRequest,
+    RegisterRequest, RegisterResponse, UserView,
 };
 
 /// A uniform client error surfaced directly in the UI.

@@ -3,8 +3,8 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use light_factory_auth::store::User;
 use light_factory_auth::DevicePoll;
+use light_factory_auth::store::User;
 use light_factory_protocol::auth::{
     AuthResponse, DeviceApproveRequest, DeviceAuthResponse, DeviceTokenRequest, LoginRequest,
     RegisterConfirmRequest, RegisterRequest, RegisterResponse, UserView,

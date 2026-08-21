@@ -88,16 +88,23 @@ pub trait Store: Send + Sync {
 
     async fn create_device_grant(&self, grant: &DeviceGrant) -> Result<(), StoreError>;
 
-    async fn get_device_grant(&self, device_code_hash: &str)
-        -> Result<Option<DeviceGrant>, StoreError>;
+    async fn get_device_grant(
+        &self,
+        device_code_hash: &str,
+    ) -> Result<Option<DeviceGrant>, StoreError>;
 
-    async fn get_device_grant_by_user_code(&self, user_code: &str)
-        -> Result<Option<DeviceGrant>, StoreError>;
+    async fn get_device_grant_by_user_code(
+        &self,
+        user_code: &str,
+    ) -> Result<Option<DeviceGrant>, StoreError>;
 
     /// Set `user_id` on the grant with this `user_code`, returning whether a
     /// matching (still-pending) grant was updated.
-    async fn approve_device_grant(&self, user_code: &str, user_id: Uuid)
-        -> Result<bool, StoreError>;
+    async fn approve_device_grant(
+        &self,
+        user_code: &str,
+        user_id: Uuid,
+    ) -> Result<bool, StoreError>;
 
     /// Atomically consume a device grant (delete it) and return it, or `None`
     /// if it does not exist. Single-use by construction.
