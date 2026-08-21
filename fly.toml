@@ -11,9 +11,8 @@ primary_region = "iad"
 [env]
   ADDR = "0.0.0.0:8080"
   RUST_LOG = "info"
-  REQUIRE_TOTP = "true"
-  STARTER_TOKENS = "1000"
   CORS_ORIGINS = "https://light-factory.pages.dev"
+  DEVICE_VERIFICATION_URI = "https://light-factory.pages.dev"
 
 [http_service]
   internal_port = 8080
