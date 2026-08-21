@@ -108,14 +108,25 @@ const EN: Catalog = &[
         "hint.no_messages",
         "No messages yet — press 'p' to ping the server",
     ),
-    ("hint.connected", "p: ping · o: sign out · q/Ctrl-C: quit"),
+    (
+        "hint.connected",
+        "p: ping · o: sign out · /ask: completion · q/Ctrl-C: quit",
+    ),
     ("hint.device_cancel", "Esc: cancel device login"),
     (
         "hint.default",
         "/: command · Tab/↑↓: next field · Enter: submit · Esc: back/quit · Ctrl-C: quit",
     ),
     ("title.activity", "Activity"),
-    ("info.connected", "{name} <{email}>  ·  pongs: {pongs}"),
+    (
+        "info.connected",
+        "{name} <{email}>  ·  provider: {provider}  ·  pongs: {pongs}",
+    ),
+    ("status.ask_empty", "Usage: /ask <prompt>"),
+    (
+        "status.ask_not_connected",
+        "/ask is available after you sign in",
+    ),
     ("error.invalid_credentials", "Invalid email or code"),
     (
         "error.email_taken",
@@ -227,7 +238,7 @@ const ES: Catalog = &[
     ),
     (
         "hint.connected",
-        "p: ping · o: cerrar sesión · q/Ctrl-C: salir",
+        "p: ping · o: cerrar sesión · /ask: completar · q/Ctrl-C: salir",
     ),
     (
         "hint.device_cancel",
@@ -238,7 +249,15 @@ const ES: Catalog = &[
         "/: comando · Tab/↑↓: siguiente campo · Enter: enviar · Esc: atrás/salir · Ctrl-C: salir",
     ),
     ("title.activity", "Actividad"),
-    ("info.connected", "{name} <{email}>  ·  pongs: {pongs}"),
+    (
+        "info.connected",
+        "{name} <{email}>  ·  proveedor: {provider}  ·  pongs: {pongs}",
+    ),
+    ("status.ask_empty", "Uso: /ask <indicación>"),
+    (
+        "status.ask_not_connected",
+        "/ask está disponible después de iniciar sesión",
+    ),
     ("error.invalid_credentials", "Correo o código no válidos"),
     (
         "error.email_taken",

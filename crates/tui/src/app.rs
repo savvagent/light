@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::sync::Arc;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
@@ -11,6 +12,7 @@ use crossterm::terminal::{
 use futures_util::StreamExt;
 use light_factory_protocol::auth::AuthResponse;
 use light_factory_protocol::wire::{ClientMessage, ServerMessage};
+use light_factory_providers::{CompleteRequest, Provider};
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -24,6 +26,7 @@ use crate::api::{Api, ApiError};
 use crate::browser;
 use crate::config::Config;
 use crate::i18n::{self, Locale};
+use crate::provider::ProviderInfo;
 use crate::session::Session;
 use crate::ws;
 
@@ -35,6 +38,7 @@ pub enum UiEvent {
         nonce: u64,
         result: Result<AuthResponse, ApiError>,
     },
+    Completion(Result<String, String>),
 }
 
 /// Which field currently owns keyboard input.
@@ -77,6 +81,8 @@ pub struct App {
     otpauth_url: Option<String>,
     session: Option<Session>,
     ws_tx: Option<mpsc::UnboundedSender<ClientMessage>>,
+    provider: Arc<dyn Provider>,
+    provider_info: ProviderInfo,
     error: Option<String>,
     status: String,
     log: VecDeque<String>,
@@ -87,6 +93,8 @@ pub struct App {
 impl App {
     fn new(
         config: Config,
+        provider: Arc<dyn Provider>,
+        provider_info: ProviderInfo,
         prefilled_email: Option<String>,
         events: mpsc::UnboundedSender<UiEvent>,
     ) -> Self {
@@ -111,6 +119,8 @@ impl App {
             otpauth_url: None,
             session: None,
             ws_tx: None,
+            provider,
+            provider_info,
             error: None,
             status,
             log: VecDeque::new(),
@@ -164,7 +174,7 @@ impl App {
             KeyCode::Char('/')
                 if matches!(
                     self.mode,
-                    Mode::SignIn | Mode::Register | Mode::RegisterCode
+                    Mode::SignIn | Mode::Register | Mode::RegisterCode | Mode::Connected
                 ) =>
             {
                 self.command_mode = true;
@@ -212,7 +222,20 @@ impl App {
 
     async fn run_command(&mut self, command: &str) {
         self.error = None;
-        match command.trim() {
+        let trimmed = command.trim();
+        if let Some(prompt) = parse_ask_command(trimmed) {
+            if self.mode == Mode::Connected {
+                self.ask(prompt);
+            } else {
+                self.error = Some(self.t("status.ask_not_connected").to_string());
+            }
+            return;
+        }
+        if trimmed.starts_with("/ask") {
+            self.error = Some(self.t("status.ask_empty").to_string());
+            return;
+        }
+        match trimmed {
             "/auth/login" => self.start_device_login().await,
             "/auth/logout" => self.sign_out().await,
             "" => {}
@@ -230,6 +253,21 @@ impl App {
                 self.error = Some(self.t_with("status.unknown_command", &[("command", other)]))
             }
         }
+    }
+
+    /// Run an `/ask` completion off the UI loop so a slow provider never blocks input.
+    fn ask(&mut self, prompt: &str) {
+        let provider = self.provider.clone();
+        let events = self.events.clone();
+        let prompt = prompt.to_string();
+        tokio::spawn(async move {
+            let result = provider.complete(CompleteRequest { prompt }).await;
+            let message = match result {
+                Ok(resp) => Ok(resp.text),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = events.send(UiEvent::Completion(message));
+        });
     }
 
     /// Begin the browser-based device login and poll for approval.
@@ -473,6 +511,13 @@ impl App {
             let nonce = self.nonce.to_string();
             self.push_log(self.t_with("status.ping", &[("nonce", &nonce)]));
             let _ = tx.send(ClientMessage::Ping { nonce });
+        }
+    }
+
+    fn handle_completion(&mut self, result: Result<String, String>) {
+        match result {
+            Ok(text) => self.push_log(text),
+            Err(e) => self.push_log(format!("[ask] {e}")),
         }
     }
 
@@ -771,12 +816,14 @@ impl App {
         let info = match &self.session {
             Some(s) => {
                 let pongs = self.pongs.to_string();
+                let provider = self.provider_info.display();
                 self.t_with(
                     "info.connected",
                     &[
                         ("name", &s.display_name),
                         ("email", &s.email),
                         ("pongs", &pongs),
+                        ("provider", &provider),
                     ],
                 )
             }
@@ -809,7 +856,12 @@ impl App {
 }
 
 /// Run the terminal UI until the user quits.
-pub async fn run(config: Config, prefilled_email: Option<String>) -> anyhow::Result<()> {
+pub async fn run(
+    config: Config,
+    provider: Arc<dyn Provider>,
+    provider_info: ProviderInfo,
+    prefilled_email: Option<String>,
+) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -817,7 +869,13 @@ pub async fn run(config: Config, prefilled_email: Option<String>) -> anyhow::Res
     let mut terminal = Terminal::new(backend)?;
 
     let (events, mut event_rx) = mpsc::unbounded_channel::<UiEvent>();
-    let mut app = App::new(config, prefilled_email, events.clone());
+    let mut app = App::new(
+        config,
+        provider,
+        provider_info,
+        prefilled_email,
+        events.clone(),
+    );
 
     // Restore a saved session if it is still valid; otherwise go straight into
     // the browser-based device login.
@@ -867,6 +925,7 @@ pub async fn run(config: Config, prefilled_email: Option<String>) -> anyhow::Res
                     UiEvent::Device { nonce, result } => {
                         app.handle_device_result(nonce, result).await
                     }
+                    UiEvent::Completion(result) => app.handle_completion(result),
                 }
             }
             _ = tick.tick() => {
@@ -884,4 +943,43 @@ pub async fn run(config: Config, prefilled_email: Option<String>) -> anyhow::Res
     terminal.show_cursor()?;
 
     result
+}
+
+/// Parse an `/ask <prompt>` command into the prompt, or `None` when the command is not an
+/// `/ask` with a non-empty prompt. `/ask` and `/ask   ` (empty prompt) are `None` so the caller
+/// can show a usage hint; `/askhello` (no word boundary) and other commands are also `None`.
+fn parse_ask_command(command: &str) -> Option<&str> {
+    let rest = command.trim().strip_prefix("/ask")?;
+    let boundary = rest.chars().next().map(char::is_whitespace).unwrap_or(true);
+    if !boundary {
+        return None;
+    }
+    let prompt = rest.trim();
+    if prompt.is_empty() {
+        None
+    } else {
+        Some(prompt)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ask_command;
+
+    #[test]
+    fn parses_an_ask_prompt() {
+        assert_eq!(parse_ask_command("/ask hello"), Some("hello"));
+    }
+
+    #[test]
+    fn rejects_an_empty_ask() {
+        assert_eq!(parse_ask_command("/ask"), None);
+        assert_eq!(parse_ask_command("/ask   "), None);
+    }
+
+    #[test]
+    fn rejects_other_commands() {
+        assert_eq!(parse_ask_command("/auth/login"), None);
+        assert_eq!(parse_ask_command("/askhello"), None);
+    }
 }

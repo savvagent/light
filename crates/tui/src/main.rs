@@ -5,6 +5,7 @@ mod app;
 mod browser;
 mod config;
 mod i18n;
+mod provider;
 mod session;
 mod settings;
 mod ws;
@@ -47,7 +48,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let config = config::Config::from_url(&cli.url)?.with_lang(locale);
-    app::run(config, cli.email).await
+    let (provider, info) = provider::build();
+    app::run(config, provider, info, cli.email).await
 }
 
 /// Resolve the locale from `--lang` → saved config → `LC_ALL` → `LANG` → English,

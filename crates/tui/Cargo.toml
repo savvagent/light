@@ -23,6 +23,7 @@ assets = [
 
 [dependencies]
 light-factory-protocol = { path = "../protocol" }
+light-factory-providers = { path = "../providers" }
 ratatui = { workspace = true, features = ["crossterm"] }
 crossterm = { workspace = true, features = ["event-stream"] }
 reqwest = { workspace = true }
