@@ -1,6 +1,6 @@
 # /connect modal flow — design
 
-> **Status:** DRAFT — single guided modal replacing the text-command provider setup.
+> **Status:** IMPLEMENTED — single guided modal replacing the text-command provider setup.
 
 > **Implements:** https://github.com/savvagent/light-factory/issues/35
 
@@ -66,15 +66,15 @@ Goal: a user can, from the connected TUI screen and without knowing command synt
 and end with a provider that is active, has a working key (or a reachable Ollama server), and a
 chosen model.
 
-- [ ] `/connect` opens the modal; `/provider` is gone; the help modal advertises `/connect`.
-- [ ] The modal lists the five supported providers and correctly marks each connected or not.
-- [ ] Connected provider → model list rendered from a live `list_models` call; choosing one persists
+- [x] `/connect` opens the modal; `/provider` is gone; the help modal advertises `/connect`.
+- [x] The modal lists the five supported providers and correctly marks each connected or not.
+- [x] Connected provider → model list rendered from a live `list_models` call; choosing one persists
       **and activates** the provider.
-- [ ] Unconnected keyed provider → "API Key" masked entry; Enter saves the key, lists models with it,
+- [x] Unconnected keyed provider → "API Key" masked entry; Enter saves the key, lists models with it,
       and proceeds to the model list; a bad key shows a recoverable error and does not crash.
-- [ ] Ollama → model list from the local server, no key step.
-- [ ] Every step shows "Esc: close · Enter: submit" and honors those keys.
-- [ ] `cargo test --workspace`, `cargo clippy --workspace --all-targets -D warnings`,
+- [x] Ollama → model list from the local server, no key step.
+- [x] Every step shows "Esc: close · Enter: submit" and honors those keys.
+- [x] `cargo test --workspace`, `cargo clippy --workspace --all-targets -D warnings`,
       `cargo fmt --all --check` clean; ES mirrors EN; no key value appears in any log/status/error.
 
 ## 4. Scope
