@@ -1,14 +1,22 @@
-//! Persist user settings (currently just the locale) between runs.
+//! Persist user settings between runs: the locale, the preferred provider, and per-provider
+//! model overrides. Only non-secret values live here — API keys are held in the OS keyring, never
+//! in this file.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 /// The persisted settings file contents.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Settings {
-    lang: String,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Settings {
+    #[serde(default)]
+    pub lang: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, String>,
 }
 
 /// Location of the settings file: `$XDG_CONFIG_HOME/light-factory/config.json`
@@ -22,64 +30,121 @@ fn path() -> PathBuf {
         .join("config.json")
 }
 
+/// Load the saved settings, or `None` when the file is missing or malformed.
+pub fn load() -> Option<Settings> {
+    load_at(&path())
+}
+
+/// Persist the settings, creating the config directory as needed.
+pub fn save(settings: &Settings) -> anyhow::Result<()> {
+    save_at(&path(), settings)
+}
+
 /// Load the saved locale, if any and well-formed.
 pub fn load_lang() -> Option<String> {
     load_lang_at(&path())
 }
 
-/// Persist the chosen locale, creating the config directory as needed.
+/// Persist the chosen locale without disturbing the provider/model preferences.
 pub fn save_lang(lang: &str) -> anyhow::Result<()> {
     save_lang_at(&path(), lang)
 }
 
-fn load_lang_at(path: &Path) -> Option<String> {
+fn load_at(path: &Path) -> Option<Settings> {
     let raw = fs::read_to_string(path).ok()?;
-    serde_json::from_str::<Settings>(&raw).ok().map(|s| s.lang)
+    serde_json::from_str::<Settings>(&raw).ok()
 }
 
-fn save_lang_at(path: &Path, lang: &str) -> anyhow::Result<()> {
+fn save_at(path: &Path, settings: &Settings) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let settings = Settings {
-        lang: lang.to_string(),
-    };
-    fs::write(path, serde_json::to_string_pretty(&settings)?)?;
+    fs::write(path, serde_json::to_string_pretty(settings)?)?;
     Ok(())
+}
+
+fn load_lang_at(path: &Path) -> Option<String> {
+    load_at(path).and_then(|s| (!s.lang.is_empty()).then_some(s.lang))
+}
+
+fn save_lang_at(path: &Path, lang: &str) -> anyhow::Result<()> {
+    let mut settings = load_at(path).unwrap_or_default();
+    settings.lang = lang.to_string();
+    save_at(path, &settings)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn temp(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "light-factory-settings-{name}-{}.json",
+            std::process::id()
+        ))
+    }
+
     #[test]
     fn round_trips_locale() {
-        let path = std::env::temp_dir().join(format!(
-            "light-factory-settings-{}.json",
-            std::process::id()
-        ));
+        let path = temp("lang");
         save_lang_at(&path, "es").unwrap();
         assert_eq!(load_lang_at(&path), Some("es".to_string()));
         let _ = fs::remove_file(&path);
     }
 
     #[test]
+    fn round_trips_provider_and_models() {
+        let path = temp("provider");
+        let settings = Settings {
+            lang: "en".to_string(),
+            provider: Some("openai".to_string()),
+            models: BTreeMap::from([("openai".to_string(), "gpt-5".to_string())]),
+        };
+        save_at(&path, &settings).unwrap();
+        let loaded = load_at(&path).unwrap();
+        assert_eq!(loaded.provider, Some("openai".to_string()));
+        assert_eq!(loaded.models.get("openai"), Some(&"gpt-5".to_string()));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_legacy_lang_only_file_loads_without_preferences() {
+        let path = temp("legacy");
+        fs::write(&path, "{\"lang\":\"es\"}").unwrap();
+        let loaded = load_at(&path).unwrap();
+        assert_eq!(loaded.lang, "es");
+        assert_eq!(loaded.provider, None);
+        assert!(loaded.models.is_empty());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn save_lang_preserves_preferences() {
+        let path = temp("preserve");
+        let settings = Settings {
+            lang: "en".to_string(),
+            provider: Some("openai".to_string()),
+            models: BTreeMap::new(),
+        };
+        save_at(&path, &settings).unwrap();
+        save_lang_at(&path, "es").unwrap();
+        let loaded = load_at(&path).unwrap();
+        assert_eq!(loaded.lang, "es");
+        assert_eq!(loaded.provider, Some("openai".to_string()));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn missing_file_loads_none() {
-        let path = std::env::temp_dir().join(format!(
-            "light-factory-settings-none-{}.json",
-            std::process::id()
-        ));
-        assert_eq!(load_lang_at(&path), None);
+        let path = temp("none");
+        assert!(load_at(&path).is_none());
     }
 
     #[test]
     fn malformed_file_loads_none() {
-        let path = std::env::temp_dir().join(format!(
-            "light-factory-settings-bad-{}.json",
-            std::process::id()
-        ));
+        let path = temp("bad");
         fs::write(&path, "{ not json").unwrap();
-        assert_eq!(load_lang_at(&path), None);
+        assert!(load_at(&path).is_none());
         let _ = fs::remove_file(&path);
     }
 }
