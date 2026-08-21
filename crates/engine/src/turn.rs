@@ -344,7 +344,7 @@ fn describe(reason: &GateReason) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::transcript_entry;
+    use super::{MAX_TRANSCRIPT_ENTRY_CHARS, transcript_entry};
 
     #[test]
     fn short_entries_pass_through_unchanged() {
@@ -360,6 +360,17 @@ mod tests {
         let out = transcript_entry(long);
         assert!(out.ends_with("[truncated]"));
         assert!(out.len() < 10_000);
-        assert!(out.chars().count() <= 4096 + "… [truncated]".len());
+        assert_eq!(
+            out.chars().count(),
+            MAX_TRANSCRIPT_ENTRY_CHARS + "… [truncated]".chars().count()
+        );
+    }
+
+    #[test]
+    fn truncation_never_splits_a_multibyte_char() {
+        let long = "é".repeat(MAX_TRANSCRIPT_ENTRY_CHARS + 1);
+        let out = transcript_entry(long);
+        assert!(out.ends_with("[truncated]"));
+        assert!(!out.ends_with('é'));
     }
 }
