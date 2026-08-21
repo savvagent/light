@@ -34,7 +34,10 @@ public-interface break).
 - [x] Add `DEFAULT_COMMAND_TIMEOUT` + `timeout` field + `new`/`with_timeout` constructors.
 - [x] Wrap execution in `tokio::time::timeout`; on expiry kill the child's whole process group
       and return a non-zero result with a "timed out" stderr message.
+- [x] Bound the stdout/stderr drain by the same deadline, so a command that exits while a
+      backgrounded descendant keeps the pipes open is still killed and reported as timed out.
 - [x] Update `turn.rs` to construct `BashTool` via `BashTool::new`.
-- [x] Add tests: `cat` reaches EOF (stdin null), `sleep 60` is killed on a short timeout, and a
-      forking `sh -c` leaves no grandchild behind.
+- [x] Add tests: `cat` reaches EOF (stdin null), `sleep 60` is killed on a short timeout, a
+      forking `sh -c` leaves no grandchild behind, and a backgrounded-descendant command is
+      still bounded.
 - [x] Run `cargo fmt --all` and commit.

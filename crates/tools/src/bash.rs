@@ -48,18 +48,25 @@ async fn drain(
 
 /// Kill a spawned child and, on Unix, its whole process group. `process_group(0)` makes the
 /// child a group leader, so its pid is the pgid and `kill(-pgid)` reaches every descendant
-/// (e.g. a `cargo test` subprocess), not just the direct child.
-fn kill_child(child: &mut tokio::process::Child) {
+/// (e.g. a `cargo test` subprocess, or a backgrounded child that outlives the direct child and
+/// would otherwise keep the output pipes open). The direct child is also killed on every
+/// platform, so a non-group descendant is still stopped.
+fn kill_all(child: &mut tokio::process::Child, pid: Option<u32>) {
     #[cfg(unix)]
     {
-        if let Some(pid) = child.id() {
+        if let Some(pid) = pid {
             unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = child.start_kill();
-    }
+    let _ = child.start_kill();
+}
+
+fn timed_out(secs: u64) -> Value {
+    json!({
+        "exit_code": -1,
+        "stdout": "",
+        "stderr": format!("command timed out after {secs}s"),
+    })
 }
 
 #[async_trait]
@@ -102,29 +109,43 @@ impl Tool for BashTool {
         command.process_group(0);
 
         let mut child = command.spawn()?;
+        let pid = child.id();
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         let out_task = tokio::spawn(drain(stdout));
         let err_task = tokio::spawn(drain(stderr));
 
-        // Bound the child so a blocked or long-running command cannot park the turn. On expiry
-        // the child and its whole process group are killed, and the tool returns a non-zero
-        // result the model can react to.
-        let status = match tokio::time::timeout(self.timeout, child.wait()).await {
+        // Bound the whole call — the direct child's lifetime AND the output drain. A command can
+        // exit while a backgrounded descendant keeps the stdout/stderr pipes open, so draining
+        // those pipes must be bounded too. On expiry the group is killed and the tool returns a
+        // non-zero result the model can react to.
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let secs = self.timeout.as_secs();
+
+        let status = match tokio::time::timeout_at(deadline, child.wait()).await {
             Ok(status) => status?,
             Err(_) => {
-                kill_child(&mut child);
+                kill_all(&mut child, pid);
                 let _ = child.wait().await;
-                return Ok(json!({
-                    "exit_code": -1,
-                    "stdout": "",
-                    "stderr": format!("command timed out after {}s", self.timeout.as_secs()),
-                }));
+                return Ok(timed_out(secs));
             }
         };
 
-        let stdout = out_task.await??;
-        let stderr = err_task.await??;
+        let collected = tokio::time::timeout_at(deadline, async {
+            let stdout = out_task.await??;
+            let stderr = err_task.await??;
+            anyhow::Ok((stdout, stderr))
+        })
+        .await;
+
+        let (stdout, stderr) = match collected {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                kill_all(&mut child, pid);
+                return Ok(timed_out(secs));
+            }
+        };
 
         Ok(json!({
             "exit_code": status.code().unwrap_or(-1),

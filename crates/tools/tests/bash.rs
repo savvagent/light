@@ -110,3 +110,20 @@ async fn a_timed_out_command_kills_its_whole_process_group() {
     tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
     assert!(!marker.exists(), "grandchild survived the timeout kill");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_command_with_a_backgrounded_descendant_is_still_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool =
+        BashTool::new(dir.path().to_path_buf()).with_timeout(std::time::Duration::from_millis(200));
+
+    // `sh` exits immediately but leaves `sleep` holding the stdout/stderr pipes open. The output
+    // drain must still be bounded, not block on the orphaned descendant.
+    let out = tool
+        .call(json!({ "program": "sh", "args": ["-c", "sleep 60 &"] }))
+        .await
+        .unwrap();
+
+    assert!(out["stderr"].as_str().unwrap().contains("timed out"));
+}
