@@ -21,3 +21,4 @@ belongs in the active directories.
 | `engine-core` | The engine thin vertical slice: Command/Event vocabulary, sensitive-path floor, `engine-core`/`providers`/`tools`/`engine` crates, `PlanGate`, session actor, turn state machine, and TUI wiring |
 | `port-llm-providers` | Ported otto's seven providers, the `base_url` trust boundary, and env-driven selection with a TUI `/ask` command |
 | `offline-provider-selection-reason` | Surfaces *why* provider selection fell back to the offline `LocalProvider` (`OfflineReason` + warnings), reports `no_provider_configured` instead of `invalid_plan`, and shows the reason in the TUI engine pane |
+| `provider-credentials-ui` | In-client provider/model/key commands (`/provider`, `/model`, `/key`) with OS-keyring credential storage, masked input, redaction, and injectable `Selection`/`SelectedBy` selection |
