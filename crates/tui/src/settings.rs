@@ -40,11 +40,6 @@ pub fn save(settings: &Settings) -> anyhow::Result<()> {
     save_at(&path(), settings)
 }
 
-/// Load the saved locale, if any and well-formed.
-pub fn load_lang() -> Option<String> {
-    load_lang_at(&path())
-}
-
 /// Persist the chosen locale without disturbing the provider/model preferences.
 pub fn save_lang(lang: &str) -> anyhow::Result<()> {
     save_lang_at(&path(), lang)
@@ -61,10 +56,6 @@ fn save_at(path: &Path, settings: &Settings) -> anyhow::Result<()> {
     }
     fs::write(path, serde_json::to_string_pretty(settings)?)?;
     Ok(())
-}
-
-fn load_lang_at(path: &Path) -> Option<String> {
-    load_at(path).and_then(|s| (!s.lang.is_empty()).then_some(s.lang))
 }
 
 fn save_lang_at(path: &Path, lang: &str) -> anyhow::Result<()> {
@@ -88,7 +79,7 @@ mod tests {
     fn round_trips_locale() {
         let path = temp("lang");
         save_lang_at(&path, "es").unwrap();
-        assert_eq!(load_lang_at(&path), Some("es".to_string()));
+        assert_eq!(load_at(&path).unwrap().lang, "es");
         let _ = fs::remove_file(&path);
     }
 

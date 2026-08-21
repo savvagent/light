@@ -495,7 +495,7 @@ pub fn build_provider(selection: &Selection) -> BuiltProvider {
 }
 
 /// Read the `Selection` from the process environment (no keyring, no persisted preference).
-fn selection_from_env() -> Selection {
+pub fn selection_from_env() -> Selection {
     let mut keys = HashMap::new();
     for id in ["anthropic", "openai", "gemini", "deepseek"] {
         if let Some(var) = env_key_var(id)

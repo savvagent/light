@@ -15,6 +15,7 @@ use light_factory_protocol::auth::AuthResponse;
 use light_factory_protocol::session::{Command, Event as EngineEvent, EventKind, SessionId};
 use light_factory_protocol::wire::{ClientMessage, ServerMessage};
 use light_factory_providers::{CompleteRequest, Provider};
+use light_factory_tui::credentials::CredentialStore;
 use light_factory_tui::engine_view::{describe_event, pending_prompt};
 use light_factory_tui::i18n::{self, Locale};
 use ratatui::Frame;
@@ -31,6 +32,7 @@ use crate::browser;
 use crate::config::Config;
 use crate::provider::ProviderInfo;
 use crate::session::Session;
+use crate::settings::Settings;
 use crate::ws;
 
 /// Events flowing into the single UI loop.
@@ -89,6 +91,8 @@ pub struct App {
     ws_tx: Option<mpsc::UnboundedSender<ClientMessage>>,
     provider: Arc<dyn Provider>,
     provider_info: ProviderInfo,
+    store: Arc<dyn CredentialStore>,
+    settings: Settings,
     engine: Option<Engine>,
     engine_session: Option<SessionId>,
     engine_forward_task: Option<tokio::task::JoinHandle<()>>,
@@ -107,6 +111,8 @@ impl App {
         config: Config,
         provider: Arc<dyn Provider>,
         provider_info: ProviderInfo,
+        store: Arc<dyn CredentialStore>,
+        settings: Settings,
         prefilled_email: Option<String>,
         events: mpsc::UnboundedSender<UiEvent>,
     ) -> Self {
@@ -133,6 +139,8 @@ impl App {
             ws_tx: None,
             provider,
             provider_info,
+            store,
+            settings,
             engine: None,
             engine_session: None,
             engine_forward_task: None,
@@ -243,7 +251,8 @@ impl App {
     }
 
     fn enter_engine(&mut self) -> anyhow::Result<()> {
-        let (provider, info) = crate::provider::build();
+        let provider = self.provider.clone();
+        let info = self.provider_info.clone();
 
         let mut engine = Engine::new(provider);
         let session = engine.create_session(std::env::current_dir()?)?;
@@ -1063,6 +1072,8 @@ pub async fn run(
     config: Config,
     provider: Arc<dyn Provider>,
     provider_info: ProviderInfo,
+    store: Arc<dyn CredentialStore>,
+    settings: Settings,
     prefilled_email: Option<String>,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
@@ -1076,6 +1087,8 @@ pub async fn run(
         config,
         provider,
         provider_info,
+        store,
+        settings,
         prefilled_email,
         events.clone(),
     );

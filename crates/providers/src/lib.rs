@@ -22,7 +22,7 @@ pub use openai::OpenAiProvider;
 pub use scripted::ScriptedProvider;
 pub use selection::{
     BuiltProvider, OfflineReason, SelectedBy, Selection, build_provider, build_provider_from_env,
-    env_key_var,
+    env_key_var, selection_from_env,
 };
 
 // Re-export the seam from engine-core for consumer convenience.
