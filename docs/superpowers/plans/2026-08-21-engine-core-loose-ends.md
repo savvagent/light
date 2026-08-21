@@ -18,7 +18,7 @@ mid-turn `SendPrompt` with a stable error; `FsReadTool` rejects non-UTF-8 bytes.
 
 - No comments unless asked.
 - Any new user-facing string goes through `crates/tui/src/i18n.rs` `EN`/`ES` (key sets identical).
-- Removing protocol enum variants is semver-major: bump `light-factory-protocol` `0.1.1` → `0.2.0`.
+- Removing protocol enum variants is semver-major: bump the workspace `0.1.1` → `0.2.0` (the single shared version; `light-factory-protocol` returns to `version.workspace = true`).
 - `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
 
 ## File Structure
@@ -26,7 +26,9 @@ mid-turn `SendPrompt` with a stable error; `FsReadTool` rejects non-UTF-8 bytes.
 | File | Responsibility |
 |---|---|
 | Modify. `crates/protocol/src/session.rs` | Remove `StepStarted`/`StepFinished` |
-| Modify. `crates/protocol/Cargo.toml` | Bump version to `0.2.0` |
+| Modify. `Cargo.toml` | Bump `[workspace.package]` version to `0.2.0` |
+| Modify. `crates/protocol/Cargo.toml` | Revert to `version.workspace = true` |
+| Modify. `web/package.json` | Bump version to `0.2.0` |
 | Modify. `crates/engine/src/session.rs` | Remove `approved` field |
 | Modify. `crates/engine/src/turn.rs` | Remove `approved` write; reject mid-turn prompts |
 | Modify. `crates/engine/tests/turn.rs` | Mid-turn prompt rejection test |
@@ -41,7 +43,7 @@ mid-turn `SendPrompt` with a stable error; `FsReadTool` rejects non-UTF-8 bytes.
 - [x] Remove `StepStarted`/`StepFinished` from `EventKind`.
 - [x] Remove their arms from `engine_view::describe_event`.
 - [x] Remove `engine.step_started`/`engine.step_done`/`engine.step_failed` from `EN`/`ES`.
-- [x] Bump `light-factory-protocol` to `0.2.0`.
+- [x] Bump the workspace to `0.2.0` (`Cargo.toml`, `web/package.json`, regenerate `Cargo.lock`).
 
 ### Task 2: Remove the write-only `approved` field
 

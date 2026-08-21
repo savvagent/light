@@ -19,8 +19,8 @@ resources, or silently drop user input.
    in `crates/tui/src/i18n.rs`, but the turn machine never emits them — and cannot, because the
    model's tool calls carry no step id, so execution has no step boundaries to bracket. Rather
    than emit false step-level progress, the variants (and their TUI rendering + i18n keys) are
-   removed. This is a **breaking** protocol change: the affected crate (`light-factory-protocol`)
-   is bumped `0.1.1` → `0.2.0` per the repo's semver rule.
+   removed. This is a **breaking** protocol change; the workspace is bumped `0.1.1` → `0.2.0`
+   (the single shared version), which keeps `bump_version.py`'s lock-rewrite consistent.
 2. **Remove `Session::approved`.** It is set in `run_turn` and never read; a second `SendPrompt`
    re-plans from scratch with a fresh `PlanGate` regardless. The field is deleted.
 3. **Tear down engine mode fully.** `leave_engine` aborts the forwarding task (whose `JoinHandle`
@@ -40,7 +40,7 @@ resources, or silently drop user input.
 
 ## Scope
 
-**In:** the five fixes above, their tests, and the semver bump for the protocol crate.
+**In:** the five fixes above, their tests, and the workspace-wide semver bump (`0.1.1` → `0.2.0`).
 
 **Out:** emitting real step-level progress (requires a step-tagged tool-call protocol, not built
 here); persisting sessions; a queue for mid-turn prompts (rejection is chosen over queueing).
