@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod sensitive;
+pub mod session;
 pub mod wire;
 
 pub use sensitive::{SENSITIVE_MARKERS, is_sensitive};

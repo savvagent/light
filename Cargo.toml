@@ -39,7 +39,7 @@ sqlx = { version = "0.9", default-features = false, features = [
     "macros",
 ] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # server
 axum = { version = "0.8", features = ["ws"] }
