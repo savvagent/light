@@ -236,10 +236,7 @@ const EN: Catalog = &[
     ),
     ("help.section.commands", "Commands"),
     ("help.commands.ask", "/ask <prompt>  completion"),
-    (
-        "help.commands.connect",
-        "/connect  connect a provider",
-    ),
+    ("help.commands.connect", "/connect  connect a provider"),
     ("help.commands.model", "/model <id>  set model"),
     ("help.commands.key", "/key [provider] [clear]  API key"),
     (
@@ -508,10 +505,7 @@ const ES: Catalog = &[
     ),
     ("help.section.commands", "Comandos"),
     ("help.commands.ask", "/ask <indicación>  completar"),
-    (
-        "help.commands.connect",
-        "/connect  conectar un proveedor",
-    ),
+    ("help.commands.connect", "/connect  conectar un proveedor"),
     ("help.commands.model", "/model <id>  configurar modelo"),
     (
         "help.commands.key",

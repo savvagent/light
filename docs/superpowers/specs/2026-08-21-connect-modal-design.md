@@ -66,8 +66,7 @@ Goal: a user can, from the connected TUI screen and without knowing command synt
 and end with a provider that is active, has a working key (or a reachable Ollama server), and a
 chosen model.
 
-- [ ] `/connect` opens the modal; `/provider` is gone; the connected header hint advertises
-      `/connect`.
+- [ ] `/connect` opens the modal; `/provider` is gone; the help modal advertises `/connect`.
 - [ ] The modal lists the five supported providers and correctly marks each connected or not.
 - [ ] Connected provider → model list rendered from a live `list_models` call; choosing one persists
       **and activates** the provider.
@@ -216,6 +215,10 @@ still used by `set_model`.) Model application reuses and **supersedes**
 modal. (`set_model`, which keys off the *current* active id and never sets `settings.provider`, is
 insufficient for a non-active provider; the modal path sets both.) `store.set` reuse is unchanged.
 `hint.connected` is updated to advertise `/connect` (the old `/provider` mention is removed).
+
+> **Post-#39 note:** the connected screen's status hint was replaced by a Ctrl-P help modal
+> (#39); the `/provider` help entry (`help.commands.provider`) is renamed `help.commands.connect`
+> with value `/connect  connect a provider`, so the help modal is where `/connect` is advertised.
 
 ## 6. Error Handling & Edge Cases
 
