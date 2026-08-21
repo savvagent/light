@@ -170,7 +170,7 @@ const EN: Catalog = &[
     ("title.engine", "Engine"),
     (
         "hint.engine",
-        "Enter: send prompt · a: approve · d: deny · Esc: back",
+        "Enter: send prompt · Esc: back · a/d: approve/deny only while a prompt is pending",
     ),
     ("status.engine_started", "Engine session started"),
 ];
@@ -341,7 +341,7 @@ const ES: Catalog = &[
     ("title.engine", "Motor"),
     (
         "hint.engine",
-        "Enter: enviar indicación · a: aprobar · d: denegar · Esc: volver",
+        "Enter: enviar indicación · Esc: volver · a/d: aprobar/denegar solo con una aprobación pendiente",
     ),
     ("status.engine_started", "Sesión del motor iniciada"),
 ];
