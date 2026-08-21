@@ -90,7 +90,7 @@ Selection order (each step returns when it can name a provider, and records *why
    (unchanged: never misroute to a different keyed provider).
 3. The persisted `provider` preference (`config.json`) → that provider (`SelectedBy::StoredPreference`),
    key resolved env→keyring. A stored remote with no key → offline `NamedProviderMissingKey`, for the
-   same never-misroute reason as step 2. A stored `"ollama"` or `"local"` selects that slot directly.
+   same never-misroute reason as step 2. A stored `"ollama"` selects the Ollama slot directly.
 4. Key precedence `Anthropic > OpenAI > Gemini > DeepSeek`, where "present" means env **or** keyring
    (`SelectedBy::KeyPrecedence`).
 5. Offline `LocalProvider` (`offline: Some(…)`, `selected_by: None`).
@@ -168,7 +168,7 @@ no second composition path exists. `main.rs` and `App` call `selection::rebuild`
 ```rust
 pub struct Settings {
     pub lang: String,
-    #[serde(default)] pub provider: Option<String>,        // "anthropic"|"openai"|"gemini"|"deepseek"|"ollama"|"local"
+    #[serde(default)] pub provider: Option<String>,        // "anthropic"|"openai"|"gemini"|"deepseek"|"ollama"
     #[serde(default)] pub models: BTreeMap<String, String>, // per-provider model override
 }
 ```
@@ -180,7 +180,8 @@ replaced by load/save of the whole struct; the `/lang` call site is updated to p
 argument needs parsing:
 
 - `/provider` — list available providers, which is active, and why (appends lines to the log).
-- `/provider <name>` — select a provider; persists the preference and rebuilds in place.
+- `/provider <name>` — select a provider (`anthropic|openai|gemini|deepseek|ollama`); persists the
+  preference and rebuilds in place.
 - `/model <id>` — set the model for the active provider; persists and rebuilds.
 - `/key` — show which providers have a key and from where (env vs keyring), never the value.
 - `/key <provider>` — enter masked entry mode to set/update the credential (keyring).
