@@ -41,6 +41,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - name: Install packaging tools
         run: cargo install cargo-deb cargo-generate-rpm --locked
+      - name: Install Linux build dependencies (keyring/dbus)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Build release binary
         run: cargo build --release -p light-factory-tui
       - name: Package .deb

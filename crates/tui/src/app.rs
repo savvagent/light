@@ -15,6 +15,7 @@ use light_factory_protocol::auth::AuthResponse;
 use light_factory_protocol::session::{Command, Event as EngineEvent, EventKind, SessionId};
 use light_factory_protocol::wire::{ClientMessage, ServerMessage};
 use light_factory_providers::{CompleteRequest, Provider};
+use light_factory_tui::credentials::CredentialStore;
 use light_factory_tui::engine_view::{describe_event, pending_prompt};
 use light_factory_tui::i18n::{self, Locale};
 use ratatui::Frame;
@@ -31,6 +32,7 @@ use crate::browser;
 use crate::config::Config;
 use crate::provider::ProviderInfo;
 use crate::session::Session;
+use crate::settings::Settings;
 use crate::ws;
 
 /// Events flowing into the single UI loop.
@@ -63,6 +65,7 @@ enum Mode {
     Device,
     Connected,
     Engine,
+    Key,
 }
 
 const LOG_CAPACITY: usize = 200;
@@ -89,6 +92,11 @@ pub struct App {
     ws_tx: Option<mpsc::UnboundedSender<ClientMessage>>,
     provider: Arc<dyn Provider>,
     provider_info: ProviderInfo,
+    store: Arc<dyn CredentialStore>,
+    settings: Settings,
+    key_target: Option<String>,
+    key_input: String,
+    key_return: Mode,
     engine: Option<Engine>,
     engine_session: Option<SessionId>,
     engine_forward_task: Option<tokio::task::JoinHandle<()>>,
@@ -107,6 +115,8 @@ impl App {
         config: Config,
         provider: Arc<dyn Provider>,
         provider_info: ProviderInfo,
+        store: Arc<dyn CredentialStore>,
+        settings: Settings,
         prefilled_email: Option<String>,
         events: mpsc::UnboundedSender<UiEvent>,
     ) -> Self {
@@ -133,6 +143,11 @@ impl App {
             ws_tx: None,
             provider,
             provider_info,
+            store,
+            settings,
+            key_target: None,
+            key_input: String::new(),
+            key_return: Mode::SignIn,
             engine: None,
             engine_session: None,
             engine_forward_task: None,
@@ -168,6 +183,9 @@ impl App {
         if self.mode == Mode::Engine {
             return self.handle_engine_key(key).await;
         }
+        if self.mode == Mode::Key {
+            return self.handle_key_entry(key);
+        }
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
             KeyCode::Esc => match self.mode {
@@ -192,6 +210,7 @@ impl App {
                 }
                 Mode::Connected => {}
                 Mode::Engine => {}
+                Mode::Key => {}
             },
             KeyCode::Char('/')
                 if matches!(
@@ -243,7 +262,8 @@ impl App {
     }
 
     fn enter_engine(&mut self) -> anyhow::Result<()> {
-        let (provider, info) = crate::provider::build();
+        let provider = self.provider.clone();
+        let info = self.provider_info.clone();
 
         let mut engine = Engine::new(provider);
         let session = engine.create_session(std::env::current_dir()?)?;
@@ -385,6 +405,60 @@ impl App {
         false
     }
 
+    fn handle_key_entry(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
+            KeyCode::Esc => self.cancel_key_entry(),
+            KeyCode::Enter => self.submit_key_entry(),
+            KeyCode::Backspace => {
+                self.key_input.pop();
+            }
+            KeyCode::Char(c) => self.key_input.push(c),
+            _ => {}
+        }
+        false
+    }
+
+    fn cancel_key_entry(&mut self) {
+        self.key_target = None;
+        self.key_input.clear();
+        self.mode = self.key_return;
+    }
+
+    fn submit_key_entry(&mut self) {
+        let Some(provider) = self.key_target.clone() else {
+            self.mode = self.key_return;
+            return;
+        };
+        let key = self.key_input.trim().to_string();
+        self.key_target = None;
+        self.key_input.clear();
+        self.mode = self.key_return;
+        if key.is_empty() {
+            self.status = self.t("status.key_empty").to_string();
+            return;
+        }
+        match self.store.set(&provider, &key) {
+            Ok(()) => {
+                self.rebuild_provider();
+                self.status = self.t_with("status.key_set", &[("provider", &provider)]);
+            }
+            Err(e) => {
+                let error = e.to_string();
+                self.error = Some(self.t_with(
+                    "status.key_failed",
+                    &[("provider", &provider), ("error", &error)],
+                ));
+            }
+        }
+    }
+
+    fn rebuild_provider(&mut self) {
+        let (provider, info) = crate::selection::rebuild(&self.settings, self.store.as_ref());
+        self.provider = provider;
+        self.provider_info = info;
+    }
+
     async fn run_command(&mut self, command: &str) {
         self.error = None;
         let trimmed = command.trim();
@@ -400,6 +474,28 @@ impl App {
             self.error = Some(self.t("status.ask_empty").to_string());
             return;
         }
+        if let Some(arg) = parse_provider_command(trimmed) {
+            match arg {
+                Some(name) => self.set_provider(name),
+                None => self.list_providers(),
+            }
+            return;
+        }
+        if let Some(model) = parse_model_command(trimmed) {
+            match model {
+                Some(id) => self.set_model(id),
+                None => self.error = Some(self.t("status.model_empty").to_string()),
+            }
+            return;
+        }
+        if let Some(key_command) = parse_key_command(trimmed) {
+            match key_command {
+                KeyCommand::List => self.list_keys(),
+                KeyCommand::Set(provider) => self.begin_key_entry(provider),
+                KeyCommand::Clear(provider) => self.clear_key(&provider),
+            }
+            return;
+        }
         match trimmed {
             "/auth/login" => self.start_device_login().await,
             "/auth/logout" => self.sign_out().await,
@@ -408,7 +504,8 @@ impl App {
                 let arg = other["/lang ".len()..].trim();
                 if let Some(locale) = Locale::parse(arg) {
                     self.config.lang = locale;
-                    let _ = crate::settings::save_lang(locale.as_str());
+                    self.settings.lang = locale.as_str().to_string();
+                    let _ = crate::settings::save(&self.settings);
                     self.status = self.t_with("status.lang_set", &[("lang", locale.as_str())]);
                 } else {
                     self.error = Some(self.t("status.lang_invalid").to_string());
@@ -417,6 +514,93 @@ impl App {
             other => {
                 self.error = Some(self.t_with("status.unknown_command", &[("command", other)]))
             }
+        }
+    }
+
+    fn set_provider(&mut self, name: &str) {
+        if !is_valid_provider(name) {
+            self.error = Some(self.t("status.provider_invalid").to_string());
+            return;
+        }
+        self.settings.provider = Some(name.to_string());
+        let _ = crate::settings::save(&self.settings);
+        self.rebuild_provider();
+        self.status = self.t_with("status.provider_set", &[("provider", name)]);
+    }
+
+    fn list_providers(&mut self) {
+        let reason = self.provider_info.reason(self.config.lang);
+        let active = if reason.is_empty() {
+            self.provider_info.display()
+        } else {
+            format!("{} ({})", self.provider_info.display(), reason)
+        };
+        self.push_log(self.t_with("provider.list_active", &[("provider", &active)]));
+        let mut parts = Vec::new();
+        for name in PROVIDER_NAMES {
+            parts.push(format!("{name}: {}", self.key_status_label(name)));
+        }
+        self.push_log(self.t_with("provider.list_available", &[("list", &parts.join(", "))]));
+    }
+
+    fn set_model(&mut self, model: &str) {
+        let active = self.provider_info.id.clone();
+        if !is_valid_provider(&active) {
+            self.error = Some(self.t("status.model_unsupported").to_string());
+            return;
+        }
+        self.settings
+            .models
+            .insert(active.clone(), model.to_string());
+        let _ = crate::settings::save(&self.settings);
+        self.rebuild_provider();
+        self.status = self.t_with("status.model_set", &[("model", model)]);
+    }
+
+    fn list_keys(&mut self) {
+        let mut parts = Vec::new();
+        for name in REMOTE_IDS {
+            parts.push(format!("{name}: {}", self.key_status_label(name)));
+        }
+        self.push_log(self.t_with("key.list", &[("list", &parts.join(", "))]));
+    }
+
+    fn begin_key_entry(&mut self, provider: String) {
+        if !takes_key(&provider) {
+            self.error = Some(self.t_with("status.key_unsupported", &[("provider", &provider)]));
+            return;
+        }
+        self.key_return = self.mode;
+        self.key_target = Some(provider);
+        self.key_input.clear();
+        self.mode = Mode::Key;
+    }
+
+    fn clear_key(&mut self, provider: &str) {
+        if !takes_key(provider) {
+            self.error = Some(self.t_with("status.key_unsupported", &[("provider", provider)]));
+            return;
+        }
+        match self.store.delete(provider) {
+            Ok(()) => {
+                self.rebuild_provider();
+                self.status = self.t_with("status.key_cleared", &[("provider", provider)]);
+            }
+            Err(e) => {
+                let error = e.to_string();
+                self.error = Some(self.t_with(
+                    "status.key_failed",
+                    &[("provider", provider), ("error", &error)],
+                ));
+            }
+        }
+    }
+
+    fn key_status_label(&self, provider: &str) -> String {
+        match crate::selection::key_status(provider, self.store.as_ref()) {
+            crate::selection::KeyStatus::Env => self.t("provider.key.env").to_string(),
+            crate::selection::KeyStatus::Keyring => self.t("provider.key.keyring").to_string(),
+            crate::selection::KeyStatus::None => self.t("provider.key.none").to_string(),
         }
     }
 
@@ -596,6 +780,7 @@ impl App {
             Mode::Device => {}
             Mode::Connected => {}
             Mode::Engine => {}
+            Mode::Key => {}
         }
     }
 
@@ -745,6 +930,7 @@ impl App {
             Mode::Device => {}
             Mode::Connected => {}
             Mode::Engine => {}
+            Mode::Key => {}
         }
     }
 
@@ -790,6 +976,7 @@ impl App {
             Mode::Device => self.draw_device(frame, chunks[1]),
             Mode::Connected => self.draw_connected(frame, chunks[1]),
             Mode::Engine => self.draw_engine(frame, chunks[1]),
+            Mode::Key => self.draw_key(frame, chunks[1]),
         }
 
         let hints = if self.command_mode {
@@ -985,7 +1172,11 @@ impl App {
         let info = match &self.session {
             Some(s) => {
                 let pongs = self.pongs.to_string();
-                let provider = self.provider_info.display();
+                let mut provider = self.provider_info.display();
+                let reason = self.provider_info.reason(self.config.lang);
+                if !reason.is_empty() {
+                    provider = format!("{provider} · {reason}");
+                }
                 self.t_with(
                     "info.connected",
                     &[
@@ -1056,6 +1247,39 @@ impl App {
             chunks[1],
         );
     }
+
+    fn draw_key(&self, frame: &mut Frame, area: Rect) {
+        let provider = self.key_target.as_deref().unwrap_or("");
+        let masked: String = "*".repeat(self.key_input.chars().count());
+        let mut lines = vec![
+            Line::from(Span::styled(
+                self.t_with("status.key_enter", &[("provider", provider)]),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Self::field(self.t("field.key"), &masked, true),
+            Line::from(""),
+            Line::from(Span::styled(
+                self.t("hint.key"),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        if let Some(err) = &self.error {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                err.clone(),
+                Style::default().fg(Color::Red),
+            )));
+        }
+        let paragraph = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" light-factory "),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+    }
 }
 
 /// Run the terminal UI until the user quits.
@@ -1063,6 +1287,8 @@ pub async fn run(
     config: Config,
     provider: Arc<dyn Provider>,
     provider_info: ProviderInfo,
+    store: Arc<dyn CredentialStore>,
+    settings: Settings,
     prefilled_email: Option<String>,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
@@ -1076,6 +1302,8 @@ pub async fn run(
         config,
         provider,
         provider_info,
+        store,
+        settings,
         prefilled_email,
         events.clone(),
     );
@@ -1199,9 +1427,87 @@ fn parse_ask_command(command: &str) -> Option<&str> {
     }
 }
 
+use crate::selection::REMOTE_IDS;
+
+/// Every provider a user can select with `/provider`.
+const PROVIDER_NAMES: [&str; 5] = ["anthropic", "openai", "gemini", "deepseek", "ollama"];
+
+fn is_valid_provider(name: &str) -> bool {
+    PROVIDER_NAMES.contains(&name)
+}
+
+fn takes_key(provider: &str) -> bool {
+    light_factory_providers::env_key_var(provider).is_some()
+}
+
+/// A parsed `/key` command.
+enum KeyCommand {
+    List,
+    Set(String),
+    Clear(String),
+}
+
+/// Parse a `/provider [name]` command: `None` when the command is not `/provider`; `Some(None)`
+/// for a bare `/provider` (list); `Some(Some(name))` for `/provider <name>`.
+fn parse_provider_command(command: &str) -> Option<Option<&str>> {
+    let rest = command.strip_prefix("/provider")?;
+    if !word_boundary(rest) {
+        return None;
+    }
+    let arg = rest.trim();
+    if arg.is_empty() {
+        Some(None)
+    } else {
+        Some(Some(arg))
+    }
+}
+
+/// Parse a `/model` command: `Some(Some(id))` for `/model <id>`, `Some(None)` for a bare `/model`
+/// (empty arg), or `None` when the command is not `/model`.
+fn parse_model_command(command: &str) -> Option<Option<&str>> {
+    let rest = command.strip_prefix("/model")?;
+    if !word_boundary(rest) {
+        return None;
+    }
+    let arg = rest.trim();
+    if arg.is_empty() {
+        Some(None)
+    } else {
+        Some(Some(arg))
+    }
+}
+
+/// Parse a `/key` command: bare → `List`, `/key <provider>` → `Set`, `/key <provider> clear` →
+/// `Clear`. `None` when the command is not `/key`.
+fn parse_key_command(command: &str) -> Option<KeyCommand> {
+    let rest = command.strip_prefix("/key")?;
+    if !word_boundary(rest) {
+        return None;
+    }
+    let arg = rest.trim();
+    if arg.is_empty() {
+        return Some(KeyCommand::List);
+    }
+    if let Some(provider) = arg.strip_suffix(" clear").map(str::trim)
+        && !provider.is_empty()
+    {
+        return Some(KeyCommand::Clear(provider.to_string()));
+    }
+    Some(KeyCommand::Set(arg.to_string()))
+}
+
+/// True when `rest` begins at a word boundary (empty, or starts with whitespace) — so `/askhello`,
+/// `/providerX`, etc. do not match their commands.
+fn word_boundary(rest: &str) -> bool {
+    rest.chars().next().map(char::is_whitespace).unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EngineForward, engine_approval_key, engine_forward_step, parse_ask_command};
+    use super::{
+        EngineForward, KeyCommand, engine_approval_key, engine_forward_step, parse_ask_command,
+        parse_key_command, parse_model_command, parse_provider_command,
+    };
     use light_factory_protocol::session::{Event as EngineEvent, EventKind, SessionId};
     use tokio::sync::broadcast::error::RecvError;
 
@@ -1256,5 +1562,41 @@ mod tests {
     fn rejects_other_commands() {
         assert_eq!(parse_ask_command("/auth/login"), None);
         assert_eq!(parse_ask_command("/askhello"), None);
+    }
+
+    #[test]
+    fn parses_provider_commands() {
+        assert_eq!(parse_provider_command("/provider"), Some(None));
+        assert_eq!(
+            parse_provider_command("/provider openai"),
+            Some(Some("openai"))
+        );
+        assert_eq!(parse_provider_command("/providerx"), None);
+        assert_eq!(parse_provider_command("/ask hello"), None);
+    }
+
+    #[test]
+    fn parses_model_commands() {
+        assert_eq!(parse_model_command("/model gpt-5"), Some(Some("gpt-5")));
+        assert_eq!(parse_model_command("/model"), Some(None));
+        assert_eq!(parse_model_command("/model   "), Some(None));
+        assert_eq!(parse_model_command("/modelx"), None);
+    }
+
+    #[test]
+    fn parses_key_commands() {
+        assert!(matches!(parse_key_command("/key"), Some(KeyCommand::List)));
+        assert!(matches!(
+            parse_key_command("/key openai"),
+            Some(KeyCommand::Set(p)) if p == "openai"
+        ));
+        assert!(matches!(
+            parse_key_command("/key openai clear"),
+            Some(KeyCommand::Clear(p)) if p == "openai"
+        ));
+        assert!(
+            matches!(parse_key_command("/key clear"), Some(KeyCommand::Set(p)) if p == "clear")
+        );
+        assert!(parse_key_command("/keyx").is_none());
     }
 }

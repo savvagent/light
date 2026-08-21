@@ -1,19 +1,20 @@
-//! Build the active LLM provider from the environment and expose a small info record for
-//! display. Construction is fail-closed: selection never errors (it always yields at least the
-//! offline `LocalProvider`).
+//! Display-only provider metadata: the active provider's id/model plus why it was selected and
+//! any offline reason. Construction (composition) lives in `crate::selection`, not here.
 
-use std::sync::Arc;
-
-use light_factory_providers::{OfflineReason, Provider, build_provider_from_env};
+use light_factory_providers::{OfflineReason, SelectedBy};
 
 use crate::i18n::{self, Locale};
 
-/// The active provider's id and model, for the connected header.
+/// The active provider's id, model, selection reason, and offline status, for the connected
+/// header and the `/provider` listing.
+#[derive(Clone)]
 pub struct ProviderInfo {
     pub id: String,
     pub model: Option<String>,
     /// `Some(reason)` when the offline `LocalProvider` was selected; `None` for a live provider.
     pub offline: Option<OfflineReason>,
+    /// Which rule selected a live provider; `None` when offline.
+    pub selected_by: Option<SelectedBy>,
     /// Human-readable selection warnings, for the engine pane to surface.
     pub warnings: Vec<String>,
 }
@@ -26,19 +27,29 @@ impl ProviderInfo {
             None => self.id.clone(),
         }
     }
-}
 
-/// Build the provider and its info record from the environment.
-pub fn build() -> (Arc<dyn Provider>, ProviderInfo) {
-    let built = build_provider_from_env();
-    let id = built.provider.id().to_string();
-    let info = ProviderInfo {
-        id,
-        model: built.model,
-        offline: built.offline,
-        warnings: built.warnings,
-    };
-    (Arc::from(built.provider), info)
+    /// A short localized phrase explaining why this provider is active (e.g. "key precedence",
+    /// "stored preference", "offline"), or an empty string when there is nothing to add.
+    pub fn reason(&self, locale: Locale) -> String {
+        if self.offline.is_some() {
+            return i18n::t(locale, "provider.reason.offline").to_string();
+        }
+        match self.selected_by {
+            Some(SelectedBy::OllamaEnv) => {
+                i18n::t(locale, "provider.reason.ollama_env").to_string()
+            }
+            Some(SelectedBy::RemoteSelectorEnv) => {
+                i18n::t(locale, "provider.reason.selector_env").to_string()
+            }
+            Some(SelectedBy::StoredPreference) => {
+                i18n::t(locale, "provider.reason.stored").to_string()
+            }
+            Some(SelectedBy::KeyPrecedence) => {
+                i18n::t(locale, "provider.reason.key_precedence").to_string()
+            }
+            None => String::new(),
+        }
+    }
 }
 
 /// Map an [`OfflineReason`] to a localized notice naming the variable(s) to set.
@@ -59,6 +70,16 @@ pub fn offline_notice(locale: Locale, reason: &OfflineReason) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn info(offline: Option<OfflineReason>, selected_by: Option<SelectedBy>) -> ProviderInfo {
+        ProviderInfo {
+            id: "openai".to_string(),
+            model: Some("gpt-4o-mini".to_string()),
+            offline,
+            selected_by,
+            warnings: Vec::new(),
+        }
+    }
 
     #[test]
     fn offline_notice_covers_each_reason() {
@@ -85,5 +106,43 @@ mod tests {
             ),
             "LIGHT_OPENAI_BASE_URL was rejected — falling back to offline"
         );
+    }
+
+    #[test]
+    fn display_appends_the_model_when_present() {
+        assert_eq!(info(None, None).display(), "openai (gpt-4o-mini)");
+    }
+
+    #[test]
+    fn reason_names_the_selection_source() {
+        assert_eq!(
+            info(None, Some(SelectedBy::KeyPrecedence)).reason(Locale::En),
+            "key precedence"
+        );
+        assert_eq!(
+            info(None, Some(SelectedBy::StoredPreference)).reason(Locale::En),
+            "stored preference"
+        );
+        assert_eq!(
+            info(None, Some(SelectedBy::OllamaEnv)).reason(Locale::En),
+            "LIGHT_OLLAMA"
+        );
+        assert_eq!(
+            info(None, Some(SelectedBy::RemoteSelectorEnv)).reason(Locale::En),
+            "LIGHT_REMOTE_PROVIDER"
+        );
+    }
+
+    #[test]
+    fn reason_reports_offline() {
+        assert_eq!(
+            info(Some(OfflineReason::NothingConfigured), None).reason(Locale::En),
+            "offline"
+        );
+    }
+
+    #[test]
+    fn reason_is_empty_without_a_source() {
+        assert_eq!(info(None, None).reason(Locale::En), "");
     }
 }

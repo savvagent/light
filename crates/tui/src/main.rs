@@ -5,12 +5,18 @@ mod app;
 mod browser;
 mod config;
 mod provider;
+mod selection;
 mod session;
 mod settings;
 mod ws;
 
+use std::sync::Arc;
+
 use clap::Parser;
+use light_factory_tui::credentials::{CredentialStore, KeyringStore};
 use light_factory_tui::i18n::{self, Locale};
+
+use crate::settings::Settings;
 
 /// Terminal UI client for the light-factory agentic coding platform.
 #[derive(Parser)]
@@ -38,7 +44,8 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let locale = resolve_locale(&cli);
+    let mut settings = settings::load().unwrap_or_default();
+    let locale = resolve_locale(&cli, &mut settings);
 
     if cli.logout {
         session::Session::clear()?;
@@ -47,20 +54,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let config = config::Config::from_url(&cli.url)?.with_lang(locale);
-    let (provider, info) = provider::build();
-    app::run(config, provider, info, cli.email).await
+    let store: Arc<dyn CredentialStore> = Arc::new(KeyringStore);
+    let (provider, info) = selection::rebuild(&settings, store.as_ref());
+    app::run(config, provider, info, store, settings, cli.email).await
 }
 
 /// Resolve the locale from `--lang` → saved config → `LC_ALL` → `LANG` → English,
 /// persisting the explicit `--lang` choice.
-fn resolve_locale(cli: &Cli) -> Locale {
+fn resolve_locale(cli: &Cli, settings: &mut Settings) -> Locale {
     let lc_all = std::env::var("LC_ALL").ok();
     let lang_env = std::env::var("LANG").ok();
-    let saved = settings::load_lang();
+    let saved = (!settings.lang.is_empty()).then_some(settings.lang.as_str());
 
     let locale = i18n::resolve_locale(
         cli.lang.as_deref(),
-        saved.as_deref(),
+        saved,
         lang_env.as_deref(),
         lc_all.as_deref(),
     );
@@ -68,7 +76,8 @@ fn resolve_locale(cli: &Cli) -> Locale {
     if let Some(raw) = cli.lang.as_deref()
         && let Some(parsed) = Locale::parse(raw)
     {
-        let _ = settings::save_lang(parsed.as_str());
+        settings.lang = parsed.as_str().to_string();
+        let _ = settings::save(settings);
     }
 
     locale
