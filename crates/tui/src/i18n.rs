@@ -167,6 +167,7 @@ const EN: Catalog = &[
     ),
     ("engine.reason_sensitive", "sensitive path: {path}"),
     ("engine.approve_keys", "[a] approve  [d] deny"),
+    ("engine.dropped_events", "dropped {count} engine event(s)"),
     ("title.engine", "Engine"),
     (
         "hint.engine",
@@ -338,6 +339,10 @@ const ES: Catalog = &[
     ),
     ("engine.reason_sensitive", "ruta sensible: {path}"),
     ("engine.approve_keys", "[a] aprobar  [d] denegar"),
+    (
+        "engine.dropped_events",
+        "se omitieron {count} evento(s) del motor",
+    ),
     ("title.engine", "Motor"),
     (
         "hint.engine",
