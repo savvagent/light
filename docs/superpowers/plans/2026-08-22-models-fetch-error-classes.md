@@ -72,10 +72,10 @@ two source files plus one manifest line, TDD-ordered inside the task.
 signatures) and `reqwest::Error::status()`; produces the `/models` modal's credential step, retry
 key, and unverified status string. **No public API change.**
 
-- [ ] Add `[dev-dependencies]` to `crates/tui/Cargo.toml` with `wiremock = "0.6"` (matching
+- [x] Add `[dev-dependencies]` to `crates/tui/Cargo.toml` with `wiremock = "0.6"` (matching
       `crates/providers/Cargo.toml`). Verify no lockfile churn: `cargo metadata --offline >/dev/null`
       then `git diff --stat Cargo.lock` — expect an empty diff.
-- [ ] Write the failing tests first in `crates/tui/src/app.rs`'s `#[cfg(test)] mod tests`, reusing
+- [x] Write the failing tests first in `crates/tui/src/app.rs`'s `#[cfg(test)] mod tests`, reusing
       the existing `test_app()` / `key(code)` / `models_list_step` / `models_manual_step` /
       `TempSettings` helpers. The existing `key()` hardcodes `KeyModifiers::NONE`, so **add a
       `ctrl_key(code)` helper** (`KeyEvent::new(code, KeyModifiers::CONTROL)`). Extend the explicit
@@ -107,18 +107,18 @@ key, and unverified status string. **No public API change.**
         `Credentials` step shows `/connect` and `/key openai` and advertises neither "save" nor
         "retry"; the `Manual` step shows the whole unverified prompt on one line and advertises
         `Ctrl+R: retry` and "save unverified".
-- [ ] Run `cargo test -p light-factory-tui` — expect **compile failure** (the new items do not exist
+- [x] Run `cargo test -p light-factory-tui` — expect **compile failure** (the new items do not exist
       yet). That is the failing-test signal for this task.
-- [ ] Add the i18n entries to **both** catalogs in `crates/tui/src/i18n.rs`:
+- [x] Add the i18n entries to **both** catalogs in `crates/tui/src/i18n.rs`:
       `status.model_set_unverified`, `models.auth_rejected`, `models.credentials_hint`,
       `models.credentials_remedy`, `models.manual_unverified`; update the `models.footer_manual`
       value to advertise `Ctrl+R`; delete the now-unreferenced `models.manual` from both. Values per
       spec §5.5. **Every string must fit the popup's ~58-column inner width** — `draw_popup` sizes
       the box from the line count, so a wrapping line pushes the last row (the input field) out of
       view.
-- [ ] Run `cargo test -p light-factory-tui i18n::tests::es_mirrors_en_exactly` — expect **pass**
+- [x] Run `cargo test -p light-factory-tui i18n::tests::es_mirrors_en_exactly` — expect **pass**
       (key parity holds).
-- [ ] Implement in `crates/tui/src/app.rs` per spec §5.1–§5.4:
+- [x] Implement in `crates/tui/src/app.rs` per spec §5.1–§5.4:
       1. `FetchFailure` (`MissingKey`/`Auth`/`Fetch`, `Copy`) with `needs_credentials()`; `FetchError
          { class, message }`; `class_for_status(Option<u16>) -> FetchFailure`;
          `classify_fetch_error(&anyhow::Error) -> FetchFailure` walking `err.chain()` for the first
@@ -150,7 +150,7 @@ key, and unverified status string. **No public API change.**
       10. `draw_models`: add the `Credentials` arm (red error line, blank line, dark-gray
           `models.credentials_hint`, footer `models.footer_offline`, no focus) and bind `provider` in
           the `Manual` arm so it can render `models.manual_unverified`.
-- [ ] Update the two pre-existing tests whose **constructors** changed shape — never their
+- [x] Update the two pre-existing tests whose **constructors** changed shape — never their
       assertions' intent:
       - `handle_models_fetched_falls_back_to_manual_entry_on_a_fetch_error` passes
         `Err("bad key".to_string())`; it must pass a
@@ -158,13 +158,13 @@ key, and unverified status string. **No public API change.**
         `Manual` outcome (it is now the *transport* case, so rename it accordingly).
       - `models_apply_target_reads_the_highlighted_or_typed_id` compares against
         `Some(("openai", "gpt-4o"))` tuples; it must compare against `ModelChoice` values.
-- [ ] Run `cargo test -p light-factory-tui` — expect **all green**, including every other
+- [x] Run `cargo test -p light-factory-tui` — expect **all green**, including every other
       pre-existing `/models` test unchanged.
-- [ ] Run `cargo test --workspace` — expect green (the `crates/persistence` PostgreSQL integration
+- [x] Run `cargo test --workspace` — expect green (the `crates/persistence` PostgreSQL integration
       test skips without `DATABASE_URL`; that is not a failure).
-- [ ] Run `cargo clippy --workspace --all-targets -- -D warnings` — expect clean.
-- [ ] **Out-of-band surfaces:** this task touches none. `Dockerfile`/`fly.toml`, `web/`, and
+- [x] Run `cargo clippy --workspace --all-targets -- -D warnings` — expect clean.
+- [x] **Out-of-band surfaces:** this task touches none. `Dockerfile`/`fly.toml`, `web/`, and
       `crates/persistence/migrations/` are unchanged — state this explicitly at Phase 5 step 14
       rather than skipping it.
-- [ ] Format and commit: `cargo fmt --all` then
+- [x] Format and commit: `cargo fmt --all` then
       `git commit -m "tui: branch the /models modal on the fetch error class"`.
