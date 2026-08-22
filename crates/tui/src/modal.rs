@@ -4,7 +4,7 @@
 //! testable without a terminal, a keyring, or the network. `App` owns exactly one of them at a
 //! time.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use light_factory_providers::{list_models, list_ollama_models};
 use light_factory_tui::credentials::CredentialStore;
 use light_factory_tui::i18n::{self, Locale};
@@ -111,6 +111,7 @@ pub(crate) enum ModelsStep {
 /// single [`ModalHost`], not one `Option` per modal.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Modal {
+    Help,
     Connect(ConnectStep),
     Models(ModelsStep),
 }
@@ -139,6 +140,7 @@ impl Modal {
     /// terminal, or network state.
     pub(crate) fn next(&self, key: KeyEvent) -> ModalTransition {
         match self {
+            Modal::Help => help_step_next(key),
             Modal::Connect(step) => connect_step_next(step, key),
             Modal::Models(step) => models_step_next(step, key),
         }
@@ -158,7 +160,7 @@ impl Modal {
                 provider: provider.clone(),
                 model: model.clone(),
             }),
-            Modal::Connect(_) => None,
+            Modal::Help | Modal::Connect(_) => None,
             Modal::Models(step) => models_apply_target(step)
                 .map(|(provider, model)| ModalApply::Model { provider, model }),
         }
@@ -180,6 +182,24 @@ impl Modal {
             }) => Some(provider.as_str()),
             _ => None,
         }
+    }
+
+    /// Whether this modal replaces the screen underneath it, or floats over it. Help renders a
+    /// full-area pane and has never drawn over a screen; the popup modals always have.
+    pub(crate) fn covers_base(&self) -> bool {
+        matches!(self, Modal::Help)
+    }
+}
+
+/// Pure step-transition for the help modal. Esc and Ctrl-P close it; every other key is ignored,
+/// so the screen underneath cannot be driven from behind the overlay.
+fn help_step_next(key: KeyEvent) -> ModalTransition {
+    match key.code {
+        KeyCode::Esc => ModalTransition::Close,
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            ModalTransition::Close
+        }
+        _ => ModalTransition::Step(Modal::Help),
     }
 }
 
@@ -228,6 +248,10 @@ impl ModalHost {
 
     pub(crate) fn nonce(&self) -> u64 {
         self.nonce
+    }
+
+    pub(crate) fn covers_base(&self) -> bool {
+        self.open.as_ref().is_some_and(Modal::covers_base)
     }
 
     /// Claim a nonce for a newly-spawned fetch, invalidating any earlier one.
@@ -1135,5 +1159,37 @@ mod tests {
             .fetch_target(),
             Some("openai")
         );
+    }
+
+    #[test]
+    fn help_closes_on_esc_and_ctrl_p_and_ignores_other_keys() {
+        assert!(matches!(
+            Modal::Help.next(key(KeyCode::Esc)),
+            ModalTransition::Close
+        ));
+        assert!(matches!(
+            Modal::Help.next(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            ModalTransition::Close
+        ));
+        assert!(matches!(
+            Modal::Help.next(key(KeyCode::Char('x'))),
+            ModalTransition::Step(Modal::Help)
+        ));
+        assert_eq!(Modal::Help.apply_target(), None);
+        assert_eq!(Modal::Help.fetch_target(), None);
+    }
+
+    #[test]
+    fn only_help_hides_the_screen_underneath_it() {
+        assert!(Modal::Help.covers_base());
+        assert!(!Modal::Models(models_list_step(vec![], true)).covers_base());
+        assert!(
+            !Modal::Connect(ConnectStep::ProviderList {
+                rows: vec![],
+                selected: 0
+            })
+            .covers_base()
+        );
+        assert!(!ModalHost::default().covers_base());
     }
 }

@@ -85,7 +85,6 @@ enum Mode {
     Connected,
     Engine,
     Key,
-    Help,
 }
 
 const LOG_CAPACITY: usize = 200;
@@ -118,7 +117,6 @@ pub struct App {
     key_target: Option<String>,
     key_input: String,
     key_return: Mode,
-    help_return: Mode,
     modal: ModalHost,
     engine: Option<Engine>,
     engine_session: Option<SessionId>,
@@ -172,7 +170,6 @@ impl App {
             key_target: None,
             key_input: String::new(),
             key_return: Mode::SignIn,
-            help_return: Mode::SignIn,
             modal: ModalHost::default(),
             engine: None,
             engine_session: None,
@@ -203,9 +200,6 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> bool {
-        if self.mode == Mode::Help {
-            return self.handle_help_key(key);
-        }
         if self.modal.is_open() {
             return self.handle_modal_key(key);
         }
@@ -250,7 +244,6 @@ impl App {
                 Mode::Connected => {}
                 Mode::Engine => {}
                 Mode::Key => {}
-                Mode::Help => {}
             },
             KeyCode::Char('/')
                 if matches!(
@@ -302,24 +295,7 @@ impl App {
     }
 
     fn open_help(&mut self) {
-        self.help_return = self.mode;
-        self.mode = Mode::Help;
-    }
-
-    fn close_help(&mut self) {
-        self.mode = self.help_return;
-    }
-
-    fn handle_help_key(&mut self, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.close_help()
-            }
-            KeyCode::Esc => self.close_help(),
-            _ => {}
-        }
-        false
+        self.open_modal(Modal::Help, None);
     }
 
     fn enter_engine(&mut self) -> anyhow::Result<()> {
@@ -1121,7 +1097,6 @@ impl App {
             Mode::Connected => {}
             Mode::Engine => {}
             Mode::Key => {}
-            Mode::Help => {}
         }
     }
 
@@ -1274,7 +1249,6 @@ impl App {
             Mode::Connected => {}
             Mode::Engine => {}
             Mode::Key => {}
-            Mode::Help => {}
         }
     }
 
@@ -1313,15 +1287,21 @@ impl App {
             chunks[0],
         );
 
-        match self.mode {
-            Mode::SignIn => self.draw_signin(frame, chunks[1]),
-            Mode::Register => self.draw_register(frame, chunks[1]),
-            Mode::RegisterCode => self.draw_register_code(frame, chunks[1]),
-            Mode::Device => self.draw_device(frame, chunks[1]),
-            Mode::Connected => self.draw_connected(frame, chunks[1]),
-            Mode::Engine => self.draw_engine(frame, chunks[1]),
-            Mode::Key => self.draw_key(frame, chunks[1]),
-            Mode::Help => self.draw_help(frame, chunks[1]),
+        // Help replaces the screen underneath it; connect and models float over it.
+        if !self.modal.covers_base() {
+            match self.mode {
+                Mode::SignIn => self.draw_signin(frame, chunks[1]),
+                Mode::Register => self.draw_register(frame, chunks[1]),
+                Mode::RegisterCode => self.draw_register_code(frame, chunks[1]),
+                Mode::Device => self.draw_device(frame, chunks[1]),
+                Mode::Connected => self.draw_connected(frame, chunks[1]),
+                Mode::Engine => self.draw_engine(frame, chunks[1]),
+                Mode::Key => self.draw_key(frame, chunks[1]),
+            }
+        }
+
+        if let Some(Modal::Help) = self.modal.current() {
+            self.draw_help(frame, chunks[1]);
         }
 
         if let Some(Modal::Connect(_)) = self.modal.current() {
@@ -1334,7 +1314,7 @@ impl App {
 
         let hints = if self.command_mode {
             format!("> {}", self.command)
-        } else if self.mode == Mode::Help {
+        } else if matches!(self.modal.current(), Some(Modal::Help)) {
             self.t("hint.help_close").to_string()
         } else if self.mode == Mode::Device {
             self.t("hint.device_cancel").to_string()
@@ -2932,9 +2912,11 @@ mod tests {
         let mut app = test_app();
         assert!(matches!(app.mode, Mode::SignIn));
         app.open_help();
-        assert!(matches!(app.mode, Mode::Help));
-        assert!(matches!(app.help_return, Mode::SignIn));
-        app.close_help();
+        assert!(matches!(app.modal.current(), Some(Modal::Help)));
+        // The base mode is never disturbed, so there is nothing to restore.
+        assert!(matches!(app.mode, Mode::SignIn));
+        app.modal.close();
+        assert!(app.modal.current().is_none());
         assert!(matches!(app.mode, Mode::SignIn));
     }
 
@@ -2943,8 +2925,9 @@ mod tests {
         let mut app = test_app();
         app.mode = Mode::Connected;
         app.open_help();
-        assert!(matches!(app.help_return, Mode::Connected));
-        app.close_help();
+        assert!(matches!(app.modal.current(), Some(Modal::Help)));
+        assert!(matches!(app.mode, Mode::Connected));
+        app.modal.close();
         assert!(matches!(app.mode, Mode::Connected));
     }
 
@@ -2953,14 +2936,16 @@ mod tests {
         let mut app = test_app();
 
         app.open_help();
-        assert!(!app.handle_help_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(!app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())));
+        assert!(app.modal.current().is_none());
         assert!(matches!(app.mode, Mode::SignIn));
 
         app.open_help();
-        assert!(!app.handle_help_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+        assert!(!app.handle_modal_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+        assert!(app.modal.current().is_none());
         assert!(matches!(app.mode, Mode::SignIn));
 
         app.open_help();
-        assert!(app.handle_help_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert!(app.handle_modal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
     }
 }
