@@ -33,9 +33,10 @@ use crate::browser;
 use crate::config::Config;
 use crate::modal::{
     ConnectStep, Modal, ModalApply, ModalContext, ModalHost, ModalTransition, ModelsStep,
-    ProviderRow, fetch_model_list,
+    ProviderRow, fetch_model_list, mask,
 };
 use crate::provider::ProviderInfo;
+use crate::selection::takes_key;
 use crate::session::Session;
 use crate::settings::{Settings, SettingsHandle};
 use crate::ws;
@@ -1287,8 +1288,21 @@ impl App {
             chunks[0],
         );
 
-        // Help replaces the screen underneath it; connect and models float over it.
-        if !self.modal.covers_base() {
+        // Built before the base screen so the same value decides whether that screen is drawn at
+        // all: a modal covers the base exactly when it renders as a full-area pane.
+        let modal_view = self.modal.current().map(|modal| {
+            let ctx = ModalContext {
+                locale: self.config.lang,
+                error: self.error.as_deref(),
+                offline: self.provider_info.offline.as_ref(),
+            };
+            (modal.hint_key(), modal.view(&ctx))
+        });
+
+        if !modal_view
+            .as_ref()
+            .is_some_and(|(_, view)| view.covers_base())
+        {
             match self.mode {
                 Mode::SignIn => self.draw_signin(frame, chunks[1]),
                 Mode::Register => self.draw_register(frame, chunks[1]),
@@ -1300,19 +1314,15 @@ impl App {
             }
         }
 
-        if let Some(modal) = self.modal.current() {
-            let ctx = ModalContext {
-                locale: self.config.lang,
-                error: self.error.as_deref(),
-                offline: self.provider_info.offline.as_ref(),
-            };
-            crate::modal::draw_modal(frame, chunks[1], modal.view(&ctx));
-        }
+        let modal_hint = modal_view.and_then(|(hint, view)| {
+            crate::modal::draw_modal(frame, chunks[1], view);
+            hint
+        });
 
         let hints = if self.command_mode {
             format!("> {}", self.command)
-        } else if matches!(self.modal.current(), Some(Modal::Help)) {
-            self.t("hint.help_close").to_string()
+        } else if let Some(hint) = modal_hint {
+            self.t(hint).to_string()
         } else if self.mode == Mode::Device {
             self.t("hint.device_cancel").to_string()
         } else {
@@ -1775,10 +1785,6 @@ fn is_valid_provider(name: &str) -> bool {
     PROVIDER_NAMES.contains(&name)
 }
 
-pub(crate) fn takes_key(provider: &str) -> bool {
-    light_factory_providers::env_key_var(provider).is_some()
-}
-
 /// A parsed `/key` command.
 enum KeyCommand {
     List,
@@ -1804,11 +1810,6 @@ fn parse_models_command(command: &str) -> bool {
         .strip_prefix("/models")
         .map(word_boundary)
         .unwrap_or(false)
-}
-
-/// Mask a secret for rendering: one `*` per character, never the input value.
-pub(crate) fn mask(input: &str) -> String {
-    "*".repeat(input.chars().count())
 }
 
 /// Parse a `/model` command: `Some(Some(id))` for `/model <id>`, `Some(None)` for a bare `/model`
@@ -1859,7 +1860,7 @@ mod tests {
 
     use super::{
         App, ConnectStep, EngineForward, KeyCommand, Modal, Mode, ModelsStep, UiEvent,
-        engine_approval_key, engine_forward_step, mask, parse_ask_command, parse_connect_command,
+        engine_approval_key, engine_forward_step, parse_ask_command, parse_connect_command,
         parse_key_command, parse_model_command, parse_models_command,
     };
     use crate::config::Config;
@@ -2024,13 +2025,6 @@ mod tests {
         assert!(!parse_connect_command("/connectx"));
         assert!(!parse_connect_command("/provider"));
         assert!(!parse_connect_command("/ask hello"));
-    }
-
-    #[test]
-    fn mask_never_echoes_input() {
-        assert_eq!(mask(""), "");
-        assert_eq!(mask("abc"), "***");
-        assert_eq!(mask("sk-secret"), "*********");
     }
 
     fn model_list_step(models: Vec<String>, fetching: bool) -> ConnectStep {

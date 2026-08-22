@@ -14,9 +14,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-// Two pure leaf helpers shared with the screens `App` draws outside a modal: `mask` also renders
-// the key-entry screen, `takes_key` also gates the `/key` command.
-use crate::app::{mask, takes_key};
+// `takes_key` also gates the `/key` command; `mask` (below) also renders the `Mode::Key` screen.
+// Both point away from `app.rs`, so this module has no edge back into the one that owns it.
+use crate::selection::takes_key;
+
+/// Mask a secret for rendering: one `*` per character, never the input value.
+pub(crate) fn mask(input: &str) -> String {
+    "*".repeat(input.chars().count())
+}
 
 /// One row of the connect modal's provider list. Self-contained (id + connected flag) so the pure
 /// transition function needs no store/keyring/network state.
@@ -187,10 +192,14 @@ impl Modal {
         }
     }
 
-    /// Whether this modal replaces the screen underneath it, or floats over it. Help renders a
-    /// full-area pane and has never drawn over a screen; the popup modals always have.
-    pub(crate) fn covers_base(&self) -> bool {
-        matches!(self, Modal::Help)
+    /// The i18n key for the status-bar hint this modal overrides, or `None` to leave the hint to
+    /// the screen underneath. Only help takes the line over; the popups float and let the base
+    /// screen keep saying what it was saying.
+    pub(crate) fn hint_key(&self) -> Option<&'static str> {
+        match self {
+            Modal::Help => Some("hint.help_close"),
+            Modal::Connect(_) | Modal::Models(_) => None,
+        }
     }
 }
 
@@ -285,10 +294,6 @@ impl ModalHost {
 
     pub(crate) fn nonce(&self) -> u64 {
         self.nonce
-    }
-
-    pub(crate) fn covers_base(&self) -> bool {
-        self.open.as_ref().is_some_and(Modal::covers_base)
     }
 
     /// Claim a nonce for a newly-spawned fetch, invalidating any earlier one. The returned value is
@@ -630,6 +635,18 @@ pub(crate) struct FullScreenView {
 pub(crate) enum ModalView {
     Popup(PopupView),
     FullScreen(FullScreenView),
+}
+
+impl ModalView {
+    /// Whether this modal replaces the screen underneath it, or floats over it.
+    ///
+    /// Read off the view rather than stated separately per modal, because it is a property of how
+    /// the modal is *painted*, not of which modal it is: [`draw_full_screen`] deliberately does not
+    /// `Clear`, so a modal that claimed to cover the base while rendering a `Popup` would paint
+    /// over a screen nobody drew.
+    pub(crate) fn covers_base(&self) -> bool {
+        matches!(self, ModalView::FullScreen(_))
+    }
 }
 
 impl Modal {
@@ -991,6 +1008,14 @@ mod tests {
             provider: "openai".to_string(),
             input: input.to_string(),
             error: None,
+        }
+    }
+    /// A minimal render context: no app-level error, no offline reason.
+    fn ctx() -> ModalContext<'static> {
+        ModalContext {
+            locale: Locale::En,
+            error: None,
+            offline: None,
         }
     }
 
@@ -1584,15 +1609,42 @@ mod tests {
 
     #[test]
     fn only_help_hides_the_screen_underneath_it() {
-        assert!(Modal::Help.covers_base());
-        assert!(!Modal::Models(models_list_step(vec![], true)).covers_base());
+        assert!(Modal::Help.view(&ctx()).covers_base());
+        assert!(
+            !Modal::Models(models_list_step(vec![], true))
+                .view(&ctx())
+                .covers_base()
+        );
         assert!(
             !Modal::Connect(ConnectStep::ProviderList {
                 rows: vec![],
                 selected: 0
             })
+            .view(&ctx())
             .covers_base()
         );
-        assert!(!ModalHost::default().covers_base());
+    }
+
+    /// The status line is help's alone to take over: a popup floats, so the screen underneath keeps
+    /// saying what it was saying.
+    #[test]
+    fn only_help_overrides_the_status_hint() {
+        assert_eq!(Modal::Help.hint_key(), Some("hint.help_close"));
+        assert_eq!(Modal::Models(ModelsStep::Offline).hint_key(), None);
+        assert_eq!(
+            Modal::Connect(ConnectStep::ProviderList {
+                rows: vec![],
+                selected: 0
+            })
+            .hint_key(),
+            None
+        );
+    }
+
+    #[test]
+    fn mask_never_echoes_input() {
+        assert_eq!(mask(""), "");
+        assert_eq!(mask("abc"), "***");
+        assert_eq!(mask("sk-secret"), "*********");
     }
 }
