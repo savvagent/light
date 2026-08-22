@@ -53,7 +53,7 @@ This plan implements it exactly.
 | File | Responsibility |
 |---|---|
 | Modify. `crates/tui/src/app.rs` | `FetchFailure` + `FetchError` + `classify_fetch_error`/`class_for_status`; `fetch_model_list` return type; `UiEvent::ModelsFetched.result` type; `begin_fetch` maps to `String` for the connect modal; `ModelsStep::Credentials` + `ModelsStep::provider()`; `ModelsTransition::Retry`; `models_step_next` arms; `handle_models_fetched` branch + `fetch_error_message`; `handle_models_key` retry arm + `retry_models_fetch`; `ModelChoice` + `models_apply_target`; `persist_model(verified)` + its three call sites; `draw_models` `Credentials` arm and relabelled `Manual` arm; new tests |
-| Modify. `crates/tui/src/i18n.rs` | `status.model_set_unverified`, `models.auth_rejected`, `models.credentials_hint`, `models.manual_unverified` (replacing `models.manual`), updated `models.footer_manual` value — in **both** `EN` and `ES` |
+| Modify. `crates/tui/src/i18n.rs` | `status.model_set_unverified`, `models.auth_rejected`, `models.credentials_hint`, `models.credentials_remedy`, `models.manual_unverified` (replacing `models.manual`), updated `models.footer_manual` value — in **both** `EN` and `ES` |
 | Modify. `crates/tui/Cargo.toml` | new `[dev-dependencies]` section with `wiremock = "0.6"` (test targets only) |
 
 ## Task Order & Rationale
@@ -103,12 +103,19 @@ key, and unverified status string. **No public API change.**
       - Manual `Enter` sets `app.status` to the `status.model_set_unverified` rendering (assert it
         contains the model id **and** the provider id, and differs from the verified string); list
         `Enter` sets the unchanged `status.model_set` rendering.
+      - Two `TestBackend` render assertions (mirroring `models_modal_renders_its_own_header`): the
+        `Credentials` step shows `/connect` and `/key openai` and advertises neither "save" nor
+        "retry"; the `Manual` step shows the whole unverified prompt on one line and advertises
+        `Ctrl+R: retry` and "save unverified".
 - [ ] Run `cargo test -p light-factory-tui` — expect **compile failure** (the new items do not exist
       yet). That is the failing-test signal for this task.
 - [ ] Add the i18n entries to **both** catalogs in `crates/tui/src/i18n.rs`:
       `status.model_set_unverified`, `models.auth_rejected`, `models.credentials_hint`,
-      `models.manual_unverified`; update the `models.footer_manual` value to advertise `Ctrl+R`;
-      delete the now-unreferenced `models.manual` from both. Values per spec §5.5.
+      `models.credentials_remedy`, `models.manual_unverified`; update the `models.footer_manual`
+      value to advertise `Ctrl+R`; delete the now-unreferenced `models.manual` from both. Values per
+      spec §5.5. **Every string must fit the popup's ~58-column inner width** — `draw_popup` sizes
+      the box from the line count, so a wrapping line pushes the last row (the input field) out of
+      view.
 - [ ] Run `cargo test -p light-factory-tui i18n::tests::es_mirrors_en_exactly` — expect **pass**
       (key parity holds).
 - [ ] Implement in `crates/tui/src/app.rs` per spec §5.1–§5.4:

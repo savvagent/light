@@ -192,6 +192,10 @@ const EN: Catalog = &[
     ("key.list", "keys: {list}"),
     ("status.model_set", "Model set to {model}"),
     (
+        "status.model_set_unverified",
+        "Model set to {model} \u{2014} not verified against {provider}",
+    ),
+    (
         "status.settings_save_failed",
         "Couldn't save settings: {error}",
     ),
@@ -278,12 +282,30 @@ const EN: Catalog = &[
     ("connect.no_key", "No API key for {provider}"),
     ("models.title", "Select a model"),
     ("models.offline", "Use /connect to connect a provider first"),
-    ("models.manual", "Type a model id, or Esc to close"),
+    (
+        "models.manual_unverified",
+        "Type a model id \u{2014} it won't be checked against {provider}",
+    ),
+    (
+        "models.auth_rejected",
+        "{provider} rejected the credential: {error}",
+    ),
+    (
+        "models.credentials_hint",
+        "Typing a model id can't fix this.",
+    ),
+    (
+        "models.credentials_remedy",
+        "Use /connect, or /key {provider}",
+    ),
     (
         "models.footer_list",
         "Enter: select · Esc: close · \u{2191}/\u{2193}: navigate",
     ),
-    ("models.footer_manual", "Enter: save · Esc: close"),
+    (
+        "models.footer_manual",
+        "Enter: save unverified · Ctrl+R: retry · Esc: close",
+    ),
     ("models.footer_offline", "Esc: close"),
 ];
 
@@ -478,6 +500,10 @@ const ES: Catalog = &[
     ("key.list", "claves: {list}"),
     ("status.model_set", "Modelo cambiado a {model}"),
     (
+        "status.model_set_unverified",
+        "Modelo cambiado a {model} \u{2014} no verificado con {provider}",
+    ),
+    (
         "status.settings_save_failed",
         "No se pudieron guardar los ajustes: {error}",
     ),
@@ -580,14 +606,29 @@ const ES: Catalog = &[
         "Usa /connect para conectar un proveedor primero",
     ),
     (
-        "models.manual",
-        "Escribe un id de modelo, o Esc para cerrar",
+        "models.manual_unverified",
+        "Escribe un id de modelo \u{2014} no se verificará con {provider}",
+    ),
+    (
+        "models.auth_rejected",
+        "{provider} rechazó la credencial: {error}",
+    ),
+    (
+        "models.credentials_hint",
+        "Escribir un id de modelo no soluciona esto.",
+    ),
+    (
+        "models.credentials_remedy",
+        "Usa /connect, o /key {provider}",
     ),
     (
         "models.footer_list",
         "Enter: elegir · Esc: cerrar · \u{2191}/\u{2193}: navegar",
     ),
-    ("models.footer_manual", "Enter: guardar · Esc: cerrar"),
+    (
+        "models.footer_manual",
+        "Enter: guardar sin verificar · Ctrl+R: reintentar · Esc: cerrar",
+    ),
     ("models.footer_offline", "Esc: cerrar"),
 ];
 

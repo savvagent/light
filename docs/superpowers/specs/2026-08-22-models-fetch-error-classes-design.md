@@ -159,9 +159,16 @@ ModelsStep::Credentials { provider: String, error: String }
 ```
 
 Rendered by `draw_models` as: the failure message (red), a blank line, then
-`models.credentials_hint` (dark gray) — "Typing a model id can't fix this. Use /connect, or
-/key {provider}". Footer reuses the existing `models.footer_offline` ("Esc: close"). No input box,
-no list, `focus: None`.
+two dark-gray lines — `models.credentials_hint` ("Typing a model id can't fix this.") and
+`models.credentials_remedy` ("Use /connect, or /key {provider}"). Footer reuses the existing
+`models.footer_offline` ("Esc: close"). No input box, no list, `focus: None`.
+
+**The remedy is two lines, not one sentence, on purpose.** `draw_popup` (`app.rs:2715`) sizes the
+box from `body.len()`, not from the wrapped height, and clamps the popup to 60 columns. A single
+sentence long enough to wrap therefore pushes the last row off the bottom of the box — which on the
+`Manual` step would silently hide the input field the step exists for. Every string this change adds
+is kept under the ~58-column inner width, and two render tests assert the whole prompt appears on
+one line. (The underlying `draw_popup` sizing bug predates this change and is a follow-up.)
 
 The hint's command syntax is taken from `parse_key_command` (`app.rs:2464`), which accepts `/key`
 (list), `/key <provider>` (masked entry) and `/key <provider> clear` — **not** `/key set …`. Naming
@@ -208,8 +215,9 @@ Call sites: `apply_and_close_connect` → `true` (picked from a fetched list);
 |---|---|
 | `status.model_set_unverified` | `Model set to {model} — not verified against {provider}` |
 | `models.auth_rejected` | `{provider} rejected the credential: {error}` |
-| `models.credentials_hint` | `Typing a model id can't fix this. Use /connect, or /key {provider}` |
-| `models.manual_unverified` | `Type a model id to use anyway — it won't be checked against {provider}` (replaces `models.manual`) |
+| `models.credentials_hint` | `Typing a model id can't fix this.` |
+| `models.credentials_remedy` | `Use /connect, or /key {provider}` |
+| `models.manual_unverified` | `Type a model id — it won't be checked against {provider}` (replaces `models.manual`) |
 | `models.footer_manual` | `Enter: save unverified · Ctrl+R: retry · Esc: close` (value updated) |
 
 `models.manual` is removed from both catalogs — nothing references it once `draw_models` uses the
@@ -254,6 +262,9 @@ All in `crates/tui/src/app.rs`'s `#[cfg(test)] mod tests`, offline-deterministic
    `cargo build --workspace` and the shipped binary are unaffected because dev-dependencies are
    compiled only for test targets.
 9. `i18n::es_mirrors_en_exactly` (existing) covers EN/ES parity for the new keys.
+10. Two `ratatui` `TestBackend` render assertions: the `Credentials` step shows `/connect` and
+    `/key openai` and advertises neither "save" nor "retry"; the `Manual` step shows the whole
+    unverified prompt on one line and advertises `Ctrl+R: retry` and "save unverified".
 
 ## 8. Goal & success criteria
 
@@ -292,3 +303,5 @@ that actually applies.
   (semver-major on `list_models`).
 - Parse provider error bodies so Gemini's 400 INVALID_ARGUMENT classifies as `Auth`.
 - Surface the same unverified/verified distinction in the `/connect` modal's status line.
+- `draw_popup` sizes its box from `body.len()` rather than the wrapped line count, so any body line
+  wider than the popup silently pushes the last row (on `Manual`, the input field) out of view.

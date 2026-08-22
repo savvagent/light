@@ -45,3 +45,6 @@ keyring = { version = "3.6", features = [
     "windows-native",
     "sync-secret-service",
 ] }
+
+[dev-dependencies]
+wiremock = "0.6"
