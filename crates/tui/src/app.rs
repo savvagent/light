@@ -33,7 +33,7 @@ use crate::browser;
 use crate::config::Config;
 use crate::provider::ProviderInfo;
 use crate::session::Session;
-use crate::settings::Settings;
+use crate::settings::{Settings, SettingsHandle};
 use crate::ws;
 
 /// Events flowing into the single UI loop.
@@ -47,12 +47,12 @@ pub enum UiEvent {
     Completion(Result<String, String>),
     Engine(EngineEvent),
     EngineDropped(u64),
-    Models {
+    ConnectModels {
         nonce: u64,
         provider: String,
         result: Result<Vec<String>, String>,
     },
-    Picker {
+    ModelsFetched {
         nonce: u64,
         provider: String,
         result: Result<Vec<String>, String>,
@@ -242,7 +242,7 @@ impl App {
         provider: Arc<dyn Provider>,
         provider_info: ProviderInfo,
         store: Arc<dyn CredentialStore>,
-        settings: Settings,
+        settings: SettingsHandle,
         prefilled_email: Option<String>,
         events: mpsc::UnboundedSender<UiEvent>,
     ) -> Self {
@@ -270,8 +270,8 @@ impl App {
             provider,
             provider_info,
             store,
-            settings,
-            settings_path: crate::settings::path(),
+            settings: settings.settings,
+            settings_path: settings.path,
             key_target: None,
             key_input: String::new(),
             key_return: Mode::SignIn,
@@ -627,6 +627,50 @@ impl App {
         }
     }
 
+    /// Tear down any open modal and invalidate its in-flight fetch. Called when the session goes
+    /// away, so a modal cannot float over the sign-in screen, swallow its keys, or restore a
+    /// stale `Mode::Connected` on Esc.
+    fn dismiss_modals(&mut self) {
+        if self.connect.is_some() {
+            self.connect = None;
+            self.connect_nonce += 1;
+        }
+        if self.models.is_some() {
+            self.models = None;
+            self.models_nonce += 1;
+        }
+    }
+
+    /// Persist the settings, surfacing a failure as a user-visible error rather than swallowing
+    /// it. Returns whether the write landed, so callers can roll back the change they staged.
+    fn persist_settings(&mut self) -> bool {
+        match crate::settings::save_at(&self.settings_path, &self.settings) {
+            Ok(()) => true,
+            Err(e) => {
+                // `{:#}` keeps anyhow's source chain; `to_string` would drop the actual cause.
+                let err = format!("{e:#}");
+                self.error = Some(self.t_with("status.settings_save_failed", &[("error", &err)]));
+                false
+            }
+        }
+    }
+
+    /// Stage a model for a provider and persist it, rolling the in-memory map back if the write
+    /// fails so a later unrelated save cannot silently resurrect it.
+    fn persist_model(&mut self, provider: String, model: String) -> bool {
+        let previous = self.settings.models.insert(provider.clone(), model.clone());
+        if self.persist_settings() {
+            self.rebuild_provider();
+            self.status = self.t_with("status.model_set", &[("model", &model)]);
+            return true;
+        }
+        match previous {
+            Some(old) => self.settings.models.insert(provider, old),
+            None => self.settings.models.remove(&provider),
+        };
+        false
+    }
+
     fn rebuild_provider(&mut self) {
         let (provider, info) = crate::selection::rebuild(&self.settings, self.store.as_ref());
         self.provider = provider;
@@ -686,10 +730,16 @@ impl App {
             other if other.starts_with("/lang ") => {
                 let arg = other["/lang ".len()..].trim();
                 if let Some(locale) = Locale::parse(arg) {
+                    let previous_lang = self.config.lang;
+                    let previous_saved =
+                        std::mem::replace(&mut self.settings.lang, locale.as_str().to_string());
                     self.config.lang = locale;
-                    self.settings.lang = locale.as_str().to_string();
-                    let _ = crate::settings::save_at(&self.settings_path, &self.settings);
-                    self.status = self.t_with("status.lang_set", &[("lang", locale.as_str())]);
+                    if self.persist_settings() {
+                        self.status = self.t_with("status.lang_set", &[("lang", locale.as_str())]);
+                    } else {
+                        self.config.lang = previous_lang;
+                        self.settings.lang = previous_saved;
+                    }
                 } else {
                     self.error = Some(self.t("status.lang_invalid").to_string());
                 }
@@ -744,14 +794,9 @@ impl App {
             _ => None,
         };
         if let Some((provider, model)) = apply {
-            self.settings.models.insert(provider.clone(), model.clone());
-            self.settings.provider = Some(provider);
-            if let Err(e) = crate::settings::save_at(&self.settings_path, &self.settings) {
-                let err = e.to_string();
-                self.status = self.t_with("status.settings_save_failed", &[("error", &err)]);
-            } else {
-                self.rebuild_provider();
-                self.status = self.t_with("status.model_set", &[("model", model.as_str())]);
+            let previous_provider = self.settings.provider.replace(provider.clone());
+            if !self.persist_model(provider, model) {
+                self.settings.provider = previous_provider;
             }
         }
         self.close_connect();
@@ -762,9 +807,10 @@ impl App {
         let nonce = self.connect_nonce;
         let events = self.events.clone();
         let store = self.store.clone();
+        let lang = self.config.lang;
         tokio::spawn(async move {
-            let result = fetch_model_list(&provider, key, store.as_ref()).await;
-            let _ = events.send(UiEvent::Models {
+            let result = fetch_model_list(&provider, key, store.as_ref(), lang).await;
+            let _ = events.send(UiEvent::ConnectModels {
                 nonce,
                 provider,
                 result,
@@ -772,7 +818,12 @@ impl App {
         });
     }
 
-    fn handle_models(&mut self, nonce: u64, provider: String, result: Result<Vec<String>, String>) {
+    fn handle_connect_models(
+        &mut self,
+        nonce: u64,
+        provider: String,
+        result: Result<Vec<String>, String>,
+    ) {
         if nonce != self.connect_nonce {
             return;
         }
@@ -835,9 +886,10 @@ impl App {
         let nonce = self.models_nonce;
         let events = self.events.clone();
         let store = self.store.clone();
+        let lang = self.config.lang;
         tokio::spawn(async move {
-            let result = fetch_model_list(&provider, None, store.as_ref()).await;
-            let _ = events.send(UiEvent::Picker {
+            let result = fetch_model_list(&provider, None, store.as_ref(), lang).await;
+            let _ = events.send(UiEvent::ModelsFetched {
                 nonce,
                 provider,
                 result,
@@ -845,7 +897,12 @@ impl App {
         });
     }
 
-    fn handle_picker(&mut self, nonce: u64, provider: String, result: Result<Vec<String>, String>) {
+    fn handle_models_fetched(
+        &mut self,
+        nonce: u64,
+        provider: String,
+        result: Result<Vec<String>, String>,
+    ) {
         if nonce != self.models_nonce {
             return;
         }
@@ -915,14 +972,7 @@ impl App {
         let apply = self.models.as_ref().and_then(models_apply_target);
         self.close_models();
         if let Some((provider, model)) = apply {
-            self.settings.models.insert(provider.clone(), model.clone());
-            if let Err(e) = crate::settings::save_at(&self.settings_path, &self.settings) {
-                let err = e.to_string();
-                self.status = self.t_with("status.settings_save_failed", &[("error", &err)]);
-            } else {
-                self.rebuild_provider();
-                self.status = self.t_with("status.model_set", &[("model", &model)]);
-            }
+            self.persist_model(provider, model);
         }
     }
 
@@ -984,12 +1034,7 @@ impl App {
             self.error = Some(self.t("status.model_unsupported").to_string());
             return;
         }
-        self.settings
-            .models
-            .insert(active.clone(), model.to_string());
-        let _ = crate::settings::save_at(&self.settings_path, &self.settings);
-        self.rebuild_provider();
-        self.status = self.t_with("status.model_set", &[("model", model)]);
+        self.persist_model(active, model.to_string());
     }
 
     fn list_keys(&mut self) {
@@ -1257,6 +1302,7 @@ impl App {
         self.ws_tx = None;
         self.mode = Mode::SignIn;
         self.focus = Focus::Email;
+        self.dismiss_modals();
         self.code.clear();
         self.log.clear();
         self.pongs = 0;
@@ -1286,6 +1332,7 @@ impl App {
                     self.session = None;
                     self.mode = Mode::SignIn;
                     self.focus = Focus::Email;
+                    self.dismiss_modals();
                     self.error = Some(text);
                 }
             }
@@ -1838,12 +1885,24 @@ impl App {
                 }
             }
         };
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            footer,
-            Style::default().fg(Color::DarkGray),
-        )));
-        draw_popup(frame, area, title, lines);
+        let focus = match step {
+            ConnectStep::ProviderList { selected, .. } => Some(*selected),
+            ConnectStep::ModelList {
+                selected,
+                fetching: false,
+                models,
+                ..
+            } if !models.is_empty() => Some(*selected),
+            _ => None,
+        };
+        draw_popup(
+            frame,
+            area,
+            title,
+            lines,
+            Line::from(Span::styled(footer, Style::default().fg(Color::DarkGray))),
+            focus,
+        );
     }
 
     fn draw_models(&self, frame: &mut Frame, area: Rect) {
@@ -1918,12 +1977,23 @@ impl App {
                 footer = self.t("models.footer_manual");
             }
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            footer,
-            Style::default().fg(Color::DarkGray),
-        )));
-        draw_popup(frame, area, title, lines);
+        let focus = match step {
+            ModelsStep::ModelList {
+                selected,
+                fetching: false,
+                models,
+                ..
+            } if !models.is_empty() => Some(*selected),
+            _ => None,
+        };
+        draw_popup(
+            frame,
+            area,
+            title,
+            lines,
+            Line::from(Span::styled(footer, Style::default().fg(Color::DarkGray))),
+            focus,
+        );
     }
 }
 
@@ -1933,7 +2003,7 @@ pub async fn run(
     provider: Arc<dyn Provider>,
     provider_info: ProviderInfo,
     store: Arc<dyn CredentialStore>,
-    settings: Settings,
+    settings: SettingsHandle,
     prefilled_email: Option<String>,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
@@ -2004,16 +2074,16 @@ pub async fn run(
                     UiEvent::Completion(result) => app.handle_completion(result),
                     UiEvent::Engine(event) => app.handle_engine_event(event),
                     UiEvent::EngineDropped(n) => app.handle_engine_dropped(n),
-                    UiEvent::Models {
+                    UiEvent::ConnectModels {
                         nonce,
                         provider,
                         result,
-                    } => app.handle_models(nonce, provider, result),
-                    UiEvent::Picker {
+                    } => app.handle_connect_models(nonce, provider, result),
+                    UiEvent::ModelsFetched {
                         nonce,
                         provider,
                         result,
-                    } => app.handle_picker(nonce, provider, result),
+                    } => app.handle_models_fetched(nonce, provider, result),
                 }
             }
             _ = tick.tick() => {
@@ -2288,17 +2358,26 @@ async fn fetch_model_list(
     provider: &str,
     key_override: Option<String>,
     store: &dyn CredentialStore,
+    locale: Locale,
 ) -> Result<Vec<String>, String> {
+    // `{:#}` keeps anyhow's source chain — `to_string` reports only the outermost message, which
+    // hides the actual cause (connection refused, DNS failure, TLS error, 401, ...).
     if provider == "ollama" {
-        return list_ollama_models().await.map_err(|e| e.to_string());
+        return list_ollama_models().await.map_err(|e| format!("{e:#}"));
     }
     let key = match key_override {
         Some(k) => Some(k),
         None => crate::selection::resolve_key(provider, store),
     };
     match key {
-        Some(k) => list_models(provider, &k).await.map_err(|e| e.to_string()),
-        None => Err(format!("no API key for {provider}")),
+        Some(k) => list_models(provider, &k)
+            .await
+            .map_err(|e| format!("{e:#}")),
+        None => Err(i18n::t_with(
+            locale,
+            "connect.no_key",
+            &[("provider", provider)],
+        )),
     }
 }
 
@@ -2463,9 +2542,23 @@ fn help_lines(locale: Locale) -> Vec<String> {
     lines
 }
 
-/// Render `lines` in a centered, bordered popup titled `title`, clearing what is underneath.
-fn draw_popup(frame: &mut Frame, area: Rect, title: String, lines: Vec<Line>) {
-    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+/// Render a centered, bordered popup titled `title`, clearing what is underneath. `footer` is
+/// pinned to the bottom so it stays visible, and `focus` names a `body` row that must remain on
+/// screen — the body scrolls to keep it visible when the list is taller than the terminal.
+fn draw_popup(
+    frame: &mut Frame,
+    area: Rect,
+    title: String,
+    body: Vec<Line>,
+    footer: Line,
+    focus: Option<usize>,
+) {
+    // Borders take two rows and the pinned footer one.
+    const CHROME: u16 = 3;
+    let available = area.height.saturating_sub(2);
+    // Clamp in `usize` first: a remote-supplied list long enough to overflow `u16` must not wrap.
+    let wanted = body.len().saturating_add(CHROME as usize);
+    let height = u16::try_from(wanted).unwrap_or(u16::MAX).min(available);
     let width = 60u16.min(area.width.saturating_sub(2));
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -2474,15 +2567,40 @@ fn draw_popup(frame: &mut Frame, area: Rect, title: String, lines: Vec<Line>) {
         height,
     };
     frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", title));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let body_height = inner.height.saturating_sub(1);
+    if body_height > 0 {
+        // Scroll just far enough to bring the focused row into view.
+        let offset = match focus {
+            Some(row) => (row as u16).saturating_sub(body_height.saturating_sub(1)),
+            None => 0,
+        };
+        frame.render_widget(
+            Paragraph::new(body)
+                .wrap(Wrap { trim: false })
+                .scroll((offset, 0)),
+            Rect {
+                height: body_height,
+                ..inner
+            },
+        );
+    }
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" {} ", title)),
-            )
-            .wrap(Wrap { trim: false }),
-        popup,
+        Paragraph::new(footer),
+        Rect {
+            y: inner.y + body_height,
+            height: 1,
+            ..inner
+        },
     );
 }
 
@@ -2522,11 +2640,13 @@ mod tests {
     };
     use crate::config::Config;
     use crate::provider::ProviderInfo;
-    use crate::settings::Settings;
+    use crate::settings::{Settings, SettingsHandle};
     use light_factory_protocol::session::{Event as EngineEvent, EventKind, SessionId};
+    use light_factory_protocol::wire::ServerMessage;
     use light_factory_providers::{LocalProvider, OfflineReason, Provider};
     use light_factory_tui::credentials::{CredentialStore, MemStore};
     use light_factory_tui::i18n::Locale;
+    use ratatui::Terminal;
     use tokio::sync::broadcast::error::RecvError;
     use tokio::sync::mpsc;
 
@@ -2541,12 +2661,16 @@ mod tests {
             warnings: Vec::new(),
         };
         let (events, _rx) = mpsc::unbounded_channel::<UiEvent>();
+        // Isolation by construction: no test may ever write the developer's real config.json.
         App::new(
             config,
             provider,
             provider_info,
             store,
-            Settings::default(),
+            SettingsHandle {
+                settings: Settings::default(),
+                path: temp_settings_path(),
+            },
             None,
             events,
         )
@@ -2556,13 +2680,21 @@ mod tests {
         test_app_with_store(Arc::new(MemStore::new()))
     }
 
-    /// A per-test settings file under the temp dir, so apply paths never touch the developer's
-    /// real `config.json`.
-    fn temp_settings_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "light-factory-app-{name}-{}.json",
-            std::process::id()
-        ))
+    /// A unique settings file under the temp dir, so no test ever touches the developer's real
+    /// `config.json`. Every `test_app*` gets its own, so parallel tests cannot collide.
+    fn temp_settings_path() -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("light-factory-app-{}-{n}.json", std::process::id()))
+    }
+
+    /// Removes the settings file it names when the test ends, panic or not.
+    struct TempSettings(std::path::PathBuf);
+
+    impl Drop for TempSettings {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     /// A store whose `set` always fails, for exercising the keyring-failure branch.
@@ -2857,11 +2989,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_models_ignores_stale_nonces() {
+    fn handle_connect_models_ignores_stale_nonces() {
         let mut app = test_app();
         app.connect_nonce = 5;
         app.connect = Some(model_list_step(vec![], true));
-        app.handle_models(4, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+        app.handle_connect_models(4, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
         assert!(matches!(
             app.connect,
             Some(ConnectStep::ModelList {
@@ -2873,11 +3005,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_models_fills_models_for_a_matching_nonce() {
+    fn handle_connect_models_fills_models_for_a_matching_nonce() {
         let mut app = test_app();
         app.connect_nonce = 5;
         app.connect = Some(model_list_step(vec![], true));
-        app.handle_models(
+        app.handle_connect_models(
             5,
             "openai".to_string(),
             Ok(vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]),
@@ -2894,11 +3026,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_models_surfaces_a_fetch_error() {
+    fn handle_connect_models_surfaces_a_fetch_error() {
         let mut app = test_app();
         app.connect_nonce = 5;
         app.connect = Some(model_list_step(vec![], true));
-        app.handle_models(5, "openai".to_string(), Err("bad key".to_string()));
+        app.handle_connect_models(5, "openai".to_string(), Err("bad key".to_string()));
         assert!(matches!(
             app.connect,
             Some(ConnectStep::ModelList {
@@ -2924,6 +3056,207 @@ mod tests {
             input: input.to_string(),
             error: None,
         }
+    }
+
+    /// Render the whole app to an off-screen terminal and return it as text, so modal rendering
+    /// can be asserted without a real terminal.
+    fn render(app: &mut App, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn models_modal_renders_its_own_header() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models = Some(models_list_step(vec!["gpt-4o".to_string()], false));
+        let screen = render(&mut app, 80, 20);
+        assert!(screen.contains("Select a model"), "{screen}");
+        assert!(screen.contains("gpt-4o"), "{screen}");
+    }
+
+    #[test]
+    fn a_long_model_list_keeps_the_selection_and_footer_on_screen() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        let models: Vec<String> = (0..80).map(|i| format!("model-{i:03}")).collect();
+        app.models = Some(ModelsStep::ModelList {
+            provider: "openai".to_string(),
+            models,
+            selected: 60,
+            fetching: false,
+        });
+
+        let screen = render(&mut app, 80, 24);
+
+        assert!(
+            screen.contains("> model-060"),
+            "the highlighted row scrolled off screen:\n{screen}"
+        );
+        assert!(
+            screen.contains("Enter: select"),
+            "the footer scrolled off screen:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn the_offline_modal_names_the_actual_reason() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.provider_info.offline = Some(OfflineReason::NamedProviderMissingKey {
+            selector: "openai".to_string(),
+            key: "OPENAI_API_KEY".to_string(),
+        });
+        app.models = Some(ModelsStep::Offline);
+        let screen = render(&mut app, 80, 20);
+        assert!(screen.contains("OPENAI_API_KEY"), "{screen}");
+    }
+
+    #[test]
+    fn a_popup_on_a_tiny_terminal_does_not_panic() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models = Some(models_list_step(vec!["gpt-4o".to_string()], false));
+        for (w, h) in [(4u16, 3u16), (10, 4), (80, 5)] {
+            let _ = render(&mut app, w, h);
+        }
+    }
+
+    #[test]
+    fn models_fetch_result_is_ignored_when_the_provider_does_not_match() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_models_fetched(5, "anthropic".to_string(), Ok(vec!["claude".to_string()]));
+        assert!(
+            matches!(&app.models, Some(ModelsStep::ModelList { fetching: true, models, .. }) if models.is_empty()),
+            "a result for another provider must not populate this modal"
+        );
+    }
+
+    #[test]
+    fn models_fetch_result_does_not_clobber_manual_entry() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.models = Some(ModelsStep::Manual {
+            provider: "openai".to_string(),
+            input: "gpt-4".to_string(),
+            error: None,
+        });
+        app.handle_models_fetched(5, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+        assert!(
+            matches!(&app.models, Some(ModelsStep::Manual { input, .. }) if input == "gpt-4"),
+            "a late result must not discard what the user typed"
+        );
+    }
+
+    #[test]
+    fn an_empty_but_successful_fetch_stays_a_list() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_models_fetched(5, "openai".to_string(), Ok(vec![]));
+        assert!(
+            matches!(
+                &app.models,
+                Some(ModelsStep::ModelList {
+                    fetching: false,
+                    models,
+                    ..
+                }) if models.is_empty()
+            ),
+            "an empty list is not a fetch failure and must not route to manual entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn models_command_opens_a_fetching_list_for_the_active_provider() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        // `local` resolves no key, so the spawned fetch fails offline instead of hitting network.
+        app.provider_info.id = "local".to_string();
+        app.run_command("/models").await;
+        assert!(
+            matches!(
+                &app.models,
+                Some(ModelsStep::ModelList { provider, fetching: true, .. }) if provider == "local"
+            ),
+            "expected a fetching list scoped to provider_info.id, got {:?}",
+            app.models
+        );
+        assert_ne!(app.models_nonce, 0, "the fetch nonce must be bumped");
+    }
+
+    #[test]
+    fn closing_the_modal_returns_to_the_mode_it_was_opened_from() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Engine;
+        app.models = Some(models_list_step(vec!["gpt-4o".to_string()], false));
+        app.handle_models_key(key(KeyCode::Esc));
+        assert!(app.mode == Mode::Engine, "close must restore models_return");
+    }
+
+    #[test]
+    fn losing_the_session_dismisses_an_open_models_modal() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        app.models = Some(models_list_step(vec!["gpt-4o".to_string()], false));
+
+        app.handle_server(ServerMessage::Error {
+            code: "ws_closed".to_string(),
+            message: "server closed the connection".to_string(),
+        });
+
+        assert!(app.models.is_none(), "modal must not survive a sign-out");
+        assert!(app.mode == Mode::SignIn);
+    }
+
+    #[test]
+    fn a_failed_save_rolls_back_the_staged_model() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        // A path under a non-directory can never be created, so the write always fails.
+        app.settings_path = std::path::PathBuf::from("/dev/null/nope/config.json");
+        app.provider_info.model = Some("stale-sentinel".to_string());
+        app.models = Some(ModelsStep::Manual {
+            provider: "openai".to_string(),
+            input: "o3".to_string(),
+            error: None,
+        });
+
+        app.handle_models_key(key(KeyCode::Enter));
+
+        assert!(
+            app.settings.models.is_empty(),
+            "a model that failed to save must not linger and be persisted by a later write"
+        );
+        assert!(app.error.is_some(), "the failure must be surfaced");
+        assert_eq!(
+            app.provider_info.model.as_deref(),
+            Some("stale-sentinel"),
+            "a failed save must not activate the model"
+        );
+    }
+
+    #[tokio::test]
+    async fn models_command_error_names_the_models_command() {
+        let mut app = test_app();
+        app.mode = Mode::SignIn;
+        let expected = app.t("status.models_not_connected").to_string();
+        app.run_command("/models").await;
+        assert_eq!(app.error.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
@@ -3059,11 +3392,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_picker_ignores_stale_nonces() {
+    fn handle_models_fetched_ignores_stale_nonces() {
         let mut app = test_app();
         app.models_nonce = 5;
         app.models = Some(models_list_step(vec![], true));
-        app.handle_picker(4, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+        app.handle_models_fetched(4, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
         assert!(matches!(
             &app.models,
             Some(ModelsStep::ModelList { fetching: true, models, .. }) if models.is_empty()
@@ -3071,12 +3404,12 @@ mod tests {
     }
 
     #[test]
-    fn handle_picker_pre_highlights_the_current_model() {
+    fn handle_models_fetched_pre_highlights_the_current_model() {
         let mut app = test_app();
         app.models_nonce = 5;
         app.provider_info.model = Some("o3".to_string());
         app.models = Some(models_list_step(vec![], true));
-        app.handle_picker(
+        app.handle_models_fetched(
             5,
             "openai".to_string(),
             Ok(vec!["gpt-4o".to_string(), "o3".to_string()]),
@@ -3089,12 +3422,12 @@ mod tests {
     }
 
     #[test]
-    fn handle_picker_falls_back_to_the_first_row_when_the_model_is_absent() {
+    fn handle_models_fetched_falls_back_to_the_first_row_when_the_model_is_absent() {
         let mut app = test_app();
         app.models_nonce = 5;
         app.provider_info.model = Some("not-listed".to_string());
         app.models = Some(models_list_step(vec![], true));
-        app.handle_picker(
+        app.handle_models_fetched(
             5,
             "openai".to_string(),
             Ok(vec!["gpt-4o".to_string(), "o3".to_string()]),
@@ -3110,11 +3443,11 @@ mod tests {
     }
 
     #[test]
-    fn handle_picker_falls_back_to_manual_entry_on_a_fetch_error() {
+    fn handle_models_fetched_falls_back_to_manual_entry_on_a_fetch_error() {
         let mut app = test_app();
         app.models_nonce = 5;
         app.models = Some(models_list_step(vec![], true));
-        app.handle_picker(5, "openai".to_string(), Err("bad key".to_string()));
+        app.handle_models_fetched(5, "openai".to_string(), Err("bad key".to_string()));
         assert!(matches!(
             &app.models,
             Some(ModelsStep::Manual {
@@ -3128,8 +3461,7 @@ mod tests {
     #[test]
     fn models_enter_persists_the_highlighted_model_and_rebuilds() {
         let mut app = test_app();
-        app.settings_path = temp_settings_path("models-apply-list");
-        let _ = std::fs::remove_file(&app.settings_path);
+        let _cleanup = TempSettings(app.settings_path.clone());
         app.mode = Mode::Connected;
         app.models_return = Mode::Connected;
         app.models = Some(ModelsStep::ModelList {
@@ -3152,14 +3484,12 @@ mod tests {
         );
         let saved = crate::settings::load_at(&app.settings_path).expect("settings were saved");
         assert_eq!(saved.models.get("openai").map(String::as_str), Some("o3"));
-        let _ = std::fs::remove_file(&app.settings_path);
     }
 
     #[test]
     fn models_manual_enter_persists_the_trimmed_id() {
         let mut app = test_app();
-        app.settings_path = temp_settings_path("models-apply-manual");
-        let _ = std::fs::remove_file(&app.settings_path);
+        let _cleanup = TempSettings(app.settings_path.clone());
         app.mode = Mode::Connected;
         app.models_return = Mode::Connected;
         app.models = Some(ModelsStep::Manual {
@@ -3176,7 +3506,6 @@ mod tests {
             Some("o3-mini")
         );
         assert!(app.settings.provider.is_none());
-        let _ = std::fs::remove_file(&app.settings_path);
     }
 
     /// A successful apply must re-derive `provider_info` from the updated settings. Asserting the
@@ -3185,8 +3514,7 @@ mod tests {
     #[test]
     fn models_apply_rebuilds_the_active_provider() {
         let mut app = test_app();
-        app.settings_path = temp_settings_path("models-apply-rebuild");
-        let _ = std::fs::remove_file(&app.settings_path);
+        let _cleanup = TempSettings(app.settings_path.clone());
         app.mode = Mode::Connected;
         app.models_return = Mode::Connected;
         app.provider_info.model = Some("stale-sentinel".to_string());
@@ -3207,7 +3535,6 @@ mod tests {
             Some("stale-sentinel"),
             "apply must rebuild the active provider"
         );
-        let _ = std::fs::remove_file(&app.settings_path);
     }
 
     #[test]

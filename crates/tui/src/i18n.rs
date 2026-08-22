@@ -271,6 +271,7 @@ const EN: Catalog = &[
     ("connect.footer_key", "Enter: submit · Esc: back"),
     ("connect.footer_models", "Enter: select · Esc: back"),
     ("connect.footer_fetching", "Esc: cancel"),
+    ("connect.no_key", "No API key for {provider}"),
     ("models.title", "Select a model"),
     ("models.offline", "Use /connect to connect a provider first"),
     ("models.manual", "Type a model id, or Esc to close"),
@@ -564,6 +565,7 @@ const ES: Catalog = &[
     ("connect.footer_key", "Enter: enviar · Esc: volver"),
     ("connect.footer_models", "Enter: elegir · Esc: volver"),
     ("connect.footer_fetching", "Esc: cancelar"),
+    ("connect.no_key", "No hay clave de API para {provider}"),
     ("models.title", "Seleccionar un modelo"),
     (
         "models.offline",

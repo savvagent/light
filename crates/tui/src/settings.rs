@@ -19,9 +19,25 @@ pub struct Settings {
     pub models: BTreeMap<String, String>,
 }
 
+/// The settings together with the file they came from, so a caller never has to re-derive the
+/// path (and a test can point it somewhere harmless).
+pub(crate) struct SettingsHandle {
+    pub settings: Settings,
+    pub path: PathBuf,
+}
+
+impl SettingsHandle {
+    /// Load from the default location, falling back to defaults when the file is absent.
+    pub fn load() -> Self {
+        let path = path();
+        let settings = load_at(&path).unwrap_or_default();
+        Self { settings, path }
+    }
+}
+
 /// Location of the settings file: `$XDG_CONFIG_HOME/light-factory/config.json`
 /// (falling back to `~/.config/light-factory/config.json`).
-pub fn path() -> PathBuf {
+pub(crate) fn path() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.config")))
         .unwrap_or_else(|_| ".".to_string());
@@ -30,24 +46,14 @@ pub fn path() -> PathBuf {
         .join("config.json")
 }
 
-/// Load the saved settings, or `None` when the file is missing or malformed.
-pub fn load() -> Option<Settings> {
-    load_at(&path())
-}
-
-/// Persist the settings, creating the config directory as needed.
-pub fn save(settings: &Settings) -> anyhow::Result<()> {
-    save_at(&path(), settings)
-}
-
 /// Load the settings stored at `path`, or `None` when the file is missing or malformed.
-pub fn load_at(path: &Path) -> Option<Settings> {
+pub(crate) fn load_at(path: &Path) -> Option<Settings> {
     let raw = fs::read_to_string(path).ok()?;
     serde_json::from_str::<Settings>(&raw).ok()
 }
 
 /// Persist the settings to `path`, creating the parent directory as needed.
-pub fn save_at(path: &Path, settings: &Settings) -> anyhow::Result<()> {
+pub(crate) fn save_at(path: &Path, settings: &Settings) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
