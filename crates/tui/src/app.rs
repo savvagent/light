@@ -2628,9 +2628,11 @@ async fn fetch_model_list_inner(
     // `{:#}` keeps anyhow's source chain — `to_string` reports only the outermost message, which
     // hides the actual cause (connection refused, DNS failure, TLS error, 401, ...).
     if provider == "ollama" {
-        // Ollama takes no key, so it can never fail for a credential reason.
+        // Ollama takes no key, so no failure of its is repairable by `/connect` or `/key` — not
+        // even a 401 from a proxy in front of it. Forcing the transport class keeps the modal from
+        // suggesting a remedy that does not exist for this provider.
         return list_ollama_models().await.map_err(|e| FetchError {
-            class: classify_fetch_error(&e),
+            class: FetchFailure::Fetch,
             message: format!("{e:#}"),
         });
     }
@@ -2651,7 +2653,7 @@ async fn fetch_model_list_inner(
 }
 
 /// Pure step-transition for the models modal: maps a key press in the current step to the next
-/// step, apply, or close. No network/keyring/terminal state.
+/// step, apply, retry, or close. No network/keyring/terminal state.
 fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModelsTransition {
     match step {
         ModelsStep::Offline | ModelsStep::Credentials { .. } => match key.code {

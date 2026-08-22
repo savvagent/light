@@ -233,7 +233,7 @@ and is kept green.
 | Late result while the user is typing in `Manual` | Unchanged — `handle_models_fetched` only accepts results while the step is `ModelList { fetching: true }`, so typed input is never clobbered. Retry deliberately leaves `Manual`, discarding the partial id; that is the user's explicit action. |
 | Late result while the step is `Credentials` | Dropped by the same `ModelList { fetching: true }` guard, so a slow response cannot replace the credential notice with a list fetched under a key that was already refused. |
 | Session lost mid-fetch | Unchanged — `dismiss_modals` clears the modal and bumps the nonce. `Credentials` needs no special handling. |
-| Ollama (keyless) | Never `MissingKey` (no key is resolved); a refused connection to localhost is `Fetch`, so retry + unverified manual is offered. Correct: `ollama serve` may simply not be running yet. |
+| Ollama (keyless) | **Always `Fetch`**, forced rather than classified. Ollama takes no key, so no failure of its is repairable by `/connect` or `/key` — not even a 401 from a proxy in front of it — and routing one to the credential step would invent a remedy that does not exist for this provider. Retry + unverified manual is correct: `ollama serve` may simply not be running yet. |
 | `unknown provider '<x>'` bail from `list_models_at` | `Fetch`. A programming error surfaced as a retryable failure is the status quo; no new dead end. |
 | Blank manual id + Enter | Unchanged — `models_apply_target` returns `None`, the modal stays open. |
 | `Ctrl+C` in any step | Unchanged — intercepted by `handle_models_key` before the transition function. |
