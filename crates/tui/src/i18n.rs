@@ -242,6 +242,7 @@ const EN: Catalog = &[
     ("help.commands.ask", "/ask <prompt>  completion"),
     ("help.commands.connect", "/connect  connect a provider"),
     ("help.commands.model", "/model <id>  set model"),
+    ("help.commands.models", "/models  pick a model"),
     ("help.commands.key", "/key [provider] [clear]  API key"),
     (
         "help.commands.auth",
@@ -251,6 +252,10 @@ const EN: Catalog = &[
     (
         "status.connect_not_connected",
         "/connect is available after you sign in",
+    ),
+    (
+        "status.models_not_connected",
+        "/models is available after you sign in",
     ),
     ("connect.title", "Connect a provider"),
     ("connect.key_heading", "API Key"),
@@ -266,6 +271,16 @@ const EN: Catalog = &[
     ("connect.footer_key", "Enter: submit · Esc: back"),
     ("connect.footer_models", "Enter: select · Esc: back"),
     ("connect.footer_fetching", "Esc: cancel"),
+    ("connect.no_key", "No API key for {provider}"),
+    ("models.title", "Select a model"),
+    ("models.offline", "Use /connect to connect a provider first"),
+    ("models.manual", "Type a model id, or Esc to close"),
+    (
+        "models.footer_list",
+        "Enter: select · Esc: close · \u{2191}/\u{2193}: navigate",
+    ),
+    ("models.footer_manual", "Enter: save · Esc: close"),
+    ("models.footer_offline", "Esc: close"),
 ];
 
 const ES: Catalog = &[
@@ -515,6 +530,7 @@ const ES: Catalog = &[
     ("help.commands.ask", "/ask <indicación>  completar"),
     ("help.commands.connect", "/connect  conectar un proveedor"),
     ("help.commands.model", "/model <id>  configurar modelo"),
+    ("help.commands.models", "/models  elegir un modelo"),
     (
         "help.commands.key",
         "/key [proveedor] [clear]  clave de API",
@@ -527,6 +543,10 @@ const ES: Catalog = &[
     (
         "status.connect_not_connected",
         "/connect está disponible después de iniciar sesión",
+    ),
+    (
+        "status.models_not_connected",
+        "/models está disponible después de iniciar sesión",
     ),
     ("connect.title", "Conectar un proveedor"),
     ("connect.key_heading", "Clave de API"),
@@ -545,6 +565,22 @@ const ES: Catalog = &[
     ("connect.footer_key", "Enter: enviar · Esc: volver"),
     ("connect.footer_models", "Enter: elegir · Esc: volver"),
     ("connect.footer_fetching", "Esc: cancelar"),
+    ("connect.no_key", "No hay clave de API para {provider}"),
+    ("models.title", "Seleccionar un modelo"),
+    (
+        "models.offline",
+        "Usa /connect para conectar un proveedor primero",
+    ),
+    (
+        "models.manual",
+        "Escribe un id de modelo, o Esc para cerrar",
+    ),
+    (
+        "models.footer_list",
+        "Enter: elegir · Esc: cerrar · \u{2191}/\u{2193}: navegar",
+    ),
+    ("models.footer_manual", "Enter: guardar · Esc: cerrar"),
+    ("models.footer_offline", "Esc: cerrar"),
 ];
 
 fn lookup(catalog: Catalog, key: &str) -> Option<&'static str> {
