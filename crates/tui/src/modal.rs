@@ -5,15 +5,16 @@
 //! time.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use light_factory_providers::{list_models, list_ollama_models};
+use light_factory_providers::{OfflineReason, list_models, list_ollama_models};
 use light_factory_tui::credentials::CredentialStore;
 use light_factory_tui::i18n::{self, Locale};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::text::Line;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::app::takes_key;
+use crate::app::{mask, takes_key};
 
 /// One row of the connect modal's provider list. Self-contained (id + connected flag) so the pure
 /// transition function needs no store/keyring/network state.
@@ -564,17 +565,290 @@ pub(crate) fn help_lines(locale: Locale) -> Vec<String> {
     }
     lines
 }
+/// The slice of `App` a modal needs to render itself, so a view can be built from `&App` without
+/// borrowing the terminal.
+pub(crate) struct ModalContext<'a> {
+    pub(crate) locale: Locale,
+    /// The app-level error line, rendered inside the connect key-entry step.
+    pub(crate) error: Option<&'a str>,
+    /// Why the active provider is offline, rendered by the models modal's offline step.
+    pub(crate) offline: Option<&'a OfflineReason>,
+}
+
+/// A modal rendered as a centered popup over the screen underneath it.
+pub(crate) struct PopupView {
+    pub(crate) title: String,
+    pub(crate) body: Vec<Line<'static>>,
+    pub(crate) footer: String,
+    /// A `body` row that must stay on screen; the body scrolls to keep it visible.
+    pub(crate) focus: Option<usize>,
+}
+
+/// A modal rendered as a full-area pane, replacing the screen underneath it.
+pub(crate) struct FullScreenView {
+    pub(crate) title: String,
+    pub(crate) body: Vec<Line<'static>>,
+}
+
+pub(crate) enum ModalView {
+    Popup(PopupView),
+    FullScreen(FullScreenView),
+}
+
+impl Modal {
+    /// This modal's rendering, decoupled from the frame. The one place a modal's body, footer and
+    /// focus are decided; [`draw_modal`] is the one place they are painted.
+    pub(crate) fn view(&self, ctx: &ModalContext<'_>) -> ModalView {
+        match self {
+            Modal::Help => ModalView::FullScreen(FullScreenView {
+                title: i18n::t(ctx.locale, "title.help").to_string(),
+                body: help_lines(ctx.locale).into_iter().map(Line::from).collect(),
+            }),
+            Modal::Connect(step) => ModalView::Popup(connect_view(step, ctx)),
+            Modal::Models(step) => ModalView::Popup(models_view(step, ctx)),
+        }
+    }
+}
+
+/// The connect modal's rendering.
+fn connect_view(step: &ConnectStep, ctx: &ModalContext<'_>) -> PopupView {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let title: String;
+    match step {
+        ConnectStep::ProviderList { rows, selected } => {
+            title = i18n::t(ctx.locale, "connect.title").to_string();
+            for (i, row) in rows.iter().enumerate() {
+                let marker = if i == *selected { "> " } else { "  " };
+                let style = if i == *selected {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                let suffix = if row.connected {
+                    format!(" ({})", i18n::t(ctx.locale, "connect.connected"))
+                } else {
+                    String::new()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{marker}{}{suffix}", row.id),
+                    style,
+                )));
+            }
+        }
+        ConnectStep::KeyEntry {
+            provider, input, ..
+        } => {
+            title = i18n::t(ctx.locale, "connect.key_heading").to_string();
+            lines.push(Line::from(i18n::t_with(
+                ctx.locale,
+                "status.key_enter",
+                &[("provider", provider)],
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                mask(input),
+                Style::default().add_modifier(Modifier::REVERSED),
+            )));
+            if let Some(err) = ctx.error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    err.to_string(),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+        }
+        ConnectStep::ModelList {
+            provider,
+            models,
+            selected,
+            fetching,
+            error,
+            ..
+        } => {
+            title = i18n::t_with(
+                ctx.locale,
+                "connect.models_heading",
+                &[("provider", provider)],
+            );
+            if *fetching {
+                lines.push(Line::from(Span::styled(
+                    i18n::t(ctx.locale, "connect.fetching"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else if let Some(err) = error {
+                lines.push(Line::from(Span::styled(
+                    err.clone(),
+                    Style::default().fg(Color::Red),
+                )));
+            } else if models.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    i18n::t(ctx.locale, "connect.no_models"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                for (i, model) in models.iter().enumerate() {
+                    let marker = if i == *selected { "> " } else { "  " };
+                    let style = if i == *selected {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    };
+                    lines.push(Line::from(Span::styled(format!("{marker}{model}"), style)));
+                }
+            }
+        }
+    }
+
+    let footer = match step {
+        ConnectStep::ProviderList { .. } => i18n::t(ctx.locale, "connect.footer_list"),
+        ConnectStep::KeyEntry { .. } => i18n::t(ctx.locale, "connect.footer_key"),
+        ConnectStep::ModelList { fetching, .. } => {
+            if *fetching {
+                i18n::t(ctx.locale, "connect.footer_fetching")
+            } else {
+                i18n::t(ctx.locale, "connect.footer_models")
+            }
+        }
+    };
+    let focus = match step {
+        ConnectStep::ProviderList { selected, .. } => Some(*selected),
+        ConnectStep::ModelList {
+            selected,
+            fetching: false,
+            models,
+            ..
+        } if !models.is_empty() => Some(*selected),
+        _ => None,
+    };
+    PopupView {
+        title,
+        body: lines,
+        footer: footer.to_string(),
+        focus,
+    }
+}
+
+/// The models modal's rendering.
+fn models_view(step: &ModelsStep, ctx: &ModalContext<'_>) -> PopupView {
+    let title = i18n::t(ctx.locale, "models.title").to_string();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let footer: &str;
+    match step {
+        ModelsStep::Offline => {
+            if let Some(reason) = &ctx.offline {
+                lines.push(Line::from(Span::styled(
+                    crate::provider::offline_notice(ctx.locale, reason),
+                    Style::default().fg(Color::Yellow),
+                )));
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                i18n::t(ctx.locale, "models.offline"),
+                Style::default().fg(Color::DarkGray),
+            )));
+            footer = i18n::t(ctx.locale, "models.footer_offline");
+        }
+        ModelsStep::ModelList {
+            models,
+            selected,
+            fetching,
+            ..
+        } => {
+            if *fetching {
+                lines.push(Line::from(Span::styled(
+                    i18n::t(ctx.locale, "connect.fetching"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+                footer = i18n::t(ctx.locale, "connect.footer_fetching");
+            } else if models.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    i18n::t(ctx.locale, "connect.no_models"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+                // Enter is a no-op with nothing to select, so don't advertise it.
+                footer = i18n::t(ctx.locale, "models.footer_offline");
+            } else {
+                for (i, model) in models.iter().enumerate() {
+                    let marker = if i == *selected { "> " } else { "  " };
+                    let style = if i == *selected {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    };
+                    lines.push(Line::from(Span::styled(format!("{marker}{model}"), style)));
+                }
+                footer = i18n::t(ctx.locale, "models.footer_list");
+            }
+        }
+        ModelsStep::Manual { input, error, .. } => {
+            if let Some(err) = error {
+                lines.push(Line::from(Span::styled(
+                    err.clone(),
+                    Style::default().fg(Color::Red),
+                )));
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                i18n::t(ctx.locale, "models.manual"),
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::from(Span::styled(
+                input.clone(),
+                Style::default().add_modifier(Modifier::REVERSED),
+            )));
+            footer = i18n::t(ctx.locale, "models.footer_manual");
+        }
+    }
+    let focus = match step {
+        ModelsStep::ModelList {
+            selected,
+            fetching: false,
+            models,
+            ..
+        } if !models.is_empty() => Some(*selected),
+        _ => None,
+    };
+    PopupView {
+        title,
+        body: lines,
+        footer: footer.to_string(),
+        focus,
+    }
+}
+
+/// Paint a modal. The single seam every modal's rendering passes through.
+pub(crate) fn draw_modal(frame: &mut Frame, area: Rect, view: ModalView) {
+    match view {
+        ModalView::Popup(view) => draw_popup(frame, area, view),
+        ModalView::FullScreen(view) => draw_full_screen(frame, area, view),
+    }
+}
+
+/// Render a full-area modal pane. Unlike [`draw_popup`] this does not clear behind itself, because
+/// the caller does not draw the screen underneath a modal that covers it.
+fn draw_full_screen(frame: &mut Frame, area: Rect, view: FullScreenView) {
+    let pane = centered_rect(80, 90, area);
+    let paragraph = Paragraph::new(view.body)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", view.title)),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, pane);
+}
+
 /// Render a centered, bordered popup titled `title`, clearing what is underneath. `footer` is
 /// pinned to the bottom so it stays visible, and `focus` names a `body` row that must remain on
 /// screen — the body scrolls to keep it visible when the list is taller than the terminal.
-pub(crate) fn draw_popup(
-    frame: &mut Frame,
-    area: Rect,
-    title: String,
-    body: Vec<Line>,
-    footer: Line,
-    focus: Option<usize>,
-) {
+fn draw_popup(frame: &mut Frame, area: Rect, view: PopupView) {
+    let PopupView {
+        title,
+        body,
+        footer,
+        focus,
+    } = view;
+    let footer = Line::from(Span::styled(footer, Style::default().fg(Color::DarkGray)));
     // Borders take two rows and the pinned footer one.
     const CHROME: u16 = 3;
     let available = area.height.saturating_sub(2);
@@ -1022,6 +1296,12 @@ mod tests {
                 "untranslated key leaked into help body: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn help_lists_the_models_command() {
+        let lines = help_lines(Locale::En);
+        assert!(lines.iter().any(|l| l.contains("/models")));
     }
 
     #[test]

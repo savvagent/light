@@ -32,8 +32,8 @@ use crate::api::{Api, ApiError};
 use crate::browser;
 use crate::config::Config;
 use crate::modal::{
-    ConnectStep, Modal, ModalApply, ModalHost, ModalTransition, ModelsStep, ProviderRow,
-    centered_rect, draw_popup, fetch_model_list, help_lines,
+    ConnectStep, Modal, ModalApply, ModalContext, ModalHost, ModalTransition, ModelsStep,
+    ProviderRow, fetch_model_list,
 };
 use crate::provider::ProviderInfo;
 use crate::session::Session;
@@ -1300,16 +1300,13 @@ impl App {
             }
         }
 
-        if let Some(Modal::Help) = self.modal.current() {
-            self.draw_help(frame, chunks[1]);
-        }
-
-        if let Some(Modal::Connect(_)) = self.modal.current() {
-            self.draw_connect(frame, chunks[1]);
-        }
-
-        if let Some(Modal::Models(_)) = self.modal.current() {
-            self.draw_models(frame, chunks[1]);
+        if let Some(modal) = self.modal.current() {
+            let ctx = ModalContext {
+                locale: self.config.lang,
+                error: self.error.as_deref(),
+                offline: self.provider_info.offline.as_ref(),
+            };
+            crate::modal::draw_modal(frame, chunks[1], modal.view(&ctx));
         }
 
         let hints = if self.command_mode {
@@ -1612,230 +1609,6 @@ impl App {
             .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, area);
     }
-
-    fn draw_help(&self, frame: &mut Frame, area: Rect) {
-        let modal = centered_rect(80, 90, area);
-        let lines: Vec<Line> = help_lines(self.config.lang)
-            .into_iter()
-            .map(Line::from)
-            .collect();
-        let paragraph = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" {} ", self.t("title.help"))),
-            )
-            .wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, modal);
-    }
-
-    fn draw_connect(&self, frame: &mut Frame, area: Rect) {
-        let Some(Modal::Connect(step)) = self.modal.current() else {
-            return;
-        };
-        let mut lines: Vec<Line> = Vec::new();
-        let title: String;
-        match step {
-            ConnectStep::ProviderList { rows, selected } => {
-                title = self.t("connect.title").to_string();
-                for (i, row) in rows.iter().enumerate() {
-                    let marker = if i == *selected { "> " } else { "  " };
-                    let style = if i == *selected {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    };
-                    let suffix = if row.connected {
-                        format!(" ({})", self.t("connect.connected"))
-                    } else {
-                        String::new()
-                    };
-                    lines.push(Line::from(Span::styled(
-                        format!("{marker}{}{suffix}", row.id),
-                        style,
-                    )));
-                }
-            }
-            ConnectStep::KeyEntry {
-                provider, input, ..
-            } => {
-                title = self.t("connect.key_heading").to_string();
-                lines.push(Line::from(
-                    self.t_with("status.key_enter", &[("provider", provider)]),
-                ));
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    mask(input),
-                    Style::default().add_modifier(Modifier::REVERSED),
-                )));
-                if let Some(err) = &self.error {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        err.clone(),
-                        Style::default().fg(Color::Red),
-                    )));
-                }
-            }
-            ConnectStep::ModelList {
-                provider,
-                models,
-                selected,
-                fetching,
-                error,
-                ..
-            } => {
-                title = self.t_with("connect.models_heading", &[("provider", provider)]);
-                if *fetching {
-                    lines.push(Line::from(Span::styled(
-                        self.t("connect.fetching"),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                } else if let Some(err) = error {
-                    lines.push(Line::from(Span::styled(
-                        err.clone(),
-                        Style::default().fg(Color::Red),
-                    )));
-                } else if models.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        self.t("connect.no_models"),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                } else {
-                    for (i, model) in models.iter().enumerate() {
-                        let marker = if i == *selected { "> " } else { "  " };
-                        let style = if i == *selected {
-                            Style::default().fg(Color::Yellow)
-                        } else {
-                            Style::default()
-                        };
-                        lines.push(Line::from(Span::styled(format!("{marker}{model}"), style)));
-                    }
-                }
-            }
-        }
-
-        let footer = match step {
-            ConnectStep::ProviderList { .. } => self.t("connect.footer_list"),
-            ConnectStep::KeyEntry { .. } => self.t("connect.footer_key"),
-            ConnectStep::ModelList { fetching, .. } => {
-                if *fetching {
-                    self.t("connect.footer_fetching")
-                } else {
-                    self.t("connect.footer_models")
-                }
-            }
-        };
-        let focus = match step {
-            ConnectStep::ProviderList { selected, .. } => Some(*selected),
-            ConnectStep::ModelList {
-                selected,
-                fetching: false,
-                models,
-                ..
-            } if !models.is_empty() => Some(*selected),
-            _ => None,
-        };
-        draw_popup(
-            frame,
-            area,
-            title,
-            lines,
-            Line::from(Span::styled(footer, Style::default().fg(Color::DarkGray))),
-            focus,
-        );
-    }
-
-    fn draw_models(&self, frame: &mut Frame, area: Rect) {
-        let Some(Modal::Models(step)) = self.modal.current() else {
-            return;
-        };
-        let title = self.t("models.title").to_string();
-        let mut lines: Vec<Line> = Vec::new();
-        let footer: &str;
-        match step {
-            ModelsStep::Offline => {
-                if let Some(reason) = &self.provider_info.offline {
-                    lines.push(Line::from(Span::styled(
-                        crate::provider::offline_notice(self.config.lang, reason),
-                        Style::default().fg(Color::Yellow),
-                    )));
-                    lines.push(Line::from(""));
-                }
-                lines.push(Line::from(Span::styled(
-                    self.t("models.offline"),
-                    Style::default().fg(Color::DarkGray),
-                )));
-                footer = self.t("models.footer_offline");
-            }
-            ModelsStep::ModelList {
-                models,
-                selected,
-                fetching,
-                ..
-            } => {
-                if *fetching {
-                    lines.push(Line::from(Span::styled(
-                        self.t("connect.fetching"),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                    footer = self.t("connect.footer_fetching");
-                } else if models.is_empty() {
-                    lines.push(Line::from(Span::styled(
-                        self.t("connect.no_models"),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                    // Enter is a no-op with nothing to select, so don't advertise it.
-                    footer = self.t("models.footer_offline");
-                } else {
-                    for (i, model) in models.iter().enumerate() {
-                        let marker = if i == *selected { "> " } else { "  " };
-                        let style = if i == *selected {
-                            Style::default().fg(Color::Yellow)
-                        } else {
-                            Style::default()
-                        };
-                        lines.push(Line::from(Span::styled(format!("{marker}{model}"), style)));
-                    }
-                    footer = self.t("models.footer_list");
-                }
-            }
-            ModelsStep::Manual { input, error, .. } => {
-                if let Some(err) = error {
-                    lines.push(Line::from(Span::styled(
-                        err.clone(),
-                        Style::default().fg(Color::Red),
-                    )));
-                    lines.push(Line::from(""));
-                }
-                lines.push(Line::from(Span::styled(
-                    self.t("models.manual"),
-                    Style::default().fg(Color::DarkGray),
-                )));
-                lines.push(Line::from(Span::styled(
-                    input.clone(),
-                    Style::default().add_modifier(Modifier::REVERSED),
-                )));
-                footer = self.t("models.footer_manual");
-            }
-        }
-        let focus = match step {
-            ModelsStep::ModelList {
-                selected,
-                fetching: false,
-                models,
-                ..
-            } if !models.is_empty() => Some(*selected),
-            _ => None,
-        };
-        draw_popup(
-            frame,
-            area,
-            title,
-            lines,
-            Line::from(Span::styled(footer, Style::default().fg(Color::DarkGray))),
-            focus,
-        );
-    }
 }
 
 /// Run the terminal UI until the user quits.
@@ -2086,8 +1859,8 @@ mod tests {
 
     use super::{
         App, ConnectStep, EngineForward, KeyCommand, Modal, Mode, ModelsStep, UiEvent,
-        engine_approval_key, engine_forward_step, help_lines, mask, parse_ask_command,
-        parse_connect_command, parse_key_command, parse_model_command, parse_models_command,
+        engine_approval_key, engine_forward_step, mask, parse_ask_command, parse_connect_command,
+        parse_key_command, parse_model_command, parse_models_command,
     };
     use crate::config::Config;
     use crate::provider::ProviderInfo;
@@ -2096,7 +1869,6 @@ mod tests {
     use light_factory_protocol::wire::ServerMessage;
     use light_factory_providers::{LocalProvider, OfflineReason, Provider};
     use light_factory_tui::credentials::{CredentialStore, MemStore};
-    use light_factory_tui::i18n::Locale;
     use ratatui::Terminal;
     use tokio::sync::broadcast::error::RecvError;
     use tokio::sync::mpsc;
@@ -2837,12 +2609,6 @@ mod tests {
         app.run_command("/models").await;
         assert_eq!(models_step(&app), Some(&ModelsStep::Offline));
         assert!(app.settings.models.is_empty());
-    }
-
-    #[test]
-    fn help_lists_the_models_command() {
-        let lines = help_lines(Locale::En);
-        assert!(lines.iter().any(|l| l.contains("/models")));
     }
 
     #[test]
