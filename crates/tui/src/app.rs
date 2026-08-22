@@ -32,9 +32,8 @@ use crate::api::{Api, ApiError};
 use crate::browser;
 use crate::config::Config;
 use crate::modal::{
-    ConnectStep, ConnectTransition, ModelsStep, ModelsTransition, ProviderRow, centered_rect,
-    connect_step_next, draw_popup, fetch_model_list, help_lines, models_apply_target,
-    models_step_next,
+    ConnectStep, Modal, ModalApply, ModalHost, ModalTransition, ModelsStep, ProviderRow,
+    centered_rect, draw_popup, fetch_model_list, help_lines,
 };
 use crate::provider::ProviderInfo;
 use crate::session::Session;
@@ -52,11 +51,15 @@ pub enum UiEvent {
     Completion(Result<String, String>),
     Engine(EngineEvent),
     EngineDropped(u64),
+    /// A provider's model list, fetched for the `/connect` modal. `nonce` discards a result that
+    /// outlived the modal that asked for it.
     ConnectModels {
         nonce: u64,
         provider: String,
         result: Result<Vec<String>, String>,
     },
+    /// A provider's model list, fetched for the `/models` modal. Kept separate from
+    /// `ConnectModels` because the two modals render a failure differently.
     ModelsFetched {
         nonce: u64,
         provider: String,
@@ -116,12 +119,7 @@ pub struct App {
     key_input: String,
     key_return: Mode,
     help_return: Mode,
-    connect: Option<ConnectStep>,
-    connect_return: Mode,
-    connect_nonce: u64,
-    models: Option<ModelsStep>,
-    models_return: Mode,
-    models_nonce: u64,
+    modal: ModalHost,
     engine: Option<Engine>,
     engine_session: Option<SessionId>,
     engine_forward_task: Option<tokio::task::JoinHandle<()>>,
@@ -175,12 +173,7 @@ impl App {
             key_input: String::new(),
             key_return: Mode::SignIn,
             help_return: Mode::SignIn,
-            connect: None,
-            connect_return: Mode::Connected,
-            connect_nonce: 0,
-            models: None,
-            models_return: Mode::Connected,
-            models_nonce: 0,
+            modal: ModalHost::default(),
             engine: None,
             engine_session: None,
             engine_forward_task: None,
@@ -213,11 +206,12 @@ impl App {
         if self.mode == Mode::Help {
             return self.handle_help_key(key);
         }
+        if self.modal.is_open() {
+            return self.handle_modal_key(key);
+        }
         if key.code == KeyCode::Char('p')
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && !self.command_mode
-            && self.connect.is_none()
-            && self.models.is_none()
         {
             self.open_help();
             return false;
@@ -230,12 +224,6 @@ impl App {
         }
         if self.mode == Mode::Key {
             return self.handle_key_entry(key);
-        }
-        if self.connect.is_some() {
-            return self.handle_connect_key(key);
-        }
-        if self.models.is_some() {
-            return self.handle_models_key(key);
         }
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
@@ -527,17 +515,9 @@ impl App {
     }
 
     /// Tear down any open modal and invalidate its in-flight fetch. Called when the session goes
-    /// away, so a modal cannot float over the sign-in screen, swallow its keys, or restore a
-    /// stale `Mode::Connected` on Esc.
+    /// away, so a modal cannot float over the sign-in screen or swallow its keys.
     fn dismiss_modals(&mut self) {
-        if self.connect.is_some() {
-            self.connect = None;
-            self.connect_nonce += 1;
-        }
-        if self.models.is_some() {
-            self.models = None;
-            self.models_nonce += 1;
-        }
+        self.modal.close();
     }
 
     /// Persist the settings, surfacing a failure as a user-visible error rather than swallowing
@@ -650,9 +630,20 @@ impl App {
     }
 
     fn enter_connect(&mut self) {
-        self.connect_return = self.mode;
         let rows = self.build_provider_rows();
-        self.connect = Some(ConnectStep::ProviderList { rows, selected: 0 });
+        self.open_modal(
+            Modal::Connect(ConnectStep::ProviderList { rows, selected: 0 }),
+            None,
+        );
+    }
+
+    /// Open `modal`, replacing any other, and start its model-list fetch if it is waiting on one.
+    fn open_modal(&mut self, modal: Modal, key: Option<String>) {
+        let target = modal.fetch_target().map(str::to_string);
+        self.modal.open(modal);
+        if let Some(provider) = target {
+            self.begin_model_fetch(provider, key);
+        }
     }
 
     fn build_provider_rows(&self) -> Vec<ProviderRow> {
@@ -673,81 +664,86 @@ impl App {
             .collect()
     }
 
-    fn close_connect(&mut self) {
-        self.connect_nonce += 1;
-        self.connect = None;
-        self.mode = self.connect_return;
-    }
-
-    fn apply_and_close_connect(&mut self) {
-        let apply = match &self.connect {
-            Some(ConnectStep::ModelList {
-                provider,
-                models,
-                selected,
-                fetching: false,
-                ..
-            }) => models
-                .get(*selected)
-                .map(|model| (provider.clone(), model.clone())),
-            _ => None,
-        };
-        if let Some((provider, model)) = apply {
-            let previous_provider = self.settings.provider.replace(provider.clone());
-            if !self.persist_model(provider, model) {
-                self.settings.provider = previous_provider;
+    /// Commit whatever the open modal selected, then close it. Closing first is the `/models`
+    /// ordering; `persist_model` never touches the modal, so the order is not observable.
+    fn apply_and_close_modal(&mut self) {
+        let apply = self.modal.current().and_then(Modal::apply_target);
+        self.modal.close();
+        match apply {
+            Some(ModalApply::Provider { provider, model }) => {
+                let previous_provider = self.settings.provider.replace(provider.clone());
+                if !self.persist_model(provider, model) {
+                    self.settings.provider = previous_provider;
+                }
             }
+            Some(ModalApply::Model { provider, model }) => {
+                self.persist_model(provider, model);
+            }
+            None => {}
         }
-        self.close_connect();
     }
 
-    fn begin_fetch(&mut self, provider: String, key: Option<String>) {
-        self.connect_nonce += 1;
-        let nonce = self.connect_nonce;
+    /// Fetch a provider's model list off the UI loop for the open modal. The nonce claimed here is
+    /// what makes a result that outlives its modal discardable; the open modal decides which event
+    /// carries the answer back.
+    fn begin_model_fetch(&mut self, provider: String, key: Option<String>) {
+        let nonce = self.modal.next_fetch_nonce();
+        let for_connect = matches!(self.modal.current(), Some(Modal::Connect(_)));
         let events = self.events.clone();
         let store = self.store.clone();
         let lang = self.config.lang;
         tokio::spawn(async move {
             let result = fetch_model_list(&provider, key, store.as_ref(), lang).await;
-            let _ = events.send(UiEvent::ConnectModels {
-                nonce,
-                provider,
-                result,
-            });
+            let event = if for_connect {
+                UiEvent::ConnectModels {
+                    nonce,
+                    provider,
+                    result,
+                }
+            } else {
+                UiEvent::ModelsFetched {
+                    nonce,
+                    provider,
+                    result,
+                }
+            };
+            let _ = events.send(event);
         });
     }
 
+    /// Fill the connect modal's model list, or surface the fetch error inline in it. The nonce
+    /// discards a result that outlived its modal; the provider and step shape discard one the open
+    /// modal has already stepped past.
     fn handle_connect_models(
         &mut self,
         nonce: u64,
         provider: String,
         result: Result<Vec<String>, String>,
     ) {
-        if nonce != self.connect_nonce {
+        if nonce != self.modal.nonce() {
             return;
         }
-        let matches = matches!(
-            &self.connect,
-            Some(ConnectStep::ModelList {
+        if !matches!(
+            self.modal.current(),
+            Some(Modal::Connect(ConnectStep::ModelList {
                 provider: p,
                 fetching: true,
                 ..
-            }) if *p == provider
-        );
-        if !matches {
+            })) if *p == provider
+        ) {
             return;
         }
         let err_msg = result
             .as_ref()
             .err()
             .map(|e| self.t_with("connect.fetch_error", &[("error", e)]));
-        if let Some(ConnectStep::ModelList {
+        if let Some(Modal::Connect(ConnectStep::ModelList {
             models,
             selected,
             fetching,
             error,
             ..
-        }) = &mut self.connect
+        })) = self.modal.current_mut()
         {
             match result {
                 Ok(list) => {
@@ -765,53 +761,40 @@ impl App {
     }
 
     fn enter_models(&mut self) {
-        self.models_return = self.mode;
         let provider = self.provider_info.id.clone();
         if self.provider_info.offline.is_some() {
-            self.models = Some(ModelsStep::Offline);
+            self.open_modal(Modal::Models(ModelsStep::Offline), None);
             return;
         }
-        self.models = Some(ModelsStep::ModelList {
-            provider: provider.clone(),
-            models: vec![],
-            selected: 0,
-            fetching: true,
-        });
-        self.begin_models_fetch(provider);
-    }
-
-    fn begin_models_fetch(&mut self, provider: String) {
-        self.models_nonce += 1;
-        let nonce = self.models_nonce;
-        let events = self.events.clone();
-        let store = self.store.clone();
-        let lang = self.config.lang;
-        tokio::spawn(async move {
-            let result = fetch_model_list(&provider, None, store.as_ref(), lang).await;
-            let _ = events.send(UiEvent::ModelsFetched {
-                nonce,
+        self.open_modal(
+            Modal::Models(ModelsStep::ModelList {
                 provider,
-                result,
-            });
-        });
+                models: vec![],
+                selected: 0,
+                fetching: true,
+            }),
+            None,
+        );
     }
 
+    /// Fill the models modal's list, or fall back to manual entry when the fetch failed. Guarded
+    /// exactly like `handle_connect_models`.
     fn handle_models_fetched(
         &mut self,
         nonce: u64,
         provider: String,
         result: Result<Vec<String>, String>,
     ) {
-        if nonce != self.models_nonce {
+        if nonce != self.modal.nonce() {
             return;
         }
         if !matches!(
-            &self.models,
-            Some(ModelsStep::ModelList {
+            self.modal.current(),
+            Some(Modal::Models(ModelsStep::ModelList {
                 provider: p,
                 fetching: true,
                 ..
-            }) if *p == provider
+            })) if *p == provider
         ) {
             return;
         }
@@ -822,12 +805,12 @@ impl App {
                     .as_ref()
                     .and_then(|m| list.iter().position(|x| x == m))
                     .unwrap_or(0);
-                if let Some(ModelsStep::ModelList {
+                if let Some(Modal::Models(ModelsStep::ModelList {
                     models,
                     selected: sel,
                     fetching,
                     ..
-                }) = &mut self.models
+                })) = self.modal.current_mut()
                 {
                     *models = list;
                     *sel = selected;
@@ -836,67 +819,47 @@ impl App {
             }
             Err(e) => {
                 let err_msg = self.t_with("connect.fetch_error", &[("error", &e)]);
-                self.models = Some(ModelsStep::Manual {
+                self.modal.replace_step(Modal::Models(ModelsStep::Manual {
                     provider,
                     input: String::new(),
                     error: Some(err_msg),
-                });
+                }));
             }
         }
     }
 
-    fn handle_models_key(&mut self, key: KeyEvent) -> bool {
+    /// The single key seam for every modal: Ctrl-C quits, the modal's own pure transition decides
+    /// the rest, and a step that begins waiting on a model list starts exactly one fetch.
+    fn handle_modal_key(&mut self, key: KeyEvent) -> bool {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return true;
         }
-        let Some(step) = self.models.clone() else {
+        // Cloning releases the borrow on `self.modal` so the arms below can take `&mut self`.
+        let Some(current) = self.modal.current().cloned() else {
             return false;
         };
-        let transition = models_step_next(&step, key);
-        match transition {
-            ModelsTransition::Close => self.close_models(),
-            ModelsTransition::Apply => self.apply_and_close_models(),
-            ModelsTransition::Step(next) => self.models = Some(next),
-        }
-        false
-    }
 
-    fn close_models(&mut self) {
-        self.models_nonce += 1;
-        self.models = None;
-        self.mode = self.models_return;
-    }
-
-    fn apply_and_close_models(&mut self) {
-        let apply = self.models.as_ref().and_then(models_apply_target);
-        self.close_models();
-        if let Some((provider, model)) = apply {
-            self.persist_model(provider, model);
-        }
-    }
-
-    fn handle_connect_key(&mut self, key: KeyEvent) -> bool {
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return true;
-        }
-        let Some(step) = self.connect.clone() else {
-            return false;
-        };
-        if matches!(&step, ConnectStep::KeyEntry { input, .. } if input.trim().is_empty())
+        // Blank Enter on the connect key-entry step is a status message, not a transition.
+        if matches!(&current, Modal::Connect(ConnectStep::KeyEntry { input, .. })
+            if input.trim().is_empty())
             && key.code == KeyCode::Enter
         {
             self.status = self.t("status.key_empty").to_string();
             return false;
         }
-        let transition = connect_step_next(&step, key);
 
+        let transition = current.next(key);
+
+        // Storing the typed key needs `self.store`, so it cannot live in the pure transition.
         let mut fetch_key = None;
         if let (
-            ConnectStep::KeyEntry {
+            Modal::Connect(ConnectStep::KeyEntry {
                 provider, input, ..
-            },
-            ConnectTransition::Step(ConnectStep::ModelList { from_key: true, .. }),
-        ) = (&step, &transition)
+            }),
+            ModalTransition::Step(Modal::Connect(ConnectStep::ModelList {
+                from_key: true, ..
+            })),
+        ) = (&current, &transition)
         {
             let key_value = input.trim().to_string();
             if let Err(e) = self.store.set(provider, &key_value) {
@@ -910,18 +873,16 @@ impl App {
             fetch_key = Some(key_value);
         }
 
+        let before = current.fetch_target().map(str::to_string);
         match transition {
-            ConnectTransition::Close => self.apply_and_close_connect(),
-            ConnectTransition::Step(next) => {
-                if let ConnectStep::ModelList {
-                    provider,
-                    fetching: true,
-                    ..
-                } = &next
-                {
-                    self.begin_fetch(provider.clone(), fetch_key);
+            ModalTransition::Close => self.modal.close(),
+            ModalTransition::Apply => self.apply_and_close_modal(),
+            ModalTransition::Step(next) => {
+                let after = next.fetch_target().map(str::to_string);
+                self.modal.replace_step(next);
+                if let Some(provider) = after.filter(|a| Some(a) != before.as_ref()) {
+                    self.begin_model_fetch(provider, fetch_key);
                 }
-                self.connect = Some(next);
             }
         }
         false
@@ -1363,11 +1324,11 @@ impl App {
             Mode::Help => self.draw_help(frame, chunks[1]),
         }
 
-        if self.connect.is_some() {
+        if let Some(Modal::Connect(_)) = self.modal.current() {
             self.draw_connect(frame, chunks[1]);
         }
 
-        if self.models.is_some() {
+        if let Some(Modal::Models(_)) = self.modal.current() {
             self.draw_models(frame, chunks[1]);
         }
 
@@ -1689,7 +1650,7 @@ impl App {
     }
 
     fn draw_connect(&self, frame: &mut Frame, area: Rect) {
-        let Some(step) = &self.connect else {
+        let Some(Modal::Connect(step)) = self.modal.current() else {
             return;
         };
         let mut lines: Vec<Line> = Vec::new();
@@ -1805,7 +1766,7 @@ impl App {
     }
 
     fn draw_models(&self, frame: &mut Frame, area: Rect) {
-        let Some(step) = &self.models else {
+        let Some(Modal::Models(step)) = self.modal.current() else {
             return;
         };
         let title = self.t("models.title").to_string();
@@ -2144,7 +2105,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{
-        App, ConnectStep, EngineForward, KeyCommand, Mode, ModelsStep, UiEvent,
+        App, ConnectStep, EngineForward, KeyCommand, Modal, Mode, ModelsStep, UiEvent,
         engine_approval_key, engine_forward_step, help_lines, mask, parse_ask_command,
         parse_connect_command, parse_key_command, parse_model_command, parse_models_command,
     };
@@ -2226,6 +2187,29 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Open a modal directly on the host, bypassing `App::open_modal` (which would spawn a fetch
+    /// outside a runtime), and return the nonce a fetch started for it would carry.
+    fn open(app: &mut App, modal: Modal) -> u64 {
+        app.modal.open(modal);
+        app.modal.nonce()
+    }
+
+    /// The open connect step, for tests that assert on it.
+    fn connect_step(app: &App) -> Option<&ConnectStep> {
+        match app.modal.current() {
+            Some(Modal::Connect(step)) => Some(step),
+            _ => None,
+        }
+    }
+
+    /// The open models step, for tests that assert on it.
+    fn models_step(app: &App) -> Option<&ModelsStep> {
+        match app.modal.current() {
+            Some(Modal::Models(step)) => Some(step),
+            _ => None,
+        }
     }
 
     #[test]
@@ -2312,11 +2296,14 @@ mod tests {
     #[test]
     fn handle_connect_models_ignores_stale_nonces() {
         let mut app = test_app();
-        app.connect_nonce = 5;
-        app.connect = Some(model_list_step(vec![], true));
-        app.handle_connect_models(4, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+        let nonce = open(&mut app, Modal::Connect(model_list_step(vec![], true)));
+        app.handle_connect_models(
+            nonce - 1,
+            "openai".to_string(),
+            Ok(vec!["gpt-4o".to_string()]),
+        );
         assert!(matches!(
-            app.connect,
+            connect_step(&app),
             Some(ConnectStep::ModelList {
                 fetching: true,
                 models,
@@ -2328,32 +2315,30 @@ mod tests {
     #[test]
     fn handle_connect_models_fills_models_for_a_matching_nonce() {
         let mut app = test_app();
-        app.connect_nonce = 5;
-        app.connect = Some(model_list_step(vec![], true));
+        let nonce = open(&mut app, Modal::Connect(model_list_step(vec![], true)));
         app.handle_connect_models(
-            5,
+            nonce,
             "openai".to_string(),
             Ok(vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]),
         );
         assert!(matches!(
-            app.connect,
+            connect_step(&app),
             Some(ConnectStep::ModelList {
                 fetching: false,
                 error: None,
                 models,
                 ..
-            }) if models == vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]
+            }) if *models == vec!["gpt-4o".to_string(), "gpt-4o-mini".to_string()]
         ));
     }
 
     #[test]
     fn handle_connect_models_surfaces_a_fetch_error() {
         let mut app = test_app();
-        app.connect_nonce = 5;
-        app.connect = Some(model_list_step(vec![], true));
-        app.handle_connect_models(5, "openai".to_string(), Err("bad key".to_string()));
+        let nonce = open(&mut app, Modal::Connect(model_list_step(vec![], true)));
+        app.handle_connect_models(nonce, "openai".to_string(), Err("bad key".to_string()));
         assert!(matches!(
-            app.connect,
+            connect_step(&app),
             Some(ConnectStep::ModelList {
                 fetching: false,
                 error: Some(_),
@@ -2399,7 +2384,10 @@ mod tests {
     fn models_modal_renders_its_own_header() {
         let mut app = test_app();
         app.mode = Mode::Connected;
-        app.models = Some(models_list_step(vec!["gpt-4o".to_string()], false));
+        open(
+            &mut app,
+            Modal::Models(models_list_step(vec!["gpt-4o".to_string()], false)),
+        );
         let screen = render(&mut app, 80, 20);
         assert!(screen.contains("Select a model"), "{screen}");
         assert!(screen.contains("gpt-4o"), "{screen}");
@@ -2410,12 +2398,15 @@ mod tests {
         let mut app = test_app();
         app.mode = Mode::Connected;
         let models: Vec<String> = (0..80).map(|i| format!("model-{i:03}")).collect();
-        app.models = Some(ModelsStep::ModelList {
-            provider: "openai".to_string(),
-            models,
-            selected: 60,
-            fetching: false,
-        });
+        open(
+            &mut app,
+            Modal::Models(ModelsStep::ModelList {
+                provider: "openai".to_string(),
+                models,
+                selected: 60,
+                fetching: false,
+            }),
+        );
 
         let screen = render(&mut app, 80, 24);
 
@@ -2433,7 +2424,7 @@ mod tests {
     fn an_empty_list_does_not_advertise_enter() {
         let mut app = test_app();
         app.mode = Mode::Connected;
-        app.models = Some(models_list_step(vec![], false));
+        open(&mut app, Modal::Models(models_list_step(vec![], false)));
         let screen = render(&mut app, 80, 20);
         assert!(
             !screen.contains("Enter: select"),
@@ -2450,7 +2441,7 @@ mod tests {
             selector: "openai".to_string(),
             key: "OPENAI_API_KEY".to_string(),
         });
-        app.models = Some(ModelsStep::Offline);
+        open(&mut app, Modal::Models(ModelsStep::Offline));
         let screen = render(&mut app, 80, 20);
         assert!(screen.contains("OPENAI_API_KEY"), "{screen}");
     }
@@ -2459,7 +2450,10 @@ mod tests {
     fn a_popup_on_a_tiny_terminal_does_not_panic() {
         let mut app = test_app();
         app.mode = Mode::Connected;
-        app.models = Some(models_list_step(vec!["gpt-4o".to_string()], false));
+        open(
+            &mut app,
+            Modal::Models(models_list_step(vec!["gpt-4o".to_string()], false)),
+        );
         for (w, h) in [(4u16, 3u16), (10, 4), (80, 5)] {
             let _ = render(&mut app, w, h);
         }
@@ -2468,11 +2462,14 @@ mod tests {
     #[test]
     fn models_fetch_result_is_ignored_when_the_provider_does_not_match() {
         let mut app = test_app();
-        app.models_nonce = 5;
-        app.models = Some(models_list_step(vec![], true));
-        app.handle_models_fetched(5, "anthropic".to_string(), Ok(vec!["claude".to_string()]));
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.handle_models_fetched(
+            nonce,
+            "anthropic".to_string(),
+            Ok(vec!["claude".to_string()]),
+        );
         assert!(
-            matches!(&app.models, Some(ModelsStep::ModelList { fetching: true, models, .. }) if models.is_empty()),
+            matches!(models_step(&app), Some(ModelsStep::ModelList { fetching: true, models, .. }) if models.is_empty()),
             "a result for another provider must not populate this modal"
         );
     }
@@ -2480,15 +2477,21 @@ mod tests {
     #[test]
     fn models_fetch_result_does_not_clobber_manual_entry() {
         let mut app = test_app();
-        app.models_nonce = 5;
-        app.models = Some(ModelsStep::Manual {
-            provider: "openai".to_string(),
-            input: "gpt-4".to_string(),
-            error: None,
-        });
-        app.handle_models_fetched(5, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+        open(
+            &mut app,
+            Modal::Models(ModelsStep::Manual {
+                provider: "openai".to_string(),
+                input: "gpt-4".to_string(),
+                error: None,
+            }),
+        );
+        app.handle_models_fetched(
+            app.modal.nonce(),
+            "openai".to_string(),
+            Ok(vec!["gpt-4o".to_string()]),
+        );
         assert!(
-            matches!(&app.models, Some(ModelsStep::Manual { input, .. }) if input == "gpt-4"),
+            matches!(models_step(&app), Some(ModelsStep::Manual { input, .. }) if input == "gpt-4"),
             "a late result must not discard what the user typed"
         );
     }
@@ -2496,12 +2499,11 @@ mod tests {
     #[test]
     fn an_empty_but_successful_fetch_stays_a_list() {
         let mut app = test_app();
-        app.models_nonce = 5;
-        app.models = Some(models_list_step(vec![], true));
-        app.handle_models_fetched(5, "openai".to_string(), Ok(vec![]));
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.handle_models_fetched(nonce, "openai".to_string(), Ok(vec![]));
         assert!(
             matches!(
-                &app.models,
+                models_step(&app),
                 Some(ModelsStep::ModelList {
                     fetching: false,
                     models,
@@ -2521,38 +2523,49 @@ mod tests {
         app.run_command("/models").await;
         assert!(
             matches!(
-                &app.models,
+                models_step(&app),
                 Some(ModelsStep::ModelList { provider, fetching: true, .. }) if provider == "local"
             ),
             "expected a fetching list scoped to provider_info.id, got {:?}",
-            app.models
+            models_step(&app)
         );
-        assert_ne!(app.models_nonce, 0, "the fetch nonce must be bumped");
+        assert_ne!(app.modal.nonce(), 0, "the fetch nonce must be bumped");
     }
 
     #[test]
     fn closing_the_modal_returns_to_the_mode_it_was_opened_from() {
         let mut app = test_app();
-        app.mode = Mode::Connected;
-        app.models_return = Mode::Engine;
-        app.models = Some(models_list_step(vec!["gpt-4o".to_string()], false));
-        app.handle_models_key(key(KeyCode::Esc));
-        assert!(app.mode == Mode::Engine, "close must restore models_return");
+        app.mode = Mode::Engine;
+        open(
+            &mut app,
+            Modal::Models(models_list_step(vec!["gpt-4o".to_string()], false)),
+        );
+        app.handle_modal_key(key(KeyCode::Esc));
+        assert!(app.modal.current().is_none());
+        assert!(
+            app.mode == Mode::Engine,
+            "a modal never disturbs the mode it is opened over, so there is nothing to restore"
+        );
     }
 
     #[test]
     fn losing_the_session_dismisses_an_open_models_modal() {
         let mut app = test_app();
         app.mode = Mode::Connected;
-        app.models_return = Mode::Connected;
-        app.models = Some(models_list_step(vec!["gpt-4o".to_string()], false));
+        open(
+            &mut app,
+            Modal::Models(models_list_step(vec!["gpt-4o".to_string()], false)),
+        );
 
         app.handle_server(ServerMessage::Error {
             code: "ws_closed".to_string(),
             message: "server closed the connection".to_string(),
         });
 
-        assert!(app.models.is_none(), "modal must not survive a sign-out");
+        assert!(
+            app.modal.current().is_none(),
+            "modal must not survive a sign-out"
+        );
         assert!(app.mode == Mode::SignIn);
     }
 
@@ -2560,17 +2573,19 @@ mod tests {
     fn a_failed_save_rolls_back_the_staged_model() {
         let mut app = test_app();
         app.mode = Mode::Connected;
-        app.models_return = Mode::Connected;
         // A path under a non-directory can never be created, so the write always fails.
         app.settings_path = std::path::PathBuf::from("/dev/null/nope/config.json");
         app.provider_info.model = Some("stale-sentinel".to_string());
-        app.models = Some(ModelsStep::Manual {
-            provider: "openai".to_string(),
-            input: "o3".to_string(),
-            error: None,
-        });
+        open(
+            &mut app,
+            Modal::Models(ModelsStep::Manual {
+                provider: "openai".to_string(),
+                input: "o3".to_string(),
+                error: None,
+            }),
+        );
 
-        app.handle_models_key(key(KeyCode::Enter));
+        app.handle_modal_key(key(KeyCode::Enter));
 
         assert!(
             app.settings.models.is_empty(),
@@ -2605,11 +2620,14 @@ mod tests {
     #[test]
     fn handle_models_fetched_ignores_stale_nonces() {
         let mut app = test_app();
-        app.models_nonce = 5;
-        app.models = Some(models_list_step(vec![], true));
-        app.handle_models_fetched(4, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.handle_models_fetched(
+            nonce - 1,
+            "openai".to_string(),
+            Ok(vec!["gpt-4o".to_string()]),
+        );
         assert!(matches!(
-            &app.models,
+            models_step(&app),
             Some(ModelsStep::ModelList { fetching: true, models, .. }) if models.is_empty()
         ));
     }
@@ -2617,16 +2635,15 @@ mod tests {
     #[test]
     fn handle_models_fetched_pre_highlights_the_current_model() {
         let mut app = test_app();
-        app.models_nonce = 5;
         app.provider_info.model = Some("o3".to_string());
-        app.models = Some(models_list_step(vec![], true));
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
         app.handle_models_fetched(
-            5,
+            nonce,
             "openai".to_string(),
             Ok(vec!["gpt-4o".to_string(), "o3".to_string()]),
         );
         assert!(matches!(
-            &app.models,
+            models_step(&app),
             Some(ModelsStep::ModelList { fetching: false, selected: 1, models, .. })
                 if models.len() == 2
         ));
@@ -2635,16 +2652,15 @@ mod tests {
     #[test]
     fn handle_models_fetched_falls_back_to_the_first_row_when_the_model_is_absent() {
         let mut app = test_app();
-        app.models_nonce = 5;
         app.provider_info.model = Some("not-listed".to_string());
-        app.models = Some(models_list_step(vec![], true));
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
         app.handle_models_fetched(
-            5,
+            nonce,
             "openai".to_string(),
             Ok(vec!["gpt-4o".to_string(), "o3".to_string()]),
         );
         assert!(matches!(
-            &app.models,
+            models_step(&app),
             Some(ModelsStep::ModelList {
                 fetching: false,
                 selected: 0,
@@ -2656,11 +2672,10 @@ mod tests {
     #[test]
     fn handle_models_fetched_falls_back_to_manual_entry_on_a_fetch_error() {
         let mut app = test_app();
-        app.models_nonce = 5;
-        app.models = Some(models_list_step(vec![], true));
-        app.handle_models_fetched(5, "openai".to_string(), Err("bad key".to_string()));
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.handle_models_fetched(nonce, "openai".to_string(), Err("bad key".to_string()));
         assert!(matches!(
-            &app.models,
+            models_step(&app),
             Some(ModelsStep::Manual {
                 provider,
                 input,
@@ -2674,17 +2689,19 @@ mod tests {
         let mut app = test_app();
         let _cleanup = TempSettings(app.settings_path.clone());
         app.mode = Mode::Connected;
-        app.models_return = Mode::Connected;
-        app.models = Some(ModelsStep::ModelList {
-            provider: "openai".to_string(),
-            models: vec!["gpt-4o".to_string(), "o3".to_string()],
-            selected: 1,
-            fetching: false,
-        });
+        open(
+            &mut app,
+            Modal::Models(ModelsStep::ModelList {
+                provider: "openai".to_string(),
+                models: vec!["gpt-4o".to_string(), "o3".to_string()],
+                selected: 1,
+                fetching: false,
+            }),
+        );
 
-        app.handle_models_key(key(KeyCode::Enter));
+        app.handle_modal_key(key(KeyCode::Enter));
 
-        assert!(app.models.is_none());
+        assert!(app.modal.current().is_none());
         assert_eq!(
             app.settings.models.get("openai").map(String::as_str),
             Some("o3")
@@ -2702,16 +2719,18 @@ mod tests {
         let mut app = test_app();
         let _cleanup = TempSettings(app.settings_path.clone());
         app.mode = Mode::Connected;
-        app.models_return = Mode::Connected;
-        app.models = Some(ModelsStep::Manual {
-            provider: "openai".to_string(),
-            input: "  o3-mini  ".to_string(),
-            error: None,
-        });
+        open(
+            &mut app,
+            Modal::Models(ModelsStep::Manual {
+                provider: "openai".to_string(),
+                input: "  o3-mini  ".to_string(),
+                error: None,
+            }),
+        );
 
-        app.handle_models_key(key(KeyCode::Enter));
+        app.handle_modal_key(key(KeyCode::Enter));
 
-        assert!(app.models.is_none());
+        assert!(app.modal.current().is_none());
         assert_eq!(
             app.settings.models.get("openai").map(String::as_str),
             Some("o3-mini")
@@ -2727,15 +2746,17 @@ mod tests {
         let mut app = test_app();
         let _cleanup = TempSettings(app.settings_path.clone());
         app.mode = Mode::Connected;
-        app.models_return = Mode::Connected;
         app.provider_info.model = Some("stale-sentinel".to_string());
-        app.models = Some(ModelsStep::Manual {
-            provider: "ollama".to_string(),
-            input: "llama3".to_string(),
-            error: None,
-        });
+        open(
+            &mut app,
+            Modal::Models(ModelsStep::Manual {
+                provider: "ollama".to_string(),
+                input: "llama3".to_string(),
+                error: None,
+            }),
+        );
 
-        app.handle_models_key(key(KeyCode::Enter));
+        app.handle_modal_key(key(KeyCode::Enter));
 
         assert_eq!(
             app.settings.models.get("ollama").map(String::as_str),
@@ -2752,10 +2773,12 @@ mod tests {
     fn models_esc_closes_without_touching_settings() {
         let mut app = test_app();
         app.mode = Mode::Connected;
-        app.models_return = Mode::Connected;
-        app.models = Some(models_list_step(vec!["gpt-4o".to_string()], false));
-        app.handle_models_key(key(KeyCode::Esc));
-        assert!(app.models.is_none());
+        open(
+            &mut app,
+            Modal::Models(models_list_step(vec!["gpt-4o".to_string()], false)),
+        );
+        app.handle_modal_key(key(KeyCode::Esc));
+        assert!(app.modal.current().is_none());
         assert!(app.mode == Mode::Connected);
         assert!(app.settings.models.is_empty());
     }
@@ -2764,23 +2787,57 @@ mod tests {
     fn models_blank_manual_enter_stays_open_without_touching_settings() {
         let mut app = test_app();
         app.mode = Mode::Connected;
-        app.models_return = Mode::Connected;
-        app.models = Some(models_manual_step("   "));
-        app.handle_models_key(key(KeyCode::Enter));
-        assert!(matches!(&app.models, Some(ModelsStep::Manual { .. })));
+        open(&mut app, Modal::Models(models_manual_step("   ")));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(matches!(models_step(&app), Some(ModelsStep::Manual { .. })));
         assert!(app.settings.models.is_empty());
+    }
+
+    #[test]
+    fn opening_the_models_modal_replaces_an_open_connect_modal() {
+        let mut app = test_app();
+        open(
+            &mut app,
+            Modal::Connect(ConnectStep::ProviderList {
+                rows: vec![],
+                selected: 0,
+            }),
+        );
+        app.provider_info.offline = Some(OfflineReason::NothingConfigured);
+        app.enter_models();
+        assert!(
+            matches!(app.modal.current(), Some(Modal::Models(_))),
+            "only one modal can be open at a time"
+        );
+    }
+
+    #[test]
+    fn opening_a_second_modal_invalidates_the_first_modals_fetch() {
+        let mut app = test_app();
+        let stale = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.enter_connect();
+        app.handle_models_fetched(stale, "openai".to_string(), Ok(vec!["m".to_string()]));
+        assert!(
+            matches!(
+                app.modal.current(),
+                Some(Modal::Connect(ConnectStep::ProviderList { .. }))
+            ),
+            "a fetch from the replaced modal must not reach the new one"
+        );
     }
 
     #[test]
     fn closing_the_models_modal_invalidates_an_in_flight_fetch() {
         let mut app = test_app();
         app.mode = Mode::Connected;
-        app.models_return = Mode::Connected;
-        app.models_nonce = 5;
-        app.models = Some(models_list_step(vec![], true));
-        app.handle_models_key(key(KeyCode::Esc));
-        assert!(app.models.is_none());
-        assert_ne!(app.models_nonce, 5);
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.handle_modal_key(key(KeyCode::Esc));
+        assert!(app.modal.current().is_none());
+        assert_ne!(
+            app.modal.nonce(),
+            nonce,
+            "the in-flight fetch must be invalidated"
+        );
     }
 
     #[tokio::test]
@@ -2788,7 +2845,7 @@ mod tests {
         let mut app = test_app();
         app.mode = Mode::SignIn;
         app.run_command("/models").await;
-        assert!(app.models.is_none());
+        assert!(app.modal.current().is_none());
         assert!(app.error.is_some());
     }
 
@@ -2798,7 +2855,7 @@ mod tests {
         app.mode = Mode::Connected;
         app.provider_info.offline = Some(OfflineReason::NothingConfigured);
         app.run_command("/models").await;
-        assert_eq!(app.models, Some(ModelsStep::Offline));
+        assert_eq!(models_step(&app), Some(&ModelsStep::Offline));
         assert!(app.settings.models.is_empty());
     }
 
@@ -2811,25 +2868,37 @@ mod tests {
     #[test]
     fn handle_connect_key_blank_key_stays_on_key_entry() {
         let mut app = test_app();
-        app.connect = Some(ConnectStep::KeyEntry {
-            rows: vec![],
-            provider: "openai".to_string(),
-            input: "  ".to_string(),
-        });
-        app.handle_connect_key(key(KeyCode::Enter));
-        assert!(matches!(app.connect, Some(ConnectStep::KeyEntry { .. })));
+        open(
+            &mut app,
+            Modal::Connect(ConnectStep::KeyEntry {
+                rows: vec![],
+                provider: "openai".to_string(),
+                input: "  ".to_string(),
+            }),
+        );
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(matches!(
+            connect_step(&app),
+            Some(ConnectStep::KeyEntry { .. })
+        ));
     }
 
     #[test]
     fn handle_connect_key_keyring_failure_sets_error_and_stays() {
         let mut app = test_app_with_store(Arc::new(FailingStore));
-        app.connect = Some(ConnectStep::KeyEntry {
-            rows: vec![],
-            provider: "openai".to_string(),
-            input: "sk-x".to_string(),
-        });
-        app.handle_connect_key(key(KeyCode::Enter));
-        assert!(matches!(app.connect, Some(ConnectStep::KeyEntry { .. })));
+        open(
+            &mut app,
+            Modal::Connect(ConnectStep::KeyEntry {
+                rows: vec![],
+                provider: "openai".to_string(),
+                input: "sk-x".to_string(),
+            }),
+        );
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(matches!(
+            connect_step(&app),
+            Some(ConnectStep::KeyEntry { .. })
+        ));
         assert!(app.error.is_some());
     }
 

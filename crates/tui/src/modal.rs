@@ -88,13 +88,6 @@ impl std::fmt::Debug for ConnectStep {
     }
 }
 
-/// The result of stepping the connect modal: advance to a new [`ConnectStep`], or close.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ConnectTransition {
-    Step(ConnectStep),
-    Close,
-}
-
 /// The `/models` modal's step.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum ModelsStep {
@@ -112,14 +105,138 @@ pub(crate) enum ModelsStep {
     Offline,
 }
 
-/// The result of stepping the models modal: advance to a new [`ModelsStep`], apply the
-/// selection, or close.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ModelsTransition {
-    Step(ModelsStep),
-    Close,
-    Apply,
+/// The one overlay that owns the keyboard, if any.
+///
+/// One variant per modal is what makes "two modals open at once" unrepresentable: `App` holds a
+/// single [`ModalHost`], not one `Option` per modal.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Modal {
+    Connect(ConnectStep),
+    Models(ModelsStep),
 }
+
+/// The result of stepping any modal: advance to a new state, commit its selection, or close.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModalTransition {
+    Step(Modal),
+    Apply,
+    Close,
+}
+
+/// What a [`ModalTransition::Apply`] commits. The two modals apply different things: `/connect`
+/// adopts a new preferred provider, `/models` only re-pins the model of the provider already
+/// active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModalApply {
+    /// `/connect`: adopt `provider` as the preferred provider and pin `model` to it.
+    Provider { provider: String, model: String },
+    /// `/models`: pin `model` to the already-active `provider`.
+    Model { provider: String, model: String },
+}
+
+impl Modal {
+    /// Pure: maps a key press in the current state to the next state, apply, or close. No keyring,
+    /// terminal, or network state.
+    pub(crate) fn next(&self, key: KeyEvent) -> ModalTransition {
+        match self {
+            Modal::Connect(step) => connect_step_next(step, key),
+            Modal::Models(step) => models_step_next(step, key),
+        }
+    }
+
+    /// What [`ModalTransition::Apply`] should commit, or `None` when this state carries no usable
+    /// selection (still fetching, an empty list, or a blank manual entry).
+    pub(crate) fn apply_target(&self) -> Option<ModalApply> {
+        match self {
+            Modal::Connect(ConnectStep::ModelList {
+                provider,
+                models,
+                selected,
+                fetching: false,
+                ..
+            }) => models.get(*selected).map(|model| ModalApply::Provider {
+                provider: provider.clone(),
+                model: model.clone(),
+            }),
+            Modal::Connect(_) => None,
+            Modal::Models(step) => models_apply_target(step)
+                .map(|(provider, model)| ModalApply::Model { provider, model }),
+        }
+    }
+
+    /// The provider whose model list this state is waiting on, or `None`. Comparing this across a
+    /// transition is what starts a fetch exactly once, on the step that begins waiting.
+    pub(crate) fn fetch_target(&self) -> Option<&str> {
+        match self {
+            Modal::Connect(ConnectStep::ModelList {
+                provider,
+                fetching: true,
+                ..
+            })
+            | Modal::Models(ModelsStep::ModelList {
+                provider,
+                fetching: true,
+                ..
+            }) => Some(provider.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// Owns the open modal together with the counter that invalidates its in-flight fetch.
+///
+/// The nonce outlives the modal on purpose: closing bumps it so a fetch already in flight is
+/// discarded when it lands. Keeping it here — rather than as a second `App` field beside an
+/// `Option<Modal>` — is what makes "closing invalidates the fetch" impossible to forget at a call
+/// site.
+#[derive(Default)]
+pub(crate) struct ModalHost {
+    open: Option<Modal>,
+    nonce: u64,
+}
+
+impl ModalHost {
+    /// Open `modal`, replacing whatever was open and invalidating its in-flight fetch.
+    pub(crate) fn open(&mut self, modal: Modal) {
+        self.nonce += 1;
+        self.open = Some(modal);
+    }
+
+    /// Close whatever is open and invalidate its in-flight fetch.
+    pub(crate) fn close(&mut self) {
+        if self.open.take().is_some() {
+            self.nonce += 1;
+        }
+    }
+
+    /// Swap the open modal's state without invalidating the fetch it is awaiting.
+    pub(crate) fn replace_step(&mut self, modal: Modal) {
+        self.open = Some(modal);
+    }
+
+    pub(crate) fn current(&self) -> Option<&Modal> {
+        self.open.as_ref()
+    }
+
+    pub(crate) fn current_mut(&mut self) -> Option<&mut Modal> {
+        self.open.as_mut()
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
+    pub(crate) fn nonce(&self) -> u64 {
+        self.nonce
+    }
+
+    /// Claim a nonce for a newly-spawned fetch, invalidating any earlier one.
+    pub(crate) fn next_fetch_nonce(&mut self) -> u64 {
+        self.nonce += 1;
+        self.nonce
+    }
+}
+
 /// Move a list selection up (`-1`) or down (`+1`), wrapping at the ends.
 pub(crate) fn cycle_index(current: usize, len: usize, delta: isize) -> usize {
     if len == 0 {
@@ -138,21 +255,21 @@ pub(crate) fn cycle_index(current: usize, len: usize, delta: isize) -> usize {
 /// Pure step-transition for the connect modal: maps a key press in the current step to the next
 /// step (or close). No keyring, terminal, or network state — the `rows` carried in each step make
 /// "back" navigation total.
-pub(crate) fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ConnectTransition {
+pub(crate) fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ModalTransition {
     match step {
         ConnectStep::ProviderList { rows, selected } => match key.code {
-            KeyCode::Esc => ConnectTransition::Close,
-            KeyCode::Up => ConnectTransition::Step(ConnectStep::ProviderList {
+            KeyCode::Esc => ModalTransition::Close,
+            KeyCode::Up => ModalTransition::Step(Modal::Connect(ConnectStep::ProviderList {
                 rows: rows.clone(),
                 selected: cycle_index(*selected, rows.len(), -1),
-            }),
-            KeyCode::Down => ConnectTransition::Step(ConnectStep::ProviderList {
+            })),
+            KeyCode::Down => ModalTransition::Step(Modal::Connect(ConnectStep::ProviderList {
                 rows: rows.clone(),
                 selected: cycle_index(*selected, rows.len(), 1),
-            }),
+            })),
             KeyCode::Enter => match rows.get(*selected) {
                 Some(row) if row.connected || row.id == "ollama" => {
-                    ConnectTransition::Step(ConnectStep::ModelList {
+                    ModalTransition::Step(Modal::Connect(ConnectStep::ModelList {
                         rows: rows.clone(),
                         provider: row.id.clone(),
                         models: Vec::new(),
@@ -160,28 +277,28 @@ pub(crate) fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ConnectTra
                         fetching: true,
                         error: None,
                         from_key: false,
-                    })
+                    }))
                 }
-                Some(row) => ConnectTransition::Step(ConnectStep::KeyEntry {
+                Some(row) => ModalTransition::Step(Modal::Connect(ConnectStep::KeyEntry {
                     rows: rows.clone(),
                     provider: row.id.clone(),
                     input: String::new(),
-                }),
-                None => ConnectTransition::Step(step.clone()),
+                })),
+                None => ModalTransition::Step(Modal::Connect(step.clone())),
             },
-            _ => ConnectTransition::Step(step.clone()),
+            _ => ModalTransition::Step(Modal::Connect(step.clone())),
         },
         ConnectStep::KeyEntry {
             rows,
             provider,
             input,
         } => match key.code {
-            KeyCode::Esc => ConnectTransition::Step(ConnectStep::ProviderList {
+            KeyCode::Esc => ModalTransition::Step(Modal::Connect(ConnectStep::ProviderList {
                 rows: rows.clone(),
                 selected: rows.iter().position(|r| r.id == *provider).unwrap_or(0),
-            }),
+            })),
             KeyCode::Enter if !input.trim().is_empty() => {
-                ConnectTransition::Step(ConnectStep::ModelList {
+                ModalTransition::Step(Modal::Connect(ConnectStep::ModelList {
                     rows: rows.clone(),
                     provider: provider.clone(),
                     models: Vec::new(),
@@ -189,23 +306,23 @@ pub(crate) fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ConnectTra
                     fetching: true,
                     error: None,
                     from_key: true,
-                })
+                }))
             }
             KeyCode::Backspace => {
                 let mut next = input.clone();
                 next.pop();
-                ConnectTransition::Step(ConnectStep::KeyEntry {
+                ModalTransition::Step(Modal::Connect(ConnectStep::KeyEntry {
                     rows: rows.clone(),
                     provider: provider.clone(),
                     input: next,
-                })
+                }))
             }
-            KeyCode::Char(c) => ConnectTransition::Step(ConnectStep::KeyEntry {
+            KeyCode::Char(c) => ModalTransition::Step(Modal::Connect(ConnectStep::KeyEntry {
                 rows: rows.clone(),
                 provider: provider.clone(),
                 input: format!("{input}{c}"),
-            }),
-            _ => ConnectTransition::Step(step.clone()),
+            })),
+            _ => ModalTransition::Step(Modal::Connect(step.clone())),
         },
         ConnectStep::ModelList {
             rows,
@@ -218,22 +335,22 @@ pub(crate) fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ConnectTra
         } => match key.code {
             KeyCode::Esc => {
                 if !*fetching && takes_key(provider) && (*from_key || error.is_some()) {
-                    ConnectTransition::Step(ConnectStep::KeyEntry {
+                    ModalTransition::Step(Modal::Connect(ConnectStep::KeyEntry {
                         rows: rows.clone(),
                         provider: provider.clone(),
                         input: String::new(),
-                    })
+                    }))
                 } else {
-                    ConnectTransition::Step(ConnectStep::ProviderList {
+                    ModalTransition::Step(Modal::Connect(ConnectStep::ProviderList {
                         rows: rows.clone(),
                         selected: rows.iter().position(|r| r.id == *provider).unwrap_or(0),
-                    })
+                    }))
                 }
             }
-            KeyCode::Enter if !*fetching && !models.is_empty() => ConnectTransition::Close,
+            KeyCode::Enter if !*fetching && !models.is_empty() => ModalTransition::Apply,
             KeyCode::Up | KeyCode::Down => {
                 let delta = if key.code == KeyCode::Up { -1 } else { 1 };
-                ConnectTransition::Step(ConnectStep::ModelList {
+                ModalTransition::Step(Modal::Connect(ConnectStep::ModelList {
                     rows: rows.clone(),
                     provider: provider.clone(),
                     models: models.clone(),
@@ -241,9 +358,9 @@ pub(crate) fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ConnectTra
                     fetching: *fetching,
                     error: error.clone(),
                     from_key: *from_key,
-                })
+                }))
             }
-            _ => ConnectTransition::Step(step.clone()),
+            _ => ModalTransition::Step(Modal::Connect(step.clone())),
         },
     }
 }
@@ -306,11 +423,11 @@ pub(crate) async fn fetch_model_list(
 
 /// Pure step-transition for the models modal: maps a key press in the current step to the next
 /// step, apply, or close. No network/keyring/terminal state.
-pub(crate) fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModelsTransition {
+pub(crate) fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModalTransition {
     match step {
         ModelsStep::Offline => match key.code {
-            KeyCode::Esc | KeyCode::Enter => ModelsTransition::Close,
-            _ => ModelsTransition::Step(step.clone()),
+            KeyCode::Esc | KeyCode::Enter => ModalTransition::Close,
+            _ => ModalTransition::Step(Modal::Models(step.clone())),
         },
         ModelsStep::ModelList {
             provider,
@@ -320,23 +437,23 @@ pub(crate) fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModelsTransi
         } => {
             if *fetching || models.is_empty() {
                 match key.code {
-                    KeyCode::Esc => ModelsTransition::Close,
-                    _ => ModelsTransition::Step(step.clone()),
+                    KeyCode::Esc => ModalTransition::Close,
+                    _ => ModalTransition::Step(Modal::Models(step.clone())),
                 }
             } else {
                 match key.code {
-                    KeyCode::Esc => ModelsTransition::Close,
-                    KeyCode::Enter => ModelsTransition::Apply,
+                    KeyCode::Esc => ModalTransition::Close,
+                    KeyCode::Enter => ModalTransition::Apply,
                     KeyCode::Up | KeyCode::Down => {
                         let delta = if key.code == KeyCode::Up { -1 } else { 1 };
-                        ModelsTransition::Step(ModelsStep::ModelList {
+                        ModalTransition::Step(Modal::Models(ModelsStep::ModelList {
                             provider: provider.clone(),
                             models: models.clone(),
                             selected: cycle_index(*selected, models.len(), delta),
                             fetching: false,
-                        })
+                        }))
                     }
-                    _ => ModelsTransition::Step(step.clone()),
+                    _ => ModalTransition::Step(Modal::Models(step.clone())),
                 }
             }
         }
@@ -345,23 +462,23 @@ pub(crate) fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModelsTransi
             input,
             error,
         } => match key.code {
-            KeyCode::Esc => ModelsTransition::Close,
-            KeyCode::Enter if !input.trim().is_empty() => ModelsTransition::Apply,
+            KeyCode::Esc => ModalTransition::Close,
+            KeyCode::Enter if !input.trim().is_empty() => ModalTransition::Apply,
             KeyCode::Backspace => {
                 let mut next = input.clone();
                 next.pop();
-                ModelsTransition::Step(ModelsStep::Manual {
+                ModalTransition::Step(Modal::Models(ModelsStep::Manual {
                     provider: provider.clone(),
                     input: next,
                     error: error.clone(),
-                })
+                }))
             }
-            KeyCode::Char(c) => ModelsTransition::Step(ModelsStep::Manual {
+            KeyCode::Char(c) => ModalTransition::Step(Modal::Models(ModelsStep::Manual {
                 provider: provider.clone(),
                 input: format!("{input}{c}"),
                 error: error.clone(),
-            }),
-            _ => ModelsTransition::Step(step.clone()),
+            })),
+            _ => ModalTransition::Step(Modal::Models(step.clone())),
         },
     }
 }
@@ -561,7 +678,7 @@ mod tests {
         };
         assert!(matches!(
             connect_step_next(&step, key(KeyCode::Enter)),
-            ConnectTransition::Step(ConnectStep::KeyEntry { provider, .. }) if provider == "openai"
+            ModalTransition::Step(Modal::Connect(ConnectStep::KeyEntry { provider, .. })) if provider == "openai"
         ));
         let step = ConnectStep::ProviderList {
             rows: rows.clone(),
@@ -569,21 +686,21 @@ mod tests {
         };
         assert!(matches!(
             connect_step_next(&step, key(KeyCode::Enter)),
-            ConnectTransition::Step(ConnectStep::ModelList {
+            ModalTransition::Step(Modal::Connect(ConnectStep::ModelList {
                 provider,
                 fetching: true,
                 ..
-            }) if provider == "ollama"
+            })) if provider == "ollama"
         ));
         let step = ConnectStep::ProviderList { rows, selected: 2 };
         assert!(matches!(
             connect_step_next(&step, key(KeyCode::Enter)),
-            ConnectTransition::Step(ConnectStep::ModelList {
+            ModalTransition::Step(Modal::Connect(ConnectStep::ModelList {
                 provider,
                 fetching: true,
                 from_key: false,
                 ..
-            }) if provider == "gemini"
+            })) if provider == "gemini"
         ));
     }
 
@@ -593,7 +710,7 @@ mod tests {
         let step = ConnectStep::ProviderList { rows, selected: 0 };
         assert!(matches!(
             connect_step_next(&step, key(KeyCode::Enter)),
-            ConnectTransition::Step(ConnectStep::ModelList { provider, .. }) if provider == "ollama"
+            ModalTransition::Step(Modal::Connect(ConnectStep::ModelList { provider, .. })) if provider == "ollama"
         ));
     }
 
@@ -605,7 +722,7 @@ mod tests {
         };
         assert_eq!(
             connect_step_next(&step, key(KeyCode::Esc)),
-            ConnectTransition::Close
+            ModalTransition::Close
         );
     }
 
@@ -619,11 +736,14 @@ mod tests {
         };
         assert!(matches!(
             connect_step_next(&step, key(KeyCode::Enter)),
-            ConnectTransition::Step(ConnectStep::KeyEntry { input, .. }) if input.is_empty()
+            ModalTransition::Step(Modal::Connect(ConnectStep::KeyEntry { input, .. })) if input.is_empty()
         ));
         assert!(matches!(
             connect_step_next(&step, key(KeyCode::Esc)),
-            ConnectTransition::Step(ConnectStep::ProviderList { selected: 0, .. })
+            ModalTransition::Step(Modal::Connect(ConnectStep::ProviderList {
+                selected: 0,
+                ..
+            }))
         ));
     }
 
@@ -637,12 +757,12 @@ mod tests {
         };
         assert!(matches!(
             connect_step_next(&step, key(KeyCode::Enter)),
-            ConnectTransition::Step(ConnectStep::ModelList {
+            ModalTransition::Step(Modal::Connect(ConnectStep::ModelList {
                 provider,
                 fetching: true,
                 from_key: true,
                 ..
-            }) if provider == "openai"
+            })) if provider == "openai"
         ));
     }
 
@@ -657,9 +777,11 @@ mod tests {
             error: None,
             from_key: true,
         };
+        // Enter on a usable list is `Apply`, not `Close`: the modal no longer has to be
+        // re-inspected after the fact to discover it had something to commit.
         assert_eq!(
             connect_step_next(&step, key(KeyCode::Enter)),
-            ConnectTransition::Close
+            ModalTransition::Apply
         );
 
         let step = ConnectStep::ModelList {
@@ -673,7 +795,7 @@ mod tests {
         };
         assert!(matches!(
             connect_step_next(&step, key(KeyCode::Esc)),
-            ConnectTransition::Step(ConnectStep::KeyEntry { provider, .. }) if provider == "openai"
+            ModalTransition::Step(Modal::Connect(ConnectStep::KeyEntry { provider, .. })) if provider == "openai"
         ));
 
         let step = ConnectStep::ModelList {
@@ -687,7 +809,7 @@ mod tests {
         };
         assert!(matches!(
             connect_step_next(&step, key(KeyCode::Esc)),
-            ConnectTransition::Step(ConnectStep::ProviderList { .. })
+            ModalTransition::Step(Modal::Connect(ConnectStep::ProviderList { .. }))
         ));
     }
 
@@ -704,7 +826,10 @@ mod tests {
         };
         assert!(matches!(
             connect_step_next(&step, key(KeyCode::Enter)),
-            ConnectTransition::Step(ConnectStep::ModelList { fetching: true, .. })
+            ModalTransition::Step(Modal::Connect(ConnectStep::ModelList {
+                fetching: true,
+                ..
+            }))
         ));
     }
 
@@ -714,11 +839,17 @@ mod tests {
         let step = ConnectStep::ProviderList { rows, selected: 0 };
         assert!(matches!(
             connect_step_next(&step, key(KeyCode::Up)),
-            ConnectTransition::Step(ConnectStep::ProviderList { selected: 2, .. })
+            ModalTransition::Step(Modal::Connect(ConnectStep::ProviderList {
+                selected: 2,
+                ..
+            }))
         ));
         assert!(matches!(
             connect_step_next(&step, key(KeyCode::Down)),
-            ConnectTransition::Step(ConnectStep::ProviderList { selected: 1, .. })
+            ModalTransition::Step(Modal::Connect(ConnectStep::ProviderList {
+                selected: 1,
+                ..
+            }))
         ));
     }
 
@@ -727,15 +858,15 @@ mod tests {
         let step = ModelsStep::Offline;
         assert_eq!(
             models_step_next(&step, key(KeyCode::Esc)),
-            ModelsTransition::Close
+            ModalTransition::Close
         );
         assert_eq!(
             models_step_next(&step, key(KeyCode::Enter)),
-            ModelsTransition::Close
+            ModalTransition::Close
         );
         assert_eq!(
             models_step_next(&step, key(KeyCode::Char('x'))),
-            ModelsTransition::Step(ModelsStep::Offline)
+            ModalTransition::Step(Modal::Models(ModelsStep::Offline))
         );
     }
 
@@ -744,11 +875,11 @@ mod tests {
         let step = models_list_step(vec![], true);
         assert_eq!(
             models_step_next(&step, key(KeyCode::Esc)),
-            ModelsTransition::Close
+            ModalTransition::Close
         );
         assert_eq!(
             models_step_next(&step, key(KeyCode::Enter)),
-            ModelsTransition::Step(step.clone())
+            ModalTransition::Step(Modal::Models(step.clone()))
         );
     }
 
@@ -757,11 +888,11 @@ mod tests {
         let step = models_list_step(vec![], false);
         assert_eq!(
             models_step_next(&step, key(KeyCode::Enter)),
-            ModelsTransition::Step(step.clone())
+            ModalTransition::Step(Modal::Models(step.clone()))
         );
         assert_eq!(
             models_step_next(&step, key(KeyCode::Esc)),
-            ModelsTransition::Close
+            ModalTransition::Close
         );
     }
 
@@ -777,19 +908,19 @@ mod tests {
         );
         assert_eq!(
             models_step_next(&step, key(KeyCode::Enter)),
-            ModelsTransition::Apply
+            ModalTransition::Apply
         );
         assert_eq!(
             models_step_next(&step, key(KeyCode::Esc)),
-            ModelsTransition::Close
+            ModalTransition::Close
         );
         assert!(matches!(
             models_step_next(&step, key(KeyCode::Up)),
-            ModelsTransition::Step(ModelsStep::ModelList { selected: 2, .. })
+            ModalTransition::Step(Modal::Models(ModelsStep::ModelList { selected: 2, .. }))
         ));
         assert!(matches!(
             models_step_next(&step, key(KeyCode::Down)),
-            ModelsTransition::Step(ModelsStep::ModelList { selected: 1, .. })
+            ModalTransition::Step(Modal::Models(ModelsStep::ModelList { selected: 1, .. }))
         ));
     }
 
@@ -798,28 +929,28 @@ mod tests {
         let blank = models_manual_step("   ");
         assert_eq!(
             models_step_next(&blank, key(KeyCode::Enter)),
-            ModelsTransition::Step(blank.clone())
+            ModalTransition::Step(Modal::Models(blank.clone()))
         );
         assert_eq!(
             models_step_next(&blank, key(KeyCode::Esc)),
-            ModelsTransition::Close
+            ModalTransition::Close
         );
 
         let typed = models_step_next(&models_manual_step("gpt-4"), key(KeyCode::Char('o')));
         assert!(matches!(
             &typed,
-            ModelsTransition::Step(ModelsStep::Manual { input, .. }) if input == "gpt-4o"
+            ModalTransition::Step(Modal::Models(ModelsStep::Manual { input, .. })) if input == "gpt-4o"
         ));
 
         let popped = models_step_next(&models_manual_step("gpt-4o"), key(KeyCode::Backspace));
         assert!(matches!(
             &popped,
-            ModelsTransition::Step(ModelsStep::Manual { input, .. }) if input == "gpt-4"
+            ModalTransition::Step(Modal::Models(ModelsStep::Manual { input, .. })) if input == "gpt-4"
         ));
 
         assert_eq!(
             models_step_next(&models_manual_step("gpt-4o"), key(KeyCode::Enter)),
-            ModelsTransition::Apply
+            ModalTransition::Apply
         );
     }
 
@@ -879,5 +1010,130 @@ mod tests {
             "EN and ES help bodies must have equal length"
         );
         assert_ne!(en, es, "EN and ES help bodies must differ");
+    }
+
+    #[test]
+    fn opening_a_modal_replaces_whatever_was_open_and_invalidates_its_fetch() {
+        let mut host = ModalHost::default();
+        host.open(Modal::Connect(ConnectStep::ProviderList {
+            rows: vec![row("anthropic", true)],
+            selected: 0,
+        }));
+        let first = host.nonce();
+        host.open(Modal::Models(models_list_step(vec!["a".into()], true)));
+        assert!(
+            host.nonce() > first,
+            "opening must invalidate the outgoing modal's fetch"
+        );
+        assert!(matches!(host.current(), Some(Modal::Models(_))));
+    }
+
+    #[test]
+    fn closing_bumps_the_nonce_and_clears_the_modal() {
+        let mut host = ModalHost::default();
+        host.open(Modal::Models(models_list_step(vec![], true)));
+        let before = host.nonce();
+        host.close();
+        assert!(host.current().is_none());
+        assert!(host.nonce() > before);
+    }
+
+    #[test]
+    fn a_step_transition_does_not_invalidate_its_own_fetch() {
+        let mut host = ModalHost::default();
+        host.open(Modal::Models(models_list_step(vec![], true)));
+        let before = host.nonce();
+        host.replace_step(Modal::Models(models_list_step(vec!["a".into()], false)));
+        assert_eq!(
+            host.nonce(),
+            before,
+            "stepping must not discard the result being awaited"
+        );
+    }
+
+    #[test]
+    fn connect_enter_on_a_model_list_applies_instead_of_closing() {
+        let step = ConnectStep::ModelList {
+            rows: vec![row("openai", true)],
+            provider: "openai".into(),
+            models: vec!["gpt-5".into(), "gpt-5-mini".into()],
+            selected: 1,
+            fetching: false,
+            error: None,
+            from_key: false,
+        };
+        assert!(matches!(
+            Modal::Connect(step.clone()).next(key(KeyCode::Enter)),
+            ModalTransition::Apply
+        ));
+        assert_eq!(
+            Modal::Connect(step).apply_target(),
+            Some(ModalApply::Provider {
+                provider: "openai".into(),
+                model: "gpt-5-mini".into()
+            })
+        );
+    }
+
+    #[test]
+    fn connect_esc_from_the_provider_list_closes_without_applying() {
+        let modal = Modal::Connect(ConnectStep::ProviderList {
+            rows: vec![row("openai", true)],
+            selected: 0,
+        });
+        assert!(matches!(
+            modal.next(key(KeyCode::Esc)),
+            ModalTransition::Close
+        ));
+        assert_eq!(modal.apply_target(), None);
+    }
+
+    #[test]
+    fn models_enter_applies_the_active_provider_not_a_new_preference() {
+        let modal = Modal::Models(models_list_step(vec!["m1".into()], false));
+        assert!(matches!(
+            modal.next(key(KeyCode::Enter)),
+            ModalTransition::Apply
+        ));
+        assert_eq!(
+            modal.apply_target(),
+            Some(ModalApply::Model {
+                provider: "openai".into(),
+                model: "m1".into()
+            })
+        );
+    }
+
+    #[test]
+    fn only_a_fetching_list_names_a_fetch_target() {
+        assert_eq!(
+            Modal::Models(models_list_step(vec![], true)).fetch_target(),
+            Some("openai")
+        );
+        assert_eq!(
+            Modal::Models(models_list_step(vec!["m".into()], false)).fetch_target(),
+            None
+        );
+        assert_eq!(
+            Modal::Connect(ConnectStep::ProviderList {
+                rows: vec![],
+                selected: 0
+            })
+            .fetch_target(),
+            None
+        );
+        assert_eq!(
+            Modal::Connect(ConnectStep::ModelList {
+                rows: vec![],
+                provider: "openai".into(),
+                models: vec![],
+                selected: 0,
+                fetching: true,
+                error: None,
+                from_key: false,
+            })
+            .fetch_target(),
+            Some("openai")
+        );
     }
 }
