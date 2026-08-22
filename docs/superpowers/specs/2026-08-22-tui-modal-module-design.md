@@ -625,10 +625,9 @@ passing under this structure. `close` is unconditional for the same reason: a fe
 modal that started it, so modal state is not evidence about fetch state.
 
 One consequence, recorded so nobody re-derives it: with `replace_step` bumping, every path to
-`begin_model_fetch` is already preceded by a bump, so `next_fetch_nonce()` and `nonce()` now return
-the same value there. `next_fetch_nonce` is kept anyway — it is the abort seam for #56, and it keeps
-the "each fetch carries a fresh generation" guarantee local to the launcher instead of contingent on
-what `replace_step` happens to do.
+`begin_model_fetch` is already preceded by a bump, so `next_fetch_nonce()` and `nonce()` return the
+same value there. `next_fetch_nonce` is kept anyway, because it is also the abort seam — see §11.9,
+which is what makes the distinction observable again.
 
 ### 11.3 `ModalTransition::Apply` carries what it commits
 
@@ -665,9 +664,38 @@ into `modal.rs`, which is where key entry is heading under #64. The graph is now
 
 `draw_popup` sized its box from `body.len()` and scrolled `focus` by the same logical count, while
 ratatui counts wrapped rows. PR #55 fixed both (`4d98474`, closing #57) using
-`Paragraph::line_count` behind ratatui's `unstable-rendered-line-info` feature. This branch rebases
-onto that and carries it across the module move; the comments here that described the unfixed
-behaviour are replaced by #55's, not reverted to `body.len()`.
+`Paragraph::line_count` behind ratatui's `unstable-rendered-line-info` feature, which
+`crates/tui/Cargo.toml` now enables. This branch merged that and carried it across the module move;
+the comments that described the unfixed behaviour are replaced by #55's, not reverted to
+`body.len()`. `draw_popup` has exactly one call site, so the arithmetic has one home.
+
+### 11.8 `ModelsTransition::Retry` is removed, not merged
+
+#55 added a `Retry` transition and an `App::retry_models_fetch` that rebuilt a fetching
+`ModelsStep::ModelList` and called `begin_models_fetch`. Under this branch's structure that is the
+step itself: `handle_modal_key` starts a fetch whenever [`Modal::fetch_target`] goes `None -> Some`
+across a transition, every step offering Ctrl+R has `None` as its target, and `replace_step`
+invalidates the earlier fetch on the same target change that starts the new one. So Ctrl+R returns
+a plain `Step` into a fetching list (`refetch`), and the transition variant, the `App` method and
+`ModelsStep::provider` — whose only caller it was — all go.
+
+The property the removal rests on is not obvious from the arms, so it is pinned:
+`a_retry_step_begins_awaiting_a_fetch_the_step_before_it_was_not` asserts, for all three
+retry-capable steps, that the step before names no fetch target and the step after names the
+provider's.
+
+### 11.9 The abort seam is the invalidation seam
+
+#56 shipped after §11.2 was written and confirms it. Its `JoinHandle` lives in `ModalHost` and is
+aborted inside `invalidate_fetch`, so the four mutators that bump the nonce are exactly the four
+that cancel. That is what keeps #56's `stepping_back_out_of_a_fetching_connect_list_aborts_the_fetch`
+passing here: Esc from a fetching connect list steps back through neither `open` nor `close`, and
+`replace_step`'s target-change bump is the only thing that catches it.
+
+It also settles §11.2's open note. Before the merge, `next_fetch_nonce()` and `nonce()` returned the
+same value at every `begin_model_fetch` call site, so swapping one for the other was an equivalent
+mutation. With the abort attached it is not: the swap strands the previous task, and #56's two
+`starting_a_*_fetch_aborts_the_previous_one` tests fail.
 
 ### 11.7 Framing: state-space, not line count
 
