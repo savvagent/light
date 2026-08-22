@@ -10,7 +10,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use light_factory_engine::Engine;
 use light_factory_protocol::auth::AuthResponse;
 use light_factory_protocol::session::{Command, Event as EngineEvent, EventKind, SessionId};
@@ -220,9 +220,17 @@ pub struct App {
     connect: Option<ConnectStep>,
     connect_return: Mode,
     connect_nonce: u64,
+    /// Cancellation handle for the connect modal's model fetch — **not** an "is a fetch in flight"
+    /// predicate. It is `Some` from the spawn until whichever comes first: an abort, or the result
+    /// landing in `handle_connect_models`. A task that has already sent its `UiEvent` but not yet
+    /// been polled to completion still reads as `Some`, and `abort()` on it is a no-op.
+    connect_fetch_task: Option<tokio::task::JoinHandle<()>>,
     models: Option<ModelsStep>,
     models_return: Mode,
     models_nonce: u64,
+    /// Cancellation handle for the models modal's model fetch. See [`App::connect_fetch_task`] —
+    /// same contract, and the same warning against reading it as a liveness flag.
+    models_fetch_task: Option<tokio::task::JoinHandle<()>>,
     engine: Option<Engine>,
     engine_session: Option<SessionId>,
     engine_forward_task: Option<tokio::task::JoinHandle<()>>,
@@ -279,9 +287,11 @@ impl App {
             connect: None,
             connect_return: Mode::Connected,
             connect_nonce: 0,
+            connect_fetch_task: None,
             models: None,
             models_return: Mode::Connected,
             models_nonce: 0,
+            models_fetch_task: None,
             engine: None,
             engine_session: None,
             engine_forward_task: None,
@@ -631,6 +641,10 @@ impl App {
     /// away, so a modal cannot float over the sign-in screen, swallow its keys, or restore a
     /// stale `Mode::Connected` on Esc.
     fn dismiss_modals(&mut self) {
+        // Unconditional, outside the modal-state arms below: cancellation is tied to task state,
+        // not modal state, so no state combination can strand a live fetch.
+        self.abort_connect_fetch();
+        self.abort_models_fetch();
         if self.connect.is_some() {
             self.connect = None;
             self.connect_nonce += 1;
@@ -775,6 +789,7 @@ impl App {
     }
 
     fn close_connect(&mut self) {
+        self.abort_connect_fetch();
         self.connect_nonce += 1;
         self.connect = None;
         self.mode = self.connect_return;
@@ -802,20 +817,41 @@ impl App {
         self.close_connect();
     }
 
+    /// Cancel the connect modal's in-flight model fetch.
+    ///
+    /// Without this the spawned task outlives the modal that asked for it, holding an open
+    /// connection whose headers carry the provider API key — so "Esc: cancel" cancelled only the
+    /// display. This *complements* the `connect_nonce` stale-result guard rather than replacing it:
+    /// cancellation lands at the task's next await point, so a task that already posted its
+    /// `UiEvent` still delivers it, and the nonce is what discards it.
+    fn abort_connect_fetch(&mut self) {
+        if let Some(task) = self.connect_fetch_task.take() {
+            task.abort();
+        }
+    }
+
+    /// Cancel the models modal's in-flight model fetch. See [`App::abort_connect_fetch`].
+    fn abort_models_fetch(&mut self) {
+        if let Some(task) = self.models_fetch_task.take() {
+            task.abort();
+        }
+    }
+
     fn begin_fetch(&mut self, provider: String, key: Option<String>) {
+        self.abort_connect_fetch();
         self.connect_nonce += 1;
         let nonce = self.connect_nonce;
         let events = self.events.clone();
         let store = self.store.clone();
         let lang = self.config.lang;
-        tokio::spawn(async move {
+        self.connect_fetch_task = Some(tokio::spawn(async move {
             let result = fetch_model_list(&provider, key, store.as_ref(), lang).await;
             let _ = events.send(UiEvent::ConnectModels {
                 nonce,
                 provider,
                 result,
             });
-        });
+        }));
     }
 
     fn handle_connect_models(
@@ -827,6 +863,10 @@ impl App {
         if nonce != self.connect_nonce {
             return;
         }
+        // The nonce matched, so this is the current fetch's own result and that task is done.
+        // Drop its handle rather than leaving a finished task tracked: the field is a cancellation
+        // handle, and a stale `Some` invites a future reader to treat it as "already fetching".
+        self.connect_fetch_task = None;
         let matches = matches!(
             &self.connect,
             Some(ConnectStep::ModelList {
@@ -882,19 +922,20 @@ impl App {
     }
 
     fn begin_models_fetch(&mut self, provider: String) {
+        self.abort_models_fetch();
         self.models_nonce += 1;
         let nonce = self.models_nonce;
         let events = self.events.clone();
         let store = self.store.clone();
         let lang = self.config.lang;
-        tokio::spawn(async move {
+        self.models_fetch_task = Some(tokio::spawn(async move {
             let result = fetch_model_list(&provider, None, store.as_ref(), lang).await;
             let _ = events.send(UiEvent::ModelsFetched {
                 nonce,
                 provider,
                 result,
             });
-        });
+        }));
     }
 
     fn handle_models_fetched(
@@ -906,6 +947,8 @@ impl App {
         if nonce != self.models_nonce {
             return;
         }
+        // See `handle_connect_models`: the current fetch has delivered, so stop tracking it.
+        self.models_fetch_task = None;
         if !matches!(
             &self.models,
             Some(ModelsStep::ModelList {
@@ -963,6 +1006,7 @@ impl App {
     }
 
     fn close_models(&mut self) {
+        self.abort_models_fetch();
         self.models_nonce += 1;
         self.models = None;
         self.mode = self.models_return;
@@ -1021,6 +1065,14 @@ impl App {
                 } = &next
                 {
                     self.begin_fetch(provider.clone(), fetch_key);
+                } else if matches!(&step, ConnectStep::ModelList { fetching: true, .. }) {
+                    // Esc out of a fetching model list steps *back* to the provider list (or to
+                    // key entry) rather than closing the modal, so `close_connect` never runs.
+                    // Without this the request — and the API key in its headers — outlives the
+                    // "Esc: cancel" the footer promises, exactly as it did before this change.
+                    // The nonce bump matches `close_connect`: the in-flight result is now stale.
+                    self.abort_connect_fetch();
+                    self.connect_nonce += 1;
                 }
                 self.connect = Some(next);
             }
@@ -1294,6 +1346,10 @@ impl App {
     }
 
     async fn sign_out(&mut self) {
+        // Before the logout await, not after. `self.api` is a `reqwest::Client::new()` with no
+        // timeout, so a server that never answers `logout` would otherwise delay cancellation of
+        // the key-bearing model fetch indefinitely — the exact window the abort exists to close.
+        self.dismiss_modals();
         if let Some(session) = &self.session {
             let _ = self.api.logout(&session.token).await;
         }
@@ -1302,7 +1358,6 @@ impl App {
         self.ws_tx = None;
         self.mode = Mode::SignIn;
         self.focus = Focus::Email;
-        self.dismiss_modals();
         self.code.clear();
         self.log.clear();
         self.pongs = 0;
@@ -2355,7 +2410,43 @@ fn models_apply_target(step: &ModelsStep) -> Option<(String, String)> {
 /// Fetch a provider's model list off the UI loop. `key_override` is a just-typed key that wins
 /// over the stored one; otherwise the key is resolved from the environment or the keyring. The key
 /// is consumed here and never returned to the caller.
+/// Resolve a key for `provider` and fetch its model ids, reporting a panic inside that work as an
+/// error instead of as silence.
+///
+/// Nothing polls the fetch task's `JoinHandle` — the event loop is driven by `UiEvent`s, not by
+/// task completion — so an unwind inside the fetch (`resolve_key` reaching the OS keyring is the
+/// plausible candidate) would send no `UiEvent` at all, leaving `fetching: true` and the modal on
+/// "Fetching models..." until Esc. The 15s deadline lives inside reqwest, around the request, not
+/// around the task, so it does not rescue this case.
 async fn fetch_model_list(
+    provider: &str,
+    key_override: Option<String>,
+    store: &dyn CredentialStore,
+    locale: Locale,
+) -> Result<Vec<String>, String> {
+    guard_panic(
+        fetch_model_list_inner(provider, key_override, store, locale),
+        locale,
+    )
+    .await
+}
+
+/// Turn a panic inside `fut` into a reportable error.
+///
+/// `AssertUnwindSafe` is sound here because nothing observable survives the unwind: the caller is a
+/// spawned task that ends either way, its locals drop, and only this error string escapes. The
+/// default panic hook still prints the panic, so the unwind is not swallowed silently.
+async fn guard_panic<F>(fut: F, locale: Locale) -> Result<Vec<String>, String>
+where
+    F: std::future::Future<Output = Result<Vec<String>, String>>,
+{
+    std::panic::AssertUnwindSafe(fut)
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err(i18n::t(locale, "connect.fetch_panicked").to_string()))
+}
+
+async fn fetch_model_list_inner(
     provider: &str,
     key_override: Option<String>,
     store: &dyn CredentialStore,
@@ -2635,9 +2726,9 @@ mod tests {
     use super::{
         App, ConnectStep, ConnectTransition, EngineForward, KeyCommand, Mode, ModelsStep,
         ModelsTransition, ProviderRow, UiEvent, connect_step_next, cycle_index,
-        engine_approval_key, engine_forward_step, help_lines, mask, models_apply_target,
-        models_step_next, parse_ask_command, parse_connect_command, parse_key_command,
-        parse_model_command, parse_models_command,
+        engine_approval_key, engine_forward_step, guard_panic, help_lines, mask,
+        models_apply_target, models_step_next, parse_ask_command, parse_connect_command,
+        parse_key_command, parse_model_command, parse_models_command,
     };
     use crate::config::Config;
     use crate::provider::ProviderInfo;
@@ -3208,6 +3299,232 @@ mod tests {
             app.models
         );
         assert_ne!(app.models_nonce, 0, "the fetch nonce must be bumped");
+    }
+
+    /// Spawn a task that never completes, plus a probe that can observe its cancellation after the
+    /// `JoinHandle` has been moved into the `App`. Bounded yields rather than a sleep, so the test
+    /// is deterministic and makes no assertion about elapsed wall-clock time.
+    fn pending_task() -> (tokio::task::JoinHandle<()>, tokio::task::AbortHandle) {
+        let handle = tokio::spawn(std::future::pending::<()>());
+        let probe = handle.abort_handle();
+        (handle, probe)
+    }
+
+    async fn settle(probe: &tokio::task::AbortHandle) {
+        for _ in 0..32 {
+            if probe.is_finished() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn closing_the_models_modal_aborts_the_in_flight_fetch() {
+        let mut app = test_app();
+        let (handle, probe) = pending_task();
+        app.models_fetch_task = Some(handle);
+
+        app.close_models();
+
+        settle(&probe).await;
+        assert!(
+            probe.is_finished(),
+            "Esc must cancel the request, not just hide the modal: the connection carries the API key"
+        );
+        assert!(app.models_fetch_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn closing_the_connect_modal_aborts_the_in_flight_fetch() {
+        let mut app = test_app();
+        let (handle, probe) = pending_task();
+        app.connect_fetch_task = Some(handle);
+
+        app.close_connect();
+
+        settle(&probe).await;
+        assert!(probe.is_finished(), "the connect modal leaks the same way");
+        assert!(app.connect_fetch_task.is_none());
+    }
+
+    #[tokio::test]
+    async fn dismissing_modals_aborts_both_in_flight_fetches() {
+        let mut app = test_app();
+        let (connect_handle, connect_probe) = pending_task();
+        let (models_handle, models_probe) = pending_task();
+        app.connect_fetch_task = Some(connect_handle);
+        app.models_fetch_task = Some(models_handle);
+        // Both modals are already `None`: cancellation is tied to TASK state, not modal state, so a
+        // handle can never be stranded by the state combination the abort was gated on.
+        assert!(app.connect.is_none() && app.models.is_none());
+
+        app.dismiss_modals();
+
+        settle(&connect_probe).await;
+        settle(&models_probe).await;
+        assert!(
+            connect_probe.is_finished(),
+            "losing the session must cancel the connect fetch"
+        );
+        assert!(
+            models_probe.is_finished(),
+            "losing the session must cancel the models fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_a_models_fetch_aborts_the_previous_one() {
+        let mut app = test_app();
+        let (handle, probe) = pending_task();
+        app.models_fetch_task = Some(handle);
+
+        // `local` resolves no key against the MemStore, so the replacement fetch fails offline
+        // instead of touching the network.
+        app.begin_models_fetch("local".to_string());
+
+        settle(&probe).await;
+        assert!(
+            probe.is_finished(),
+            "re-entering the modal must not strand the previous fetch"
+        );
+        assert!(
+            app.models_fetch_task.is_some(),
+            "the replacement fetch must be tracked too"
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_a_connect_fetch_aborts_the_previous_one() {
+        let mut app = test_app();
+        let (handle, probe) = pending_task();
+        app.connect_fetch_task = Some(handle);
+
+        // The mirror of `starting_a_models_fetch_aborts_the_previous_one`. Without it the four
+        // abort tests only ever cover `abort_connect_fetch`, because each one assigns the field by
+        // hand — `begin_fetch` could go back to a bare `tokio::spawn` with the handle dropped and
+        // the whole suite would stay green, while `close_connect` would have nothing to abort and
+        // the credential-bearing connection would leak exactly as before.
+        //
+        // `local` resolves no key against the MemStore, so the replacement fetch fails offline
+        // instead of touching the network.
+        app.begin_fetch("local".to_string(), None);
+
+        settle(&probe).await;
+        assert!(
+            probe.is_finished(),
+            "retyping a key must not strand the previous fetch"
+        );
+        assert!(
+            app.connect_fetch_task.is_some(),
+            "the replacement fetch must be tracked too"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delivered_models_result_stops_tracking_its_task() {
+        let mut app = test_app();
+        let (handle, _probe) = pending_task();
+        app.models_fetch_task = Some(handle);
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+
+        app.handle_models_fetched(5, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+
+        assert!(
+            app.models_fetch_task.is_none(),
+            "a fetch that already delivered must not stay tracked as cancellable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delivered_connect_result_stops_tracking_its_task() {
+        let mut app = test_app();
+        let (handle, _probe) = pending_task();
+        app.connect_fetch_task = Some(handle);
+        app.connect_nonce = 5;
+        app.connect = Some(ConnectStep::ModelList {
+            rows: vec![],
+            provider: "openai".to_string(),
+            models: vec![],
+            selected: 0,
+            fetching: true,
+            error: None,
+            from_key: false,
+        });
+
+        app.handle_connect_models(5, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+
+        assert!(
+            app.connect_fetch_task.is_none(),
+            "a fetch that already delivered must not stay tracked as cancellable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_result_leaves_the_current_fetch_tracked() {
+        let mut app = test_app();
+        let (handle, _probe) = pending_task();
+        app.models_fetch_task = Some(handle);
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+
+        // A result from a superseded fetch must not drop the *current* fetch's cancellation
+        // handle — that would strand the live, key-bearing request.
+        app.handle_models_fetched(4, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+
+        assert!(app.models_fetch_task.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_panicking_fetch_reports_an_error_instead_of_spinning_forever() {
+        async fn panicking() -> Result<Vec<String>, String> {
+            panic!("the keyring exploded");
+        }
+
+        // The default panic hook still prints the unwind, so a panic line in this test's output is
+        // expected, not a failure.
+        let result = guard_panic(panicking(), Locale::En).await;
+
+        assert_eq!(
+            result,
+            Err("the fetch task failed unexpectedly".to_string()),
+            "a panicked fetch must send a result, or `fetching: true` never clears"
+        );
+    }
+
+    #[tokio::test]
+    async fn stepping_back_out_of_a_fetching_connect_list_aborts_the_fetch() {
+        let mut app = test_app();
+        let (handle, probe) = pending_task();
+        app.connect_fetch_task = Some(handle);
+        app.connect = Some(ConnectStep::ModelList {
+            rows: vec![ProviderRow {
+                id: "openai".to_string(),
+                connected: true,
+            }],
+            provider: "openai".to_string(),
+            models: vec![],
+            selected: 0,
+            fetching: true,
+            error: None,
+            from_key: false,
+        });
+
+        // Esc here steps back to the provider list instead of closing the modal, so
+        // `close_connect` never runs — the one Esc path the abort helpers do not cover.
+        app.handle_connect_key(key(KeyCode::Esc));
+
+        assert!(
+            matches!(&app.connect, Some(ConnectStep::ProviderList { .. })),
+            "Esc from a fetching list steps back to the provider list"
+        );
+        settle(&probe).await;
+        assert!(
+            probe.is_finished(),
+            "the footer says \"Esc: cancel\"; the key-bearing request must actually stop"
+        );
+        assert!(app.connect_fetch_task.is_none());
     }
 
     #[test]
