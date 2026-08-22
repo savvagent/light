@@ -263,6 +263,10 @@ const EN: Catalog = &[
     ("connect.models_heading", "Models: {provider}"),
     ("connect.fetching", "Fetching models..."),
     ("connect.fetch_error", "Couldn't fetch models: {error}"),
+    (
+        "connect.fetch_panicked",
+        "the fetch task failed unexpectedly",
+    ),
     ("connect.no_models", "No models reported"),
     (
         "connect.footer_list",
@@ -556,6 +560,10 @@ const ES: Catalog = &[
     (
         "connect.fetch_error",
         "No se pudieron obtener los modelos: {error}",
+    ),
+    (
+        "connect.fetch_panicked",
+        "la tarea de obtenci\u{f3}n fall\u{f3} inesperadamente",
     ),
     ("connect.no_models", "No se informaron modelos"),
     (
