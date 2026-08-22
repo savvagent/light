@@ -116,8 +116,16 @@ can be built to them:
 | `cycle_index` | `app.rs:2202` | Used only by the two transition fns |
 
 `ConnectTransition` / `ModelsTransition` are **deleted**, replaced by one `ModalTransition` (§4.3).
-`mask` stays in `app.rs` (still used by `draw_key`, which is not a modal) and becomes `pub(crate)`
-so `modal.rs` can use it for the connect key-entry step.
+
+Two helpers stay in `app.rs` and become `pub(crate)` so `modal.rs` can reach them:
+
+- `mask` (`app.rs:2197`) — also used by `draw_key`, which is not a modal.
+- `takes_key` (`app.rs:2165`) — also used by `begin_key_entry` and `clear_key`, and read by
+  `connect_step_next`'s model-list Esc branch (`app.rs:2296`) to decide whether Esc routes back to
+  key entry or to the provider list.
+
+`PROVIDER_NAMES` / `is_valid_provider` / `build_provider_rows` stay in `app.rs` unchanged:
+building the rows needs `self.store`, so it was never part of the pure machinery.
 
 ### 4.2 The state
 
@@ -232,19 +240,44 @@ first.
 ```rust
 fn handle_modal_key(&mut self, key: KeyEvent) -> bool {
     if ctrl_c(key) { return true; }
-    let Some(modal) = self.modal.current() else { return false };
-    let before = modal.fetch_target();          // §4.6
-    match modal.next(key) {
-        ModalTransition::Close => self.close_modal(),
+    // `Modal` derives `Clone`; cloning releases the borrow on `self.modal` so the arms below can
+    // take `&mut self`. This is what `handle_connect_key`/`handle_models_key` already do today.
+    let Some(current) = self.modal.current().cloned() else { return false };
+
+    // Connect-specific pre-steps. Both need `&mut self` (status/error/keyring) and so cannot live
+    // in the pure transition; both are lifted verbatim from `handle_connect_key`.
+    //   1. Blank Enter on `KeyEntry` short-circuits to `status.key_empty` without stepping.
+    //   2. `KeyEntry → ModelList { from_key: true }` writes the typed key to the keyring first,
+    //      and on failure sets `self.error` and returns without stepping or fetching.
+    // Step 2 yields the `key_override` handed to `begin_model_fetch` below.
+
+    let before = current.fetch_target().map(str::to_string);
+    match current.next(key) {
+        ModalTransition::Close => self.modal.close(),
         ModalTransition::Apply => self.apply_and_close_modal(),
-        ModalTransition::Step(next) => { … see §4.6 … }
+        ModalTransition::Step(next) => {
+            let after = next.fetch_target().map(str::to_string);
+            self.modal.replace_step(next);
+            if let Some(provider) = after.filter(|a| Some(a) != before.as_ref()) {
+                self.begin_model_fetch(provider, key_override);
+            }
+        }
     }
     false
 }
 ```
 
+`ModalTransition::Step` carries a whole `Modal`, so it could in principle name a different modal
+kind; no transition function does, and `replace_step` deliberately does **not** bump the nonce
+(a step must not invalidate its own in-flight fetch). What protects a step-to-step transition from
+a stale result is the provider/step-shape match inside `handle_models_fetched`, exactly as today:
+stepping `ModelList{fetching} → ProviderList` on Esc leaves the fetch running, and the result is
+dropped because the open step is no longer a matching fetching list
+(`connect_model_list_enter_is_a_noop_while_fetching`, `models_fetch_result_does_not_clobber_manual_entry`).
+
 **Close.** `close_connect` (`app.rs:777`), `close_models` (`app.rs:965`), `close_help`
-(`app.rs:422`) and `dismiss_modals` (`app.rs:633`) all collapse to `ModalHost::close()`. The
+(`app.rs:422`) and `dismiss_modals` (`app.rs:633`) all collapse to `ModalHost::close()` — one close
+path where there were four. The
 `self.mode = self.*_return` lines go away with the fields (§4.5). `dismiss_modals` keeps its name
 and its two call sites (`sign_out`, the `ws_closed` branch of `handle_server`) and becomes a
 one-line delegation — the doc comment on it stays, because *why* the session teardown dismisses the
@@ -282,6 +315,15 @@ if !self.modal.covers_base() {
 self.draw_modal(frame, chunks[1]);
 ```
 
+Deleting the `Mode::Help` variant touches three further sites, each of which must be carried over
+rather than dropped:
+
+- `draw`'s screen match (`app.rs:1455-1465`) loses its `Mode::Help` arm — seven arms remain.
+- `draw`'s footer hint (`app.rs:1477`) branches `self.mode == Mode::Help` → `hint.help_close`. It
+  becomes `matches!(self.modal.current(), Some(Modal::Help))`, keeping the same key and the same
+  precedence (after `command_mode`, before `Mode::Device`).
+- `handle_key`'s Esc match (`app.rs:365`) loses its no-op `Mode::Help => {}` arm.
+
 `Modal::covers_base()` is `matches!(self, Modal::Help)` and `ModalHost::covers_base()` is `false`
 when nothing is open. This is the honest statement of premise correction §2.1: help is opaque,
 the other two are overlays. It preserves today's rendering exactly — today `Mode::Help` in the
@@ -303,6 +345,10 @@ fn draw_modal(&self, frame: &mut Frame, area: Rect) {
 ```
 
 `PopupView { title: String, body: Vec<Line<'static>>, footer: String, focus: Option<usize> }` is
+owned throughout (`footer` is a `String` where `draw_models` used a `&str`, one trivial allocation
+per frame) so the view outlives the borrow of `App` that built it; every line today is already
+either an owned `String`/`format!` or a `&'static str` from `i18n::t`, so `Line<'static>` costs
+nothing. It is
 built by `Modal::view`, which is the moved bodies of `draw_connect`/`draw_models` minus their
 `draw_popup` call, plus a `Help` arm returning `ModalView::FullScreen`. The help arm renders through
 the same `centered_rect(80, 90, …)` + bordered `Paragraph` + `Wrap { trim: false }` it uses today —
@@ -311,6 +357,14 @@ byte-identical output, not `draw_popup`.
 `ModalContext` carries the three pieces of `App` the views read today: the locale, `self.error`
 (rendered inside the connect key-entry and model-list steps), and `provider_info.offline` (rendered
 by the models offline step via `crate::provider::offline_notice`).
+
+**Open.** `enter_connect`, `enter_models` and `open_help` all route through one
+`App::open_modal(&mut self, modal: Modal, key_override: Option<String>)`, which calls
+`ModalHost::open` and then applies the fetch rule of §4.6 (`before` is the outgoing modal's fetch
+target, `after` the incoming one's). This is why `enter_models`'s fetch does not need its own
+`begin_models_fetch` call: opening a modal whose state is a fetching list starts the fetch through
+the same seam a step transition does. `enter_connect` opens a `ProviderList` (no fetch target, no
+fetch), `open_help` opens `Modal::Help` (likewise).
 
 **Fetch.** `begin_fetch` (`app.rs:805`, connect) and `begin_models_fetch` (`app.rs:884`, models) are
 byte-for-byte identical apart from the key override and the `UiEvent` variant they send. They
@@ -381,13 +435,16 @@ a fourth copy of the pattern.
 
 - [ ] `App` holds exactly one modal field (`modal: ModalHost`); `connect`, `connect_return`,
       `connect_nonce`, `models`, `models_return`, `models_nonce`, `help_return` and `Mode::Help` no
-      longer exist. `App` field count drops by 6 (40 → 34).
+      longer exist. `App` field count drops by 6: **44 → 38** (44 counted at `app.rs:192-238`; the
+      issue's "~40" is approximate — seven fields are removed and one added).
 - [ ] Two modals open simultaneously is not representable: `ModalHost::open` is a single
       `Option<Modal>`, and `open()` replaces.
-- [ ] `crates/tui/src/app.rs` drops below 2600 lines; `crates/tui/src/modal.rs` holds the modal
-      types, transitions, views, popup renderer and fetch.
-- [ ] All 63 modal-and-friends tests in `app.rs` still exist and pass, moved beside the code they
-      cover; `cargo test --workspace` is green.
+- [ ] `crates/tui/src/app.rs` sheds at least 800 lines (from 3736); `crates/tui/src/modal.rs` holds
+      the modal types, transitions, views, popup renderer and fetch. The absolute line count is
+      reported, not targeted.
+- [ ] All 63 tests currently in `app.rs`'s `#[cfg(test)] mod tests` still exist and pass — those
+      covering moved code move with it into `modal.rs`'s own test module. Renaming is allowed,
+      deletion is not; the plan's final task re-counts them. `cargo test --workspace` is green.
 - [ ] `cargo clippy --workspace --all-targets -D warnings` and `cargo fmt --all --check` are clean.
 - [ ] Rendered output is unchanged: the help/connect/models render tests pass byte-for-byte with no
       expectation edits.
@@ -437,7 +494,11 @@ is implemented here.
   conflict, #47's classification logic lands in the models arm of the merged handler and its new
   step variant in `modal.rs`.
 
-Conflict-resolution rule for the rebase: **their semantics win, this branch's structure wins.**
+Merge order is #45 → #44 → #47 → this branch, so all three land first. Before the PR opens and
+again before it merges, this branch rebases onto `origin/master` and re-runs the full suite.
+Conflict-resolution rule for the rebase: **their semantics win, this branch's structure wins** —
+a behaviour change they introduced is preserved, expressed through the structure introduced here.
+#45 is confined to `crates/tui/src/selection.rs` and cannot conflict.
 
 ## 9. Risks & Open Questions
 
@@ -451,7 +512,12 @@ Conflict-resolution rule for the rebase: **their semantics win, this branch's st
    Accepted: `ModalContext` is a `pub(crate)` struct in a binary crate; widening it is a one-line
    change. Today it needs exactly locale, `error`, and `provider_info.offline`.
 4. **Open: key entry (`Mode::Key`) still represents modality the second way.** Deliberately out of
-   scope (§2.3). Follow-up issue to be filed: "tui: fold key entry into the modal host".
+   scope (§2.3). A follow-up issue is filed on this branch's PR — *"tui: fold key entry into the
+   modal host"* — describing the three fields (`key_target`, `key_input`, `key_return`), the
+   full-screen render, and the fact that `key_return` is genuinely load-bearing (unlike the three
+   `*_return` fields deleted here), so it needs a `Modal::Key { return_to: Mode }` payload or an
+   equivalent. Filing, not fixing, is the correct move per the workflow's "do not silently widen
+   scope" rule.
 5. **Open: `Modal::covers_base()` is a per-variant exception**, not a uniform rule. It is the honest
    encoding of today's behaviour (§2.1). If help is ever restyled as an overlay, the method goes
    away; changing it now would be an unsanctioned behaviour delta.
