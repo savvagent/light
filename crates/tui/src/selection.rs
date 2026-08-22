@@ -25,6 +25,12 @@ fn classify(env_key: Option<String>, keyring_key: Option<String>) -> KeyStatus {
     }
 }
 
+/// Read a named environment variable. The single real-environment source for [`sources`] and
+/// [`resolve_key`]; every other caller supplies its own reader.
+fn process_env(var: &str) -> Option<String> {
+    std::env::var(var).ok()
+}
+
 /// The env key and keyring key for a provider, resolved independently. `env` supplies the value
 /// of a named environment variable; tests pass a stub so the ambient environment cannot decide
 /// the outcome.
@@ -40,7 +46,7 @@ fn sources_with(
 
 /// The env key and keyring key for a provider, read from the process environment.
 fn sources(provider: &str, store: &dyn CredentialStore) -> (Option<String>, Option<String>) {
-    sources_with(provider, store, |var| std::env::var(var).ok())
+    sources_with(provider, store, process_env)
 }
 
 /// Where a provider's key comes from, for the `/key` listing.
@@ -81,7 +87,7 @@ fn resolve_key_with(
 
 /// The resolved API key for a provider (env over keyring), or `None` when no key is available.
 pub fn resolve_key(provider: &str, store: &dyn CredentialStore) -> Option<String> {
-    resolve_key_with(provider, store, |var| std::env::var(var).ok())
+    resolve_key_with(provider, store, process_env)
 }
 
 /// Layer the persisted preferences and keyring keys over an env-derived [`Selection`]. Pure and

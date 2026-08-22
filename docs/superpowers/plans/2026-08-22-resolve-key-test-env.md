@@ -59,14 +59,16 @@ written to fail-for-the-right-reason until the seam exists.
       `resolve_key_reads_a_stored_keyring_key` to FAIL with `left: Some("sk-test"), right: Some("sk-ring")`.
 - [x] Add private `fn sources_with(provider, store, env: impl Fn(&str) -> Option<String>)` holding
       the current body of `sources`, with the env lookup supplied by the caller.
-- [x] Reduce `sources` to `sources_with(provider, store, |var| std::env::var(var).ok())`.
+- [x] Add private `fn process_env(var: &str) -> Option<String>` (the single real-environment
+      reader) and reduce `sources` to `sources_with(provider, store, process_env)`.
 - [x] Add private `fn resolve_key_with(provider, store, env: impl Fn(&str) -> Option<String>)`
-      holding the current body of `resolve_key`, and reduce `resolve_key` to a delegation with the
-      real env lookup.
+      holding the current body of `resolve_key`, and reduce `resolve_key` to
+      `resolve_key_with(provider, store, process_env)`.
 - [x] Rewrite `resolve_key_reads_a_stored_keyring_key` to call `resolve_key_with` with a stub env,
-      asserting: (a) an absent env yields the keyring value, (b) an empty store yields `None`, and
-      (c) the lookup is made against the provider's declared var name (`OPENAI_API_KEY`), whose
-      value wins over the keyring.
+      asserting that an absent env yields the keyring value and an empty store yields `None`.
+- [x] Add `resolve_key_reads_the_env_var_the_provider_declares` covering the other half of the
+      wiring: the lookup uses the provider's declared var name (`OPENAI_API_KEY`) and its value
+      wins over the keyring, while a provider with no declared var never consults the env.
 - [x] Run `cargo test -p light-factory-tui resolve_key` — expect PASS.
 - [x] Run `OPENAI_API_KEY=sk-test cargo test -p light-factory-tui resolve_key` — expect PASS
       (the acceptance criterion).
