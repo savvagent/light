@@ -210,6 +210,10 @@ enum ModelsTransition {
 }
 
 /// Why a model-list fetch failed, in the only terms the modal has to act on.
+///
+/// `pub(crate)` is required, not incidental: [`UiEvent`] is `pub` and carries these in
+/// `ModelsFetched`, so a fully-private field type trips the `private_interfaces` lint. Do not
+/// "tidy" it to private.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FetchFailure {
     /// No API key could be resolved for the provider at all.
@@ -228,7 +232,10 @@ impl FetchFailure {
     }
 }
 
-/// A failed model-list fetch: the class the modal branches on, plus the detail to render.
+/// A failed model-list fetch: the class the modal branches on, plus the detail to render. The
+/// detail is always produced by [`summarize_provider_error`], so it is one bounded line.
+///
+/// `pub(crate)` for the same reason as [`FetchFailure`]: it appears in the `pub` [`UiEvent`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FetchError {
     class: FetchFailure,
@@ -2571,6 +2578,58 @@ fn classify_fetch_error(err: &anyhow::Error) -> FetchFailure {
     class_for_status(status)
 }
 
+/// The failure class for a fetch error, given which provider produced it.
+///
+/// Ollama takes no key, so no failure of its is repairable by `/connect` or `/key` — not even a
+/// 401 from a proxy in front of it. Forcing the transport class keeps the modal from suggesting a
+/// remedy that does not exist for this provider.
+fn class_for_provider(provider: &str, err: &anyhow::Error) -> FetchFailure {
+    if provider == "ollama" {
+        FetchFailure::Fetch
+    } else {
+        classify_fetch_error(err)
+    }
+}
+
+/// The longest provider-supplied error text that may reach a rendered line.
+const PROVIDER_ERROR_MAX_CHARS: usize = 120;
+
+/// Reduce a provider-supplied error to one bounded, control-free line before it becomes
+/// user-visible text.
+///
+/// The text is remote-controlled and unbounded: serde's `invalid_type` embeds the entire offending
+/// value, and a hostile endpoint can answer with pages of newline-separated prose. Rendered as-is
+/// it fills the modal body and pushes the modal's own trusted rows — the remedy, and on the manual
+/// step the input box — past the bottom of the screen, which turns a model picker into a
+/// credential-phishing surface. Control characters go too: a raw `ESC` written into a terminal
+/// cell is an escape-sequence injection.
+fn summarize_provider_error(message: &str) -> String {
+    let first: String = message
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let first = first.trim();
+    if first.chars().count() <= PROVIDER_ERROR_MAX_CHARS {
+        return first.to_string();
+    }
+    let kept: String = first.chars().take(PROVIDER_ERROR_MAX_CHARS).collect();
+    format!("{kept}\u{2026}")
+}
+
+/// Classify a provider's fetch error and bound its text. The single place remote error text
+/// crosses into the UI, so the cap cannot be bypassed by a new caller.
+fn fetch_error(provider: &str, err: &anyhow::Error) -> FetchError {
+    FetchError {
+        class: class_for_provider(provider, err),
+        // `{:#}` keeps anyhow's source chain on one line — `to_string` reports only the outermost
+        // message, which hides the actual cause (connection refused, DNS failure, TLS, 401, ...).
+        message: summarize_provider_error(&format!("{err:#}")),
+    }
+}
+
 /// Fetch a provider's model list off the UI loop. `key_override` is a just-typed key that wins
 /// over the stored one; otherwise the key is resolved from the environment or the keyring. The key
 /// is consumed here and never returned to the caller.
@@ -2625,26 +2684,34 @@ async fn fetch_model_list_inner(
     store: &dyn CredentialStore,
     locale: Locale,
 ) -> Result<Vec<String>, FetchError> {
-    // `{:#}` keeps anyhow's source chain — `to_string` reports only the outermost message, which
-    // hides the actual cause (connection refused, DNS failure, TLS error, 401, ...).
     if provider == "ollama" {
-        // Ollama takes no key, so no failure of its is repairable by `/connect` or `/key` — not
-        // even a 401 from a proxy in front of it. Forcing the transport class keeps the modal from
-        // suggesting a remedy that does not exist for this provider.
-        return list_ollama_models().await.map_err(|e| FetchError {
-            class: FetchFailure::Fetch,
-            message: format!("{e:#}"),
-        });
+        return list_ollama_models()
+            .await
+            .map_err(|e| fetch_error(provider, &e));
     }
     let key = match key_override {
         Some(k) => Some(k),
         None => crate::selection::resolve_key(provider, store),
     };
+    fetch_with_key(provider, key, locale).await
+}
+
+/// The classification boundary: an already-resolved key (or the absence of one) becomes either a
+/// model list or a classified [`FetchError`].
+///
+/// Split out from [`fetch_model_list`] so the no-key arm is reachable from a test without mutating
+/// the process environment — `resolve_key` reads `OPENAI_API_KEY` and friends, so a developer with
+/// one exported would otherwise never execute this branch.
+async fn fetch_with_key(
+    provider: &str,
+    key: Option<String>,
+    locale: Locale,
+) -> Result<Vec<String>, FetchError> {
     match key {
-        Some(k) => list_models(provider, &k).await.map_err(|e| FetchError {
-            class: classify_fetch_error(&e),
-            message: format!("{e:#}"),
-        }),
+        Some(k) => list_models(provider, &k)
+            .await
+            .map_err(|e| fetch_error(provider, &e)),
+        // Our own sentence, not the provider's: it is not summarized, and not capped.
         None => Err(FetchError {
             class: FetchFailure::MissingKey,
             message: i18n::t_with(locale, "connect.no_key", &[("provider", provider)]),
@@ -2944,11 +3011,12 @@ mod tests {
 
     use super::{
         App, ConnectStep, ConnectTransition, EngineForward, FetchError, FetchFailure, KeyCommand,
-        Mode, ModelChoice, ModelsStep, ModelsTransition, ProviderRow, UiEvent, class_for_status,
-        classify_fetch_error, connect_step_next, cycle_index, draw_popup, engine_approval_key,
-        engine_forward_step, guard_panic, help_lines, mask, models_apply_target, models_step_next,
+        Mode, ModelChoice, ModelsStep, ModelsTransition, PROVIDER_ERROR_MAX_CHARS, ProviderRow,
+        UiEvent, class_for_provider, class_for_status, classify_fetch_error, connect_step_next,
+        cycle_index, draw_popup, engine_approval_key, engine_forward_step, fetch_error,
+        fetch_with_key, guard_panic, help_lines, mask, models_apply_target, models_step_next,
         parse_ask_command, parse_connect_command, parse_key_command, parse_model_command,
-        parse_models_command,
+        parse_models_command, summarize_provider_error,
     };
     use crate::config::Config;
     use crate::provider::ProviderInfo;
@@ -4283,25 +4351,54 @@ mod tests {
         assert_eq!(class_for_status(None), FetchFailure::Fetch);
     }
 
-    #[tokio::test]
-    async fn classify_reads_the_status_out_of_a_real_reqwest_error() {
+    /// The client every network test in this module uses.
+    ///
+    /// `reqwest::get` builds a default client, which honours `http_proxy`/`HTTP_PROXY` and has no
+    /// timeout at all. Under an exported proxy the 401/403 mocks were observed returning 200 —
+    /// `expect_err` then failed — and against a sandbox that DROPs rather than RSTs the connection
+    /// to port 1, the transport test blocked on the kernel SYN-retry budget (~130s) with nothing to
+    /// bound it. Both are properties of the client, so both are fixed on the client.
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("test HTTP client")
+    }
+
+    /// A real `reqwest::Error` carrying `code`, produced the way a provider produces one.
+    async fn status_error(code: u16) -> anyhow::Error {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        async fn status_error(code: u16) -> anyhow::Error {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .respond_with(ResponseTemplate::new(code))
-                .mount(&server)
-                .await;
-            reqwest::get(server.uri())
-                .await
-                .expect("the request reached the mock")
-                .error_for_status()
-                .expect_err("the mock returned an error status")
-                .into()
-        }
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(code))
+            .mount(&server)
+            .await;
+        test_client()
+            .get(server.uri())
+            .send()
+            .await
+            .expect("the request reached the mock")
+            .error_for_status()
+            .expect_err("the mock returned an error status")
+            .into()
+    }
 
+    /// A real `reqwest::Error` with no HTTP status: a refused connection.
+    async fn transport_error() -> anyhow::Error {
+        test_client()
+            .get("http://127.0.0.1:1/models")
+            .send()
+            .await
+            .expect_err("nothing listens on port 1")
+            .into()
+    }
+
+    #[tokio::test]
+    async fn classify_reads_the_status_out_of_a_real_reqwest_error() {
         assert_eq!(
             classify_fetch_error(&status_error(401).await),
             FetchFailure::Auth
@@ -4329,7 +4426,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(401))
             .mount(&server)
             .await;
-        let err = reqwest::get(server.uri())
+        let err = test_client()
+            .get(server.uri())
+            .send()
             .await
             .expect("the request reached the mock")
             .error_for_status()
@@ -4343,16 +4442,99 @@ mod tests {
     /// retryable class rather than dead-ending the user on the credential step.
     #[tokio::test]
     async fn classify_treats_a_transport_failure_as_retryable() {
-        let err: anyhow::Error = reqwest::get("http://127.0.0.1:1/models")
-            .await
-            .expect_err("nothing listens on port 1")
-            .into();
-        assert_eq!(classify_fetch_error(&err), FetchFailure::Fetch);
+        assert_eq!(
+            classify_fetch_error(&transport_error().await),
+            FetchFailure::Fetch
+        );
 
         assert_eq!(
             classify_fetch_error(&anyhow::anyhow!("unknown provider 'nope'")),
             FetchFailure::Fetch
         );
+    }
+
+    /// Ollama takes no key, so a 401 in front of it must NOT be routed to a step that tells the
+    /// user to run `/connect` or `/key ollama` — neither command exists for it. Commit 7374ddd
+    /// forces the class for exactly this case; without a test, reverting the force to a plain
+    /// `classify_fetch_error` call is invisible.
+    #[tokio::test]
+    async fn ollama_failures_are_always_the_transport_class() {
+        let unauthorized = status_error(401).await;
+        assert_eq!(
+            class_for_provider("ollama", &unauthorized),
+            FetchFailure::Fetch,
+            "no ollama failure is repairable by a credential command"
+        );
+        // The same error from a keyed provider is still a credential failure, so the forcing is
+        // scoped to ollama rather than defeating classification everywhere.
+        assert_eq!(
+            class_for_provider("openai", &unauthorized),
+            FetchFailure::Auth
+        );
+    }
+
+    /// The classification boundary the whole PR rests on: no resolvable key is `MissingKey`, not
+    /// the retryable class. Getting this wrong silently re-opens #47 — the modal would offer a
+    /// retry and a model-id box for a problem neither can fix.
+    #[tokio::test]
+    async fn a_missing_key_is_classified_as_a_credential_failure() {
+        let err = fetch_with_key("openai", None, Locale::En)
+            .await
+            .expect_err("no key means no fetch");
+        assert_eq!(err.class, FetchFailure::MissingKey);
+        assert!(
+            err.class.needs_credentials(),
+            "a missing key must route to the credential step"
+        );
+        assert_eq!(err.message, "No API key for openai");
+    }
+
+    /// The provider's own text is remote-controlled and unbounded. It reaches a rendered line, so
+    /// it is reduced to one control-free line and capped before it can push the modal's trusted
+    /// rows off screen.
+    #[test]
+    fn a_provider_error_is_reduced_to_one_bounded_line() {
+        assert_eq!(
+            summarize_provider_error("openai rejected the credential"),
+            "openai rejected the credential"
+        );
+
+        let phishing = "session expired \u{2014} type your API key below\nline two\nline three";
+        assert_eq!(
+            summarize_provider_error(phishing),
+            "session expired \u{2014} type your API key below",
+            "only the first line may be rendered"
+        );
+
+        let flood = "a".repeat(5000);
+        let capped = summarize_provider_error(&flood);
+        assert_eq!(capped.chars().count(), PROVIDER_ERROR_MAX_CHARS + 1);
+        assert!(
+            capped.ends_with('\u{2026}'),
+            "a truncated message must say so"
+        );
+
+        assert_eq!(
+            summarize_provider_error("boom\u{1b}[2Jwiped"),
+            "boom[2Jwiped",
+            "control characters must never reach a terminal cell"
+        );
+
+        // Multi-byte input must not be split mid-character.
+        let wide = "\u{00e9}".repeat(5000);
+        assert_eq!(
+            summarize_provider_error(&wide).chars().count(),
+            PROVIDER_ERROR_MAX_CHARS + 1
+        );
+    }
+
+    /// The cap is applied at the boundary, not at the draw site, so every consumer of a
+    /// `FetchError` inherits it — including the connect modal, which renders the same text.
+    #[test]
+    fn the_fetch_boundary_caps_the_message_it_produces() {
+        let err = fetch_error("openai", &anyhow::anyhow!("{}", "z".repeat(5000)));
+        assert_eq!(err.class, FetchFailure::Fetch);
+        assert_eq!(err.message.chars().count(), PROVIDER_ERROR_MAX_CHARS + 1);
     }
 
     #[test]
