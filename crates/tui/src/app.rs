@@ -641,22 +641,28 @@ impl App {
             .collect()
     }
 
-    /// Commit whatever the open modal selected, then close it. Closing first is the `/models`
-    /// ordering; `persist_model` never touches the modal, so the order is not observable.
-    fn apply_and_close_modal(&mut self) {
-        let apply = self.modal.current().and_then(Modal::apply_target);
+    /// Commit what the transition decided, then close the modal.
+    ///
+    /// `apply` is the value the transition computed from the state that authorised it, not a second
+    /// read of `self.modal`: the two commits carry different privilege — `Provider` changes which
+    /// service receives the user's prompts and key, `Model` only re-pins a model on the provider
+    /// already active — and re-deriving the choice after `close()` would decide it from state that
+    /// had already moved.
+    ///
+    /// Closing first is the `/models` ordering; `persist_model` never touches the modal, so the
+    /// order is not observable.
+    fn apply_and_close_modal(&mut self, apply: ModalApply) {
         self.modal.close();
         match apply {
-            Some(ModalApply::Provider { provider, model }) => {
+            ModalApply::Provider { provider, model } => {
                 let previous_provider = self.settings.provider.replace(provider.clone());
                 if !self.persist_model(provider, model) {
                     self.settings.provider = previous_provider;
                 }
             }
-            Some(ModalApply::Model { provider, model }) => {
+            ModalApply::Model { provider, model } => {
                 self.persist_model(provider, model);
             }
-            None => {}
         }
     }
 
@@ -853,7 +859,7 @@ impl App {
         let before = current.fetch_target().map(str::to_string);
         match transition {
             ModalTransition::Close => self.modal.close(),
-            ModalTransition::Apply => self.apply_and_close_modal(),
+            ModalTransition::Apply(apply) => self.apply_and_close_modal(apply),
             ModalTransition::Step(next) => {
                 let after = next.fetch_target().map(str::to_string);
                 self.modal.replace_step(next);

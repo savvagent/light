@@ -124,23 +124,28 @@ pub(crate) enum Modal {
     Models(ModelsStep),
 }
 
-/// The result of stepping any modal: advance to a new state, commit its selection, or close.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ModalTransition {
-    Step(Modal),
-    Apply,
-    Close,
-}
-
-/// What a [`ModalTransition::Apply`] commits. The two modals apply different things: `/connect`
-/// adopts a new preferred provider, `/models` only re-pins the model of the provider already
-/// active.
+/// What a [`ModalTransition::Apply`] commits. The two modals apply different things, at different
+/// privilege: `/connect` adopts a new preferred provider — changing which service receives the
+/// user's prompts and key — while `/models` only re-pins the model of the provider already active.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModalApply {
     /// `/connect`: adopt `provider` as the preferred provider and pin `model` to it.
     Provider { provider: String, model: String },
     /// `/models`: pin `model` to the already-active `provider`.
     Model { provider: String, model: String },
+}
+
+/// The result of stepping any modal: advance to a new state, commit a [`ModalApply`], or close.
+///
+/// `Apply` carries what it commits rather than naming it for the caller to look up again. That
+/// makes "a step with nothing to commit cannot produce an `Apply`" structural — the rule is stated
+/// once, in the transition arm that has the selection in scope, and there is no second read of the
+/// modal (after the caller has already begun mutating state) that could disagree with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ModalTransition {
+    Step(Modal),
+    Apply(ModalApply),
+    Close,
 }
 
 impl Modal {
@@ -151,26 +156,6 @@ impl Modal {
             Modal::Help => help_step_next(key),
             Modal::Connect(step) => connect_step_next(step, key),
             Modal::Models(step) => models_step_next(step, key),
-        }
-    }
-
-    /// What [`ModalTransition::Apply`] should commit, or `None` when this state carries no usable
-    /// selection (still fetching, an empty list, or a blank manual entry).
-    pub(crate) fn apply_target(&self) -> Option<ModalApply> {
-        match self {
-            Modal::Connect(ConnectStep::ModelList {
-                provider,
-                models,
-                selected,
-                fetching: false,
-                ..
-            }) => models.get(*selected).map(|model| ModalApply::Provider {
-                provider: provider.clone(),
-                model: model.clone(),
-            }),
-            Modal::Help | Modal::Connect(_) => None,
-            Modal::Models(step) => models_apply_target(step)
-                .map(|(provider, model)| ModalApply::Model { provider, model }),
         }
     }
 
@@ -414,7 +399,15 @@ fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ModalTransition {
                     }))
                 }
             }
-            KeyCode::Enter if !*fetching && !models.is_empty() => ModalTransition::Apply,
+            // `models.get` subsumes the emptiness check and hands the payload straight to `Apply`,
+            // so there is no state in which this returns `Apply` with nothing to commit.
+            KeyCode::Enter if !*fetching => match models.get(*selected) {
+                Some(model) => ModalTransition::Apply(ModalApply::Provider {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                }),
+                None => ModalTransition::Step(Modal::Connect(step.clone())),
+            },
             KeyCode::Up | KeyCode::Down => {
                 let delta = if key.code == KeyCode::Up { -1 } else { 1 };
                 ModalTransition::Step(Modal::Connect(ConnectStep::ModelList {
@@ -429,32 +422,6 @@ fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ModalTransition {
             }
             _ => ModalTransition::Step(Modal::Connect(step.clone())),
         },
-    }
-}
-
-/// The `(provider, model)` pair a models-modal step would persist, or `None` when the step
-/// carries no usable selection (still fetching, an empty list, or a blank manual entry).
-fn models_apply_target(step: &ModelsStep) -> Option<(String, String)> {
-    match step {
-        ModelsStep::ModelList {
-            provider,
-            models,
-            selected,
-            fetching: false,
-        } => models
-            .get(*selected)
-            .map(|model| (provider.clone(), model.clone())),
-        ModelsStep::Manual {
-            provider, input, ..
-        } => {
-            let id = input.trim();
-            if id.is_empty() {
-                None
-            } else {
-                Some((provider.clone(), id.to_string()))
-            }
-        }
-        _ => None,
     }
 }
 
@@ -510,7 +477,13 @@ fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModalTransition {
             } else {
                 match key.code {
                     KeyCode::Esc => ModalTransition::Close,
-                    KeyCode::Enter => ModalTransition::Apply,
+                    KeyCode::Enter => match models.get(*selected) {
+                        Some(model) => ModalTransition::Apply(ModalApply::Model {
+                            provider: provider.clone(),
+                            model: model.clone(),
+                        }),
+                        None => ModalTransition::Step(Modal::Models(step.clone())),
+                    },
                     KeyCode::Up | KeyCode::Down => {
                         let delta = if key.code == KeyCode::Up { -1 } else { 1 };
                         ModalTransition::Step(Modal::Models(ModelsStep::ModelList {
@@ -530,7 +503,12 @@ fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModalTransition {
             error,
         } => match key.code {
             KeyCode::Esc => ModalTransition::Close,
-            KeyCode::Enter if !input.trim().is_empty() => ModalTransition::Apply,
+            KeyCode::Enter if !input.trim().is_empty() => {
+                ModalTransition::Apply(ModalApply::Model {
+                    provider: provider.clone(),
+                    model: input.trim().to_string(),
+                })
+            }
             KeyCode::Backspace => {
                 let mut next = input.clone();
                 next.pop();
@@ -1010,6 +988,13 @@ mod tests {
             error: None,
         }
     }
+    fn model_apply(provider: &str, model: &str) -> ModalTransition {
+        ModalTransition::Apply(ModalApply::Model {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        })
+    }
+
     /// A minimal render context: no app-level error, no offline reason.
     fn ctx() -> ModalContext<'static> {
         ModalContext {
@@ -1143,7 +1128,10 @@ mod tests {
         // re-inspected after the fact to discover it had something to commit.
         assert_eq!(
             connect_step_next(&step, key(KeyCode::Enter)),
-            ModalTransition::Apply
+            ModalTransition::Apply(ModalApply::Provider {
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+            })
         );
 
         let step = ConnectStep::ModelList {
@@ -1270,7 +1258,7 @@ mod tests {
         );
         assert_eq!(
             models_step_next(&step, key(KeyCode::Enter)),
-            ModalTransition::Apply
+            model_apply("openai", "gpt-4o")
         );
         assert_eq!(
             models_step_next(&step, key(KeyCode::Esc)),
@@ -1312,30 +1300,49 @@ mod tests {
 
         assert_eq!(
             models_step_next(&models_manual_step("gpt-4o"), key(KeyCode::Enter)),
-            ModalTransition::Apply
+            model_apply("openai", "gpt-4o")
         );
     }
 
+    /// Was `models_apply_target_reads_the_highlighted_or_typed_id`; the target is no longer a
+    /// separate function, so the same cases are asserted on the payload `Enter` carries.
     #[test]
-    fn models_apply_target_reads_the_highlighted_or_typed_id() {
+    fn models_enter_applies_the_highlighted_or_typed_id_and_nothing_else() {
         assert_eq!(
-            models_apply_target(&models_list_step(
-                vec!["gpt-4o".to_string(), "o3".to_string()],
-                false
-            )),
-            Some(("openai".to_string(), "gpt-4o".to_string()))
+            models_step_next(
+                &models_list_step(vec!["gpt-4o".to_string(), "o3".to_string()], false),
+                key(KeyCode::Enter)
+            ),
+            model_apply("openai", "gpt-4o")
+        );
+        let fetching = models_list_step(vec!["gpt-4o".to_string()], true);
+        assert_eq!(
+            models_step_next(&fetching, key(KeyCode::Enter)),
+            ModalTransition::Step(Modal::Models(fetching.clone())),
+            "a list still loading has nothing to commit"
+        );
+        let empty = models_list_step(vec![], false);
+        assert_eq!(
+            models_step_next(&empty, key(KeyCode::Enter)),
+            ModalTransition::Step(Modal::Models(empty.clone())),
+            "an empty list has nothing to commit"
         );
         assert_eq!(
-            models_apply_target(&models_list_step(vec!["gpt-4o".to_string()], true)),
-            None
+            models_step_next(&models_manual_step("  o3-mini  "), key(KeyCode::Enter)),
+            model_apply("openai", "o3-mini"),
+            "a manual id is trimmed before it is committed"
         );
-        assert_eq!(models_apply_target(&models_list_step(vec![], false)), None);
+        let blank = models_manual_step("   ");
         assert_eq!(
-            models_apply_target(&models_manual_step("  o3-mini  ")),
-            Some(("openai".to_string(), "o3-mini".to_string()))
+            models_step_next(&blank, key(KeyCode::Enter)),
+            ModalTransition::Step(Modal::Models(blank.clone())),
+            "a blank manual entry has nothing to commit"
         );
-        assert_eq!(models_apply_target(&models_manual_step("   ")), None);
-        assert_eq!(models_apply_target(&ModelsStep::Offline), None);
+        assert_eq!(
+            models_step_next(&ModelsStep::Offline, key(KeyCode::Enter)),
+            ModalTransition::Close,
+            "the offline step commits nothing at all"
+        );
     }
 
     #[test]
@@ -1514,16 +1521,13 @@ mod tests {
             error: None,
             from_key: false,
         };
-        assert!(matches!(
-            Modal::Connect(step.clone()).next(key(KeyCode::Enter)),
-            ModalTransition::Apply
-        ));
         assert_eq!(
-            Modal::Connect(step).apply_target(),
-            Some(ModalApply::Provider {
+            Modal::Connect(step).next(key(KeyCode::Enter)),
+            ModalTransition::Apply(ModalApply::Provider {
                 provider: "openai".into(),
                 model: "gpt-5-mini".into()
-            })
+            }),
+            "/connect adopts a provider as well as pinning its model"
         );
     }
 
@@ -1537,22 +1541,18 @@ mod tests {
             modal.next(key(KeyCode::Esc)),
             ModalTransition::Close
         ));
-        assert_eq!(modal.apply_target(), None);
     }
 
     #[test]
     fn models_enter_applies_the_active_provider_not_a_new_preference() {
         let modal = Modal::Models(models_list_step(vec!["m1".into()], false));
-        assert!(matches!(
-            modal.next(key(KeyCode::Enter)),
-            ModalTransition::Apply
-        ));
         assert_eq!(
-            modal.apply_target(),
-            Some(ModalApply::Model {
+            modal.next(key(KeyCode::Enter)),
+            ModalTransition::Apply(ModalApply::Model {
                 provider: "openai".into(),
                 model: "m1".into()
-            })
+            }),
+            "/models re-pins a model and must never adopt a provider"
         );
     }
 
@@ -1603,7 +1603,6 @@ mod tests {
             Modal::Help.next(key(KeyCode::Char('x'))),
             ModalTransition::Step(Modal::Help)
         ));
-        assert_eq!(Modal::Help.apply_target(), None);
         assert_eq!(Modal::Help.fetch_target(), None);
     }
 
