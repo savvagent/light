@@ -1,6 +1,6 @@
 # /models command — design
 
-> **Status:** DRAFT — a `/models` modal scoped to the active provider, reusing #35's fetch plumbing.
+> **Status:** IMPLEMENTED — a `/models` modal scoped to the active provider, reusing #35's fetch plumbing.
 
 > **Implements:** https://github.com/savvagent/light-factory/issues/36
 
@@ -159,14 +159,35 @@ computes `selected` as the index of `provider_info.model` (else 0), and clears `
 failure it swaps the step to `Manual { input: "", error: localized }`.
 
 `apply_and_close_models` extracts the choice (the highlighted model, or the trimmed manual id),
-closes, then — only for a real choice — writes `settings.models[provider] = model`, saves settings,
-calls `rebuild_provider()`, and sets `status.model_set`. It deliberately does **not** write
-`settings.provider` (the provider is already active), unlike `apply_and_close_connect` which must
-activate a freshly connected provider.
+closes, then — only for a real choice — delegates to `persist_model`, which writes
+`settings.models[provider] = model`, saves, calls `rebuild_provider()`, and sets `status.model_set`.
+It deliberately does **not** write `settings.provider` (the provider is already active), unlike
+`apply_and_close_connect` which must activate a freshly connected provider.
+
+**Save failures roll back.** `persist_model` stages the insert, and on a save failure restores the
+previous value (or removes the entry) and reports through `self.error`, not `self.status`. Without
+the rollback the rejected model stays in the in-memory `Settings`, which is the input to *every*
+later save and rebuild — so a subsequent unrelated `/lang` or `/key` would silently persist and
+activate the model the user was just told had failed. `persist_settings`/`persist_model` are shared
+with `/model`, `/lang`, and the connect apply path, which previously discarded the save `Result`
+outright.
 
 Rendering reuses the centered `Clear`+`Block` popup from `draw_connect`, factored into a shared
-`draw_popup(frame, area, title, lines)` helper to avoid duplicating the rect/clear/render block. The
-title is the localized "Select a model"; the footer is per-step (Esc/Enter + up/down arrows).
+`draw_popup(frame, area, title, body, footer, focus)` helper to avoid duplicating the
+rect/clear/render block. The title is the localized "Select a model"; the footer is per-step
+(Esc/Enter + up/down arrows).
+
+`draw_popup` pins the footer to the bottom of the popup and scrolls `body` so that the row named by
+`focus` (the highlighted model) stays visible. Without this, a provider returning more models than
+the terminal has rows renders the pre-highlighted row and the footer off-screen — arrow keys appear
+frozen while the pending selection walks invisibly, and Enter commits a model the user never saw.
+Both modals pass `focus` for their list steps. The popup height is clamped in `usize` before the
+`u16` cast, so a remote-supplied list cannot overflow it.
+
+The `Offline` step renders `crate::provider::offline_notice(locale, reason)` above the
+"use /connect" hint, so the notice names the real reason. `models.offline` alone would report "no
+active provider" for `NamedProviderMissingKey` and `BaseUrlRejected`, where a provider *is* named
+and the real problem is a missing key or a rejected base URL.
 
 ### 5.3 Command wiring
 
@@ -206,6 +227,32 @@ title is the localized "Select a model"; the footer is per-step (Esc/Enter + up/
   command entry.
 - **Integration gate:** `cargo test --workspace`, `cargo clippy --workspace --all-targets -D warnings`,
   `cargo fmt --all --check`.
+
+### 5.4 Config-path seam
+
+Testing the apply path requires that a test never write the developer's real
+`$XDG_CONFIG_HOME/light-factory/config.json`. `settings.rs` therefore exposes its path-taking
+accessors (`path`, `load_at`, `save_at`, all `pub(crate)`) and a `SettingsHandle { settings, path }`
+that carries the settings together with the file they came from. `main` resolves the path once and
+passes the handle to `run`/`App::new`; `App` holds `settings` and `settings_path`. The untyped
+`load()`/`save()` wrappers are gone, so the path is resolved in exactly one place.
+
+`crates/tui` is a binary crate whose `lib.rs` does not export `settings`, so these items are
+unreachable from outside the crate and this is not a public-API change — no version bump
+(Non-Negotiable Rule 6). The test constructor defaults `settings_path` to a unique temp file, making
+isolation structural rather than something each test must remember.
+
+A `dyn SettingsStore` trait seam was considered and rejected: `Settings` is one small JSON blob
+behind two functions, with no second backend in prospect. Constructor injection gets the full
+testability benefit without new surface area.
+
+### 5.5 Modal lifecycle on session loss
+
+`dismiss_modals` clears any open modal (and bumps its nonce) when the session goes away — both on a
+server-driven `ws_closed` and on explicit sign-out. Without it, a modal opened while connected
+floats over the sign-in screen, swallows every keypress (`handle_key` routes on
+`self.models.is_some()` before the mode match), and on Esc restores the captured
+`models_return = Mode::Connected` — putting the user back on the connected screen with no session.
 
 ## 8. Risks & Open Questions
 
