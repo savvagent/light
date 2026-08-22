@@ -2817,9 +2817,28 @@ fn help_lines(locale: Locale) -> Vec<String> {
     lines
 }
 
+/// The rows `line` occupies once wrapped to `width`, measured with the very wrapper the render
+/// below uses, so the measurement cannot disagree with the drawing.
+///
+/// `Paragraph::line_count` is unstable (`unstable-rendered-line-info`); hand-rolling the count
+/// instead would reintroduce exactly the measure/render disagreement this exists to remove.
+/// `max(1)` covers `width == 0`, where the wrapper yields nothing.
+fn wrapped_rows(line: &Line, width: u16) -> usize {
+    Paragraph::new(line.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .max(1)
+}
+
 /// Render a centered, bordered popup titled `title`, clearing what is underneath. `footer` is
 /// pinned to the bottom so it stays visible, and `focus` names a `body` row that must remain on
 /// screen — the body scrolls to keep it visible when the list is taller than the terminal.
+///
+/// The box is sized from the **wrapped** row count, not from `body.len()`. Sizing from the logical
+/// line count silently clipped every body line a provider-supplied string pushed past the 58-column
+/// inner width: `focus` is `None` on the notice steps, so the scroll offset is 0 and the overflow
+/// is never reachable. On the `/models` credential step that took the remedy off screen, and on the
+/// manual step it took the input box off screen while keystrokes still accumulated (#57).
 fn draw_popup(
     frame: &mut Frame,
     area: Rect,
@@ -2831,10 +2850,17 @@ fn draw_popup(
     // Borders take two rows and the pinned footer one.
     const CHROME: u16 = 3;
     let available = area.height.saturating_sub(2);
-    // Clamp in `usize` first: a remote-supplied list long enough to overflow `u16` must not wrap.
-    let wanted = body.len().saturating_add(CHROME as usize);
-    let height = u16::try_from(wanted).unwrap_or(u16::MAX).min(available);
     let width = 60u16.min(area.width.saturating_sub(2));
+    // The block's left and right borders each take a column.
+    let inner_width = width.saturating_sub(2);
+    let rows: Vec<usize> = body.iter().map(|l| wrapped_rows(l, inner_width)).collect();
+    // Clamp in `usize` first: a remote-supplied list long enough to overflow `u16` must not wrap.
+    let wanted = rows
+        .iter()
+        .copied()
+        .fold(0usize, usize::saturating_add)
+        .saturating_add(CHROME as usize);
+    let height = u16::try_from(wanted).unwrap_or(u16::MAX).min(available);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -2854,9 +2880,19 @@ fn draw_popup(
 
     let body_height = inner.height.saturating_sub(1);
     if body_height > 0 {
-        // Scroll just far enough to bring the focused row into view.
+        // Scroll just far enough to bring the focused row into view. `scroll` counts *wrapped*
+        // rows, so the focused body line's position is summed in wrapped rows too.
         let offset = match focus {
-            Some(row) => (row as u16).saturating_sub(body_height.saturating_sub(1)),
+            Some(row) => {
+                let end = rows
+                    .iter()
+                    .take(row.saturating_add(1))
+                    .copied()
+                    .fold(0usize, usize::saturating_add);
+                u16::try_from(end)
+                    .unwrap_or(u16::MAX)
+                    .saturating_sub(body_height)
+            }
             None => 0,
         };
         frame.render_widget(
@@ -2909,7 +2945,7 @@ mod tests {
     use super::{
         App, ConnectStep, ConnectTransition, EngineForward, FetchError, FetchFailure, KeyCommand,
         Mode, ModelChoice, ModelsStep, ModelsTransition, ProviderRow, UiEvent, class_for_status,
-        classify_fetch_error, connect_step_next, cycle_index, engine_approval_key,
+        classify_fetch_error, connect_step_next, cycle_index, draw_popup, engine_approval_key,
         engine_forward_step, guard_panic, help_lines, mask, models_apply_target, models_step_next,
         parse_ask_command, parse_connect_command, parse_key_command, parse_model_command,
         parse_models_command,
@@ -2922,7 +2958,8 @@ mod tests {
     use light_factory_providers::{LocalProvider, OfflineReason, Provider};
     use light_factory_tui::credentials::{CredentialStore, MemStore};
     use light_factory_tui::i18n::Locale;
-    use ratatui::Terminal;
+    use ratatui::text::Line;
+    use ratatui::{Frame, Terminal};
     use tokio::sync::broadcast::error::RecvError;
     use tokio::sync::mpsc;
 
@@ -3345,12 +3382,12 @@ mod tests {
         }
     }
 
-    /// Render the whole app to an off-screen terminal and return it as text, so modal rendering
-    /// can be asserted without a real terminal.
-    fn render(app: &mut App, width: u16, height: u16) -> String {
+    /// Draw `f` to an off-screen terminal and return the buffer as text, so rendering can be
+    /// asserted without a real terminal.
+    fn draw_to_text(width: u16, height: u16, f: impl FnOnce(&mut Frame)) -> String {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal.draw(f).unwrap();
         terminal
             .backend()
             .buffer()
@@ -3359,6 +3396,71 @@ mod tests {
             .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Render the whole app to an off-screen terminal and return it as text, so modal rendering
+    /// can be asserted without a real terminal.
+    fn render(app: &mut App, width: u16, height: u16) -> String {
+        draw_to_text(width, height, |frame| app.draw(frame))
+    }
+
+    /// The regression behind #57: `draw_popup` sized its box from `body.len()` — logical lines,
+    /// counted before wrapping — while rendering with `Wrap`. Every body line below a wrapping one
+    /// fell outside the box, and with `focus: None` the scroll offset is 0, so nothing could bring
+    /// it back. Two logical lines therefore rendered as one.
+    #[test]
+    fn draw_popup_sizes_itself_from_wrapped_rows_not_logical_lines() {
+        // ~200 columns: four rows against the 58-column inner width.
+        let long = "wrap ".repeat(40);
+        let screen = draw_to_text(80, 24, |frame| {
+            let area = frame.area();
+            draw_popup(
+                frame,
+                area,
+                "Title".to_string(),
+                vec![Line::from(long.clone()), Line::from("TAIL-MARKER")],
+                Line::from("FOOTER-MARKER"),
+                None,
+            );
+        });
+        assert!(
+            screen.contains("TAIL-MARKER"),
+            "a line below a wrapping one was clipped out of the box:\n{screen}"
+        );
+        assert!(
+            screen.contains("FOOTER-MARKER"),
+            "the pinned footer must survive:\n{screen}"
+        );
+    }
+
+    /// The box must still stop growing at the terminal, and the focused row must still be scrolled
+    /// into view — now counted in wrapped rows, since that is what `Paragraph::scroll` counts.
+    #[test]
+    fn draw_popup_scrolls_wrapped_rows_to_keep_the_focused_line_visible() {
+        let mut body: Vec<Line> = (0..40)
+            .map(|i| Line::from(format!("{} row-{i:02}", "pad ".repeat(20))))
+            .collect();
+        body.push(Line::from("FOCUSED-ROW"));
+        let focus = body.len() - 1;
+        let screen = draw_to_text(80, 12, |frame| {
+            let area = frame.area();
+            draw_popup(
+                frame,
+                area,
+                "Title".to_string(),
+                body.clone(),
+                Line::from("FOOTER-MARKER"),
+                Some(focus),
+            );
+        });
+        assert!(
+            screen.contains("FOCUSED-ROW"),
+            "the focused row scrolled off screen:\n{screen}"
+        );
+        assert!(
+            screen.contains("FOOTER-MARKER"),
+            "the pinned footer must survive:\n{screen}"
+        );
     }
 
     #[test]

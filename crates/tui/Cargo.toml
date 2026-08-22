@@ -29,7 +29,12 @@ assets = [
 light-factory-protocol = { path = "../protocol" }
 light-factory-providers = { path = "../providers" }
 light-factory-engine = { path = "../engine" }
-ratatui = { workspace = true, features = ["crossterm"] }
+ratatui = { workspace = true, features = [
+    "crossterm",
+    # `Paragraph::line_count` is the only way to size a popup from the rows the renderer will
+    # actually produce rather than from the logical line count; see `draw_popup`.
+    "unstable-rendered-line-info",
+] }
 crossterm = { workspace = true, features = ["event-stream"] }
 reqwest = { workspace = true }
 tokio = { workspace = true }
