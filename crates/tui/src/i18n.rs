@@ -192,6 +192,10 @@ const EN: Catalog = &[
     ("key.list", "keys: {list}"),
     ("status.model_set", "Model set to {model}"),
     (
+        "status.model_set_unverified",
+        "Model set to {model} \u{2014} not verified against {provider}",
+    ),
+    (
         "status.settings_save_failed",
         "Couldn't save settings: {error}",
     ),
@@ -278,12 +282,31 @@ const EN: Catalog = &[
     ("connect.no_key", "No API key for {provider}"),
     ("models.title", "Select a model"),
     ("models.offline", "Use /connect to connect a provider first"),
-    ("models.manual", "Type a model id, or Esc to close"),
+    (
+        "models.manual_unverified",
+        "Type a model id \u{2014} it won't be checked against {provider}",
+    ),
+    (
+        "models.auth_rejected",
+        "{provider} rejected the credential: {error}",
+    ),
+    (
+        "models.credentials_hint",
+        "Typing a model id can't fix this.",
+    ),
+    (
+        "models.credentials_remedy",
+        "Use /connect, /key {provider}, or /model <id>",
+    ),
     (
         "models.footer_list",
         "Enter: select · Esc: close · \u{2191}/\u{2193}: navigate",
     ),
-    ("models.footer_manual", "Enter: save · Esc: close"),
+    (
+        "models.footer_manual",
+        "Enter: save unverified · Ctrl+R: retry · Esc: close",
+    ),
+    ("models.footer_retry", "Ctrl+R: retry · Esc: close"),
     ("models.footer_offline", "Esc: close"),
 ];
 
@@ -478,6 +501,10 @@ const ES: Catalog = &[
     ("key.list", "claves: {list}"),
     ("status.model_set", "Modelo cambiado a {model}"),
     (
+        "status.model_set_unverified",
+        "Modelo cambiado a {model} \u{2014} no verificado con {provider}",
+    ),
+    (
         "status.settings_save_failed",
         "No se pudieron guardar los ajustes: {error}",
     ),
@@ -580,14 +607,34 @@ const ES: Catalog = &[
         "Usa /connect para conectar un proveedor primero",
     ),
     (
-        "models.manual",
-        "Escribe un id de modelo, o Esc para cerrar",
+        "models.manual_unverified",
+        "Escribe un id de modelo \u{2014} no se verificará con {provider}",
+    ),
+    (
+        "models.auth_rejected",
+        "{provider} rechazó la credencial: {error}",
+    ),
+    (
+        "models.credentials_hint",
+        "Escribir un id de modelo no soluciona esto.",
+    ),
+    (
+        "models.credentials_remedy",
+        "Usa /connect, /key {provider}, o /model <id>",
     ),
     (
         "models.footer_list",
         "Enter: elegir · Esc: cerrar · \u{2191}/\u{2193}: navegar",
     ),
-    ("models.footer_manual", "Enter: guardar · Esc: cerrar"),
+    // "sin verificar" is dropped deliberately: with it the line is 63 columns against a
+    // 58-column inner width and the footer is rendered without `Wrap`, so it was hard-truncated
+    // and ES users silently lost "Esc: cerrar". The prompt line above already says the id is not
+    // verified.
+    (
+        "models.footer_manual",
+        "Enter: guardar · Ctrl+R: reintentar · Esc: cerrar",
+    ),
+    ("models.footer_retry", "Ctrl+R: reintentar · Esc: cerrar"),
     ("models.footer_offline", "Esc: cerrar"),
 ];
 
@@ -669,6 +716,28 @@ mod tests {
     #[test]
     fn es_mirrors_en_exactly() {
         assert_eq!(keys(ES), keys(EN), "ES must define exactly the EN key set");
+    }
+
+    /// Footers are pinned to one row and rendered without `Wrap`, so anything past the popup's
+    /// inner width is hard-truncated and the tail of the line is silently lost. This bit ES first
+    /// — `models.footer_manual` was 63 columns and cost ES users "Esc: cerrar" — and was invisible
+    /// because every render assertion runs in EN.
+    #[test]
+    fn every_footer_fits_the_popup_in_both_locales() {
+        // `draw_popup` draws a 60-column box with a one-column border on each side.
+        const INNER_WIDTH: usize = 58;
+        for (catalog, name) in [(EN, "EN"), (ES, "ES")] {
+            for (key, value) in catalog {
+                if !key.contains(".footer") {
+                    continue;
+                }
+                let columns = value.chars().count();
+                assert!(
+                    columns <= INNER_WIDTH,
+                    "{name} {key} is {columns} columns; it is truncated at {INNER_WIDTH}: {value}"
+                );
+            }
+        }
     }
 
     #[test]

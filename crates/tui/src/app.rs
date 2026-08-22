@@ -55,7 +55,7 @@ pub enum UiEvent {
     ModelsFetched {
         nonce: u64,
         provider: String,
-        result: Result<Vec<String>, String>,
+        result: Result<Vec<String>, FetchError>,
     },
 }
 
@@ -169,21 +169,86 @@ enum ModelsStep {
         selected: usize,
         fetching: bool,
     },
+    /// A transport-class fetch failure: the list is unavailable but a typed id may still be right,
+    /// so the modal offers a retry plus an explicitly-unverified manual entry.
     Manual {
         provider: String,
         input: String,
         error: Option<String>,
     },
+    /// A credential-class fetch failure (no key resolved, or the provider refused the one we sent).
+    /// Typing a model id cannot repair a credential, so this step shows the remedy and takes no
+    /// input.
+    Credentials {
+        provider: String,
+        error: String,
+    },
     Offline,
 }
 
+impl ModelsStep {
+    /// The provider this step is scoped to. `None` only for [`ModelsStep::Offline`], which is
+    /// reached before any provider is chosen.
+    fn provider(&self) -> Option<&str> {
+        match self {
+            ModelsStep::ModelList { provider, .. }
+            | ModelsStep::Manual { provider, .. }
+            | ModelsStep::Credentials { provider, .. } => Some(provider),
+            ModelsStep::Offline => None,
+        }
+    }
+}
+
 /// The result of stepping the models modal: advance to a new [`ModelsStep`], apply the
-/// selection, or close.
+/// selection, re-run the fetch, or close.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModelsTransition {
     Step(ModelsStep),
     Close,
     Apply,
+    Retry,
+}
+
+/// Why a model-list fetch failed, in the only terms the modal has to act on.
+///
+/// `pub(crate)` is required, not incidental: [`UiEvent`] is `pub` and carries these in
+/// `ModelsFetched`, so a fully-private field type trips the `private_interfaces` lint. Do not
+/// "tidy" it to private.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FetchFailure {
+    /// No API key could be resolved for the provider at all.
+    MissingKey,
+    /// The provider refused the credential we sent (401/403).
+    Auth,
+    /// Anything else: DNS, refused connection, TLS, timeout, 5xx, malformed body.
+    Fetch,
+}
+
+impl FetchFailure {
+    /// Whether the remedy is a credential (`/connect`, `/key`) rather than a retry. The single
+    /// predicate the modal branches on, so a future class only has to answer this question.
+    fn needs_credentials(self) -> bool {
+        matches!(self, FetchFailure::MissingKey | FetchFailure::Auth)
+    }
+}
+
+/// A failed model-list fetch: the class the modal branches on, plus the detail to render. The
+/// detail is always produced by [`summarize_provider_error`], so it is one bounded line.
+///
+/// `pub(crate)` for the same reason as [`FetchFailure`]: it appears in the `pub` [`UiEvent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FetchError {
+    class: FetchFailure,
+    message: String,
+}
+
+/// The model a modal step would persist, and whether the id came from the provider's own list
+/// (`verified`) or was typed blind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelChoice {
+    provider: String,
+    model: String,
+    verified: bool,
 }
 
 const LOG_CAPACITY: usize = 200;
@@ -671,11 +736,21 @@ impl App {
 
     /// Stage a model for a provider and persist it, rolling the in-memory map back if the write
     /// fails so a later unrelated save cannot silently resurrect it.
-    fn persist_model(&mut self, provider: String, model: String) -> bool {
+    ///
+    /// `verified` says whether the id came off the provider's own model list. A blindly typed id
+    /// reports a distinct status, so "Model set to o3" never implies the provider confirmed it.
+    fn persist_model(&mut self, provider: String, model: String, verified: bool) -> bool {
         let previous = self.settings.models.insert(provider.clone(), model.clone());
         if self.persist_settings() {
             self.rebuild_provider();
-            self.status = self.t_with("status.model_set", &[("model", &model)]);
+            self.status = if verified {
+                self.t_with("status.model_set", &[("model", &model)])
+            } else {
+                self.t_with(
+                    "status.model_set_unverified",
+                    &[("model", &model), ("provider", &provider)],
+                )
+            };
             return true;
         }
         match previous {
@@ -810,7 +885,7 @@ impl App {
         };
         if let Some((provider, model)) = apply {
             let previous_provider = self.settings.provider.replace(provider.clone());
-            if !self.persist_model(provider, model) {
+            if !self.persist_model(provider, model, true) {
                 self.settings.provider = previous_provider;
             }
         }
@@ -845,7 +920,11 @@ impl App {
         let store = self.store.clone();
         let lang = self.config.lang;
         self.connect_fetch_task = Some(tokio::spawn(async move {
-            let result = fetch_model_list(&provider, key, store.as_ref(), lang).await;
+            // The connect modal renders only the message; #47's classification is consumed by the
+            // `/models` modal alone.
+            let result = fetch_model_list(&provider, key, store.as_ref(), lang)
+                .await
+                .map_err(|e| e.message);
             let _ = events.send(UiEvent::ConnectModels {
                 nonce,
                 provider,
@@ -942,7 +1021,7 @@ impl App {
         &mut self,
         nonce: u64,
         provider: String,
-        result: Result<Vec<String>, String>,
+        result: Result<Vec<String>, FetchError>,
     ) {
         if nonce != self.models_nonce {
             return;
@@ -978,15 +1057,57 @@ impl App {
                     *fetching = false;
                 }
             }
-            Err(e) => {
-                let err_msg = self.t_with("connect.fetch_error", &[("error", &e)]);
-                self.models = Some(ModelsStep::Manual {
-                    provider,
-                    input: String::new(),
-                    error: Some(err_msg),
+            Err(err) => {
+                let message = self.fetch_error_message(&provider, &err);
+                // The modal is not a record: `close_models` drops the step, so Esc would erase the
+                // only copy of the failure. Log it too, so the user has something to scroll back
+                // to and paste when asking for help — the same thing `/key` and `/ask` do.
+                self.push_log(message.clone());
+                self.models = Some(if err.class.needs_credentials() {
+                    ModelsStep::Credentials {
+                        provider,
+                        error: message,
+                    }
+                } else {
+                    ModelsStep::Manual {
+                        provider,
+                        input: String::new(),
+                        error: Some(message),
+                    }
                 });
             }
         }
+    }
+
+    /// Render a failed fetch for the user. A missing key already reads as a complete sentence
+    /// naming the provider, so wrapping it would produce "openai rejected the credential: No API
+    /// key for openai".
+    fn fetch_error_message(&self, provider: &str, err: &FetchError) -> String {
+        match err.class {
+            FetchFailure::MissingKey => err.message.clone(),
+            FetchFailure::Auth => self.t_with(
+                "models.auth_rejected",
+                &[("provider", provider), ("error", &err.message)],
+            ),
+            FetchFailure::Fetch => self.t_with("connect.fetch_error", &[("error", &err.message)]),
+        }
+    }
+
+    /// Re-run the model-list fetch from a failure step, so a one-second blip does not degrade the
+    /// modal to manual entry until it is closed and reopened. `begin_models_fetch` bumps the nonce,
+    /// so a still-in-flight earlier result is discarded by the existing stale-result guard.
+    fn retry_models_fetch(&mut self) {
+        let Some(provider) = self.models.as_ref().and_then(ModelsStep::provider) else {
+            return;
+        };
+        let provider = provider.to_string();
+        self.models = Some(ModelsStep::ModelList {
+            provider: provider.clone(),
+            models: Vec::new(),
+            selected: 0,
+            fetching: true,
+        });
+        self.begin_models_fetch(provider);
     }
 
     fn handle_models_key(&mut self, key: KeyEvent) -> bool {
@@ -1000,6 +1121,7 @@ impl App {
         match transition {
             ModelsTransition::Close => self.close_models(),
             ModelsTransition::Apply => self.apply_and_close_models(),
+            ModelsTransition::Retry => self.retry_models_fetch(),
             ModelsTransition::Step(next) => self.models = Some(next),
         }
         false
@@ -1015,8 +1137,8 @@ impl App {
     fn apply_and_close_models(&mut self) {
         let apply = self.models.as_ref().and_then(models_apply_target);
         self.close_models();
-        if let Some((provider, model)) = apply {
-            self.persist_model(provider, model);
+        if let Some(choice) = apply {
+            self.persist_model(choice.provider, choice.model, choice.verified);
         }
     }
 
@@ -1086,7 +1208,9 @@ impl App {
             self.error = Some(self.t("status.model_unsupported").to_string());
             return;
         }
-        self.persist_model(active, model.to_string());
+        // `/model <id>` is a blindly typed id by definition — nothing verified it against the
+        // provider's list.
+        self.persist_model(active, model.to_string(), false);
     }
 
     fn list_keys(&mut self) {
@@ -1999,8 +2123,9 @@ impl App {
                         self.t("connect.no_models"),
                         Style::default().fg(Color::DarkGray),
                     )));
-                    // Enter is a no-op with nothing to select, so don't advertise it.
-                    footer = self.t("models.footer_offline");
+                    // Enter is a no-op with nothing to select, so don't advertise it. A retry is
+                    // not: an empty list is reachable from an Ollama install with nothing pulled.
+                    footer = self.t("models.footer_retry");
                 } else {
                     for (i, model) in models.iter().enumerate() {
                         let marker = if i == *selected { "> " } else { "  " };
@@ -2014,22 +2139,49 @@ impl App {
                     footer = self.t("models.footer_list");
                 }
             }
-            ModelsStep::Manual { input, error, .. } => {
-                if let Some(err) = error {
-                    lines.push(Line::from(Span::styled(
-                        err.clone(),
-                        Style::default().fg(Color::Red),
-                    )));
-                    lines.push(Line::from(""));
-                }
+            // Trusted rows first, provider text last. `draw_popup` now sizes itself from the
+            // wrapped row count, so nothing should be clipped — but if a very short terminal
+            // clips anyway, what survives must be the remedy and the input box rather than the
+            // remote-supplied error that would otherwise have displaced them.
+            ModelsStep::Credentials { provider, error } => {
                 lines.push(Line::from(Span::styled(
-                    self.t("models.manual"),
+                    self.t("models.credentials_hint"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(Span::styled(
+                    self.t_with("models.credentials_remedy", &[("provider", provider)]),
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    error.clone(),
+                    Style::default().fg(Color::Red),
+                )));
+                // A 401/403 is not always about the key — a corporate proxy, a WAF, or an IP
+                // allowlist produces the same status — so the step keeps a retry rather than
+                // dead-ending on a remedy that cannot apply.
+                footer = self.t("models.footer_retry");
+            }
+            ModelsStep::Manual {
+                provider,
+                input,
+                error,
+            } => {
+                lines.push(Line::from(Span::styled(
+                    self.t_with("models.manual_unverified", &[("provider", provider)]),
                     Style::default().fg(Color::DarkGray),
                 )));
                 lines.push(Line::from(Span::styled(
                     input.clone(),
                     Style::default().add_modifier(Modifier::REVERSED),
                 )));
+                if let Some(err) = error {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        err.clone(),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
                 footer = self.t("models.footer_manual");
             }
         }
@@ -2381,18 +2533,20 @@ fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ConnectTransition {
     }
 }
 
-/// The `(provider, model)` pair a models-modal step would persist, or `None` when the step
-/// carries no usable selection (still fetching, an empty list, or a blank manual entry).
-fn models_apply_target(step: &ModelsStep) -> Option<(String, String)> {
+/// The model a models-modal step would persist, or `None` when the step carries no usable
+/// selection (still fetching, an empty list, a blank manual entry, or a terminal notice).
+fn models_apply_target(step: &ModelsStep) -> Option<ModelChoice> {
     match step {
         ModelsStep::ModelList {
             provider,
             models,
             selected,
             fetching: false,
-        } => models
-            .get(*selected)
-            .map(|model| (provider.clone(), model.clone())),
+        } => models.get(*selected).map(|model| ModelChoice {
+            provider: provider.clone(),
+            model: model.clone(),
+            verified: true,
+        }),
         ModelsStep::Manual {
             provider, input, ..
         } => {
@@ -2400,10 +2554,95 @@ fn models_apply_target(step: &ModelsStep) -> Option<(String, String)> {
             if id.is_empty() {
                 None
             } else {
-                Some((provider.clone(), id.to_string()))
+                Some(ModelChoice {
+                    provider: provider.clone(),
+                    model: id.to_string(),
+                    verified: false,
+                })
             }
         }
-        _ => None,
+        // Named rather than `_`: this is the one function where a wrong default persists a model
+        // the user never confirmed, so a new `ModelsStep` variant must fail to compile here rather
+        // than fall silently into "nothing to persist". A still-fetching list has no selection to
+        // apply, and neither notice step carries one.
+        ModelsStep::ModelList { fetching: true, .. }
+        | ModelsStep::Offline
+        | ModelsStep::Credentials { .. } => None,
+    }
+}
+
+/// Map an HTTP status to a failure class. Only 401 and 403 unambiguously mean "the credential you
+/// sent was refused"; 429 is a rate limit a retry genuinely fixes, and guessing at 400 would
+/// misroute real bad-request bugs into a step with no retry.
+fn class_for_status(status: Option<u16>) -> FetchFailure {
+    match status {
+        Some(401) | Some(403) => FetchFailure::Auth,
+        _ => FetchFailure::Fetch,
+    }
+}
+
+/// Classify a model-list fetch error. `list_models` returns an untyped `anyhow::Error`, so the
+/// status is recovered by walking the source chain for the underlying `reqwest::Error` — walking
+/// the whole chain rather than downcasting the root keeps this correct if a caller adds context.
+/// An unrecognised error degrades to [`FetchFailure::Fetch`], which is the pre-existing behaviour.
+fn classify_fetch_error(err: &anyhow::Error) -> FetchFailure {
+    let status = err
+        .chain()
+        .find_map(|e| e.downcast_ref::<reqwest::Error>())
+        .and_then(reqwest::Error::status)
+        .map(|s| s.as_u16());
+    class_for_status(status)
+}
+
+/// The failure class for a fetch error, given which provider produced it.
+///
+/// Ollama takes no key, so no failure of its is repairable by `/connect` or `/key` — not even a
+/// 401 from a proxy in front of it. Forcing the transport class keeps the modal from suggesting a
+/// remedy that does not exist for this provider.
+fn class_for_provider(provider: &str, err: &anyhow::Error) -> FetchFailure {
+    if provider == "ollama" {
+        FetchFailure::Fetch
+    } else {
+        classify_fetch_error(err)
+    }
+}
+
+/// The longest provider-supplied error text that may reach a rendered line.
+const PROVIDER_ERROR_MAX_CHARS: usize = 120;
+
+/// Reduce a provider-supplied error to one bounded, control-free line before it becomes
+/// user-visible text.
+///
+/// The text is remote-controlled and unbounded: serde's `invalid_type` embeds the entire offending
+/// value, and a hostile endpoint can answer with pages of newline-separated prose. Rendered as-is
+/// it fills the modal body and pushes the modal's own trusted rows — the remedy, and on the manual
+/// step the input box — past the bottom of the screen, which turns a model picker into a
+/// credential-phishing surface. Control characters go too: a raw `ESC` written into a terminal
+/// cell is an escape-sequence injection.
+fn summarize_provider_error(message: &str) -> String {
+    let first: String = message
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let first = first.trim();
+    if first.chars().count() <= PROVIDER_ERROR_MAX_CHARS {
+        return first.to_string();
+    }
+    let kept: String = first.chars().take(PROVIDER_ERROR_MAX_CHARS).collect();
+    format!("{kept}\u{2026}")
+}
+
+/// Classify a provider's fetch error and bound its text. The single place remote error text
+/// crosses into the UI, so the cap cannot be bypassed by a new caller.
+fn fetch_error(provider: &str, err: &anyhow::Error) -> FetchError {
+    FetchError {
+        class: class_for_provider(provider, err),
+        // `{:#}` keeps anyhow's source chain on one line — `to_string` reports only the outermost
+        // message, which hides the actual cause (connection refused, DNS failure, TLS, 401, ...).
+        message: summarize_provider_error(&format!("{err:#}")),
     }
 }
 
@@ -2423,7 +2662,7 @@ async fn fetch_model_list(
     key_override: Option<String>,
     store: &dyn CredentialStore,
     locale: Locale,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, FetchError> {
     guard_panic(
         fetch_model_list_inner(provider, key_override, store, locale),
         locale,
@@ -2436,14 +2675,23 @@ async fn fetch_model_list(
 /// `AssertUnwindSafe` is sound here because nothing observable survives the unwind: the caller is a
 /// spawned task that ends either way, its locals drop, and only this error string escapes. The
 /// default panic hook still prints the panic, so the unwind is not swallowed silently.
-async fn guard_panic<F>(fut: F, locale: Locale) -> Result<Vec<String>, String>
+///
+/// A panic is classified `Fetch`, not a credential failure: it says nothing about the key, and
+/// #47's rule is that an unrecognised failure degrades to the retryable class rather than to a
+/// step that offers a remedy which cannot help.
+async fn guard_panic<F>(fut: F, locale: Locale) -> Result<Vec<String>, FetchError>
 where
-    F: std::future::Future<Output = Result<Vec<String>, String>>,
+    F: std::future::Future<Output = Result<Vec<String>, FetchError>>,
 {
     std::panic::AssertUnwindSafe(fut)
         .catch_unwind()
         .await
-        .unwrap_or_else(|_| Err(i18n::t(locale, "connect.fetch_panicked").to_string()))
+        .unwrap_or_else(|_| {
+            Err(FetchError {
+                class: FetchFailure::Fetch,
+                message: i18n::t(locale, "connect.fetch_panicked").to_string(),
+            })
+        })
 }
 
 async fn fetch_model_list_inner(
@@ -2451,33 +2699,60 @@ async fn fetch_model_list_inner(
     key_override: Option<String>,
     store: &dyn CredentialStore,
     locale: Locale,
-) -> Result<Vec<String>, String> {
-    // `{:#}` keeps anyhow's source chain — `to_string` reports only the outermost message, which
-    // hides the actual cause (connection refused, DNS failure, TLS error, 401, ...).
+) -> Result<Vec<String>, FetchError> {
     if provider == "ollama" {
-        return list_ollama_models().await.map_err(|e| format!("{e:#}"));
+        return list_ollama_models()
+            .await
+            .map_err(|e| fetch_error(provider, &e));
     }
     let key = match key_override {
         Some(k) => Some(k),
         None => crate::selection::resolve_key(provider, store),
     };
+    fetch_with_key(provider, key, locale).await
+}
+
+/// The classification boundary: an already-resolved key (or the absence of one) becomes either a
+/// model list or a classified [`FetchError`].
+///
+/// Split out from [`fetch_model_list`] so the no-key arm is reachable from a test without mutating
+/// the process environment — `resolve_key` reads `OPENAI_API_KEY` and friends, so a developer with
+/// one exported would otherwise never execute this branch.
+async fn fetch_with_key(
+    provider: &str,
+    key: Option<String>,
+    locale: Locale,
+) -> Result<Vec<String>, FetchError> {
     match key {
         Some(k) => list_models(provider, &k)
             .await
-            .map_err(|e| format!("{e:#}")),
-        None => Err(i18n::t_with(
-            locale,
-            "connect.no_key",
-            &[("provider", provider)],
-        )),
+            .map_err(|e| fetch_error(provider, &e)),
+        // Our own sentence, not the provider's: it is not summarized, and not capped.
+        None => Err(FetchError {
+            class: FetchFailure::MissingKey,
+            message: i18n::t_with(locale, "connect.no_key", &[("provider", provider)]),
+        }),
     }
 }
 
 /// Pure step-transition for the models modal: maps a key press in the current step to the next
-/// step, apply, or close. No network/keyring/terminal state.
+/// step, apply, retry, or close. No network/keyring/terminal state.
 fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModelsTransition {
     match step {
+        // Nothing to retry: `Offline` is reached before a provider is chosen, so there is no
+        // fetch to re-run.
         ModelsStep::Offline => match key.code {
+            KeyCode::Esc | KeyCode::Enter => ModelsTransition::Close,
+            _ => ModelsTransition::Step(step.clone()),
+        },
+        // A 401/403 does not always mean the API key is wrong — a corporate proxy, a WAF, an IP
+        // allowlist, or an org-level block produce the same status, and for those `/connect` and
+        // `/key` are as useless as the retry-only modal #47 replaced. Keeping the retry means a
+        // misclassification costs a keystroke rather than dead-ending the user.
+        ModelsStep::Credentials { .. } => match key.code {
+            KeyCode::Char('r' | 'R') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                ModelsTransition::Retry
+            }
             KeyCode::Esc | KeyCode::Enter => ModelsTransition::Close,
             _ => ModelsTransition::Step(step.clone()),
         },
@@ -2487,9 +2762,19 @@ fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModelsTransition {
             selected,
             fetching,
         } => {
-            if *fetching || models.is_empty() {
+            if *fetching {
                 match key.code {
                     KeyCode::Esc => ModelsTransition::Close,
+                    _ => ModelsTransition::Step(step.clone()),
+                }
+            } else if models.is_empty() {
+                // A successful fetch can still return nothing (an Ollama install with no models
+                // pulled). That is worth another try, so offer the same retry the failure steps do.
+                match key.code {
+                    KeyCode::Esc => ModelsTransition::Close,
+                    KeyCode::Char('r' | 'R') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        ModelsTransition::Retry
+                    }
                     _ => ModelsTransition::Step(step.clone()),
                 }
             } else {
@@ -2515,6 +2800,12 @@ fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModelsTransition {
             error,
         } => match key.code {
             KeyCode::Esc => ModelsTransition::Close,
+            // Ordered before the `Char(c)` arm below, which would otherwise type the `r`. `'R'`
+            // is matched too: Ctrl+Shift+R arrives as `Char('R')` with CONTROL|SHIFT and would
+            // otherwise fall through and type an `R` into the model id.
+            KeyCode::Char('r' | 'R') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                ModelsTransition::Retry
+            }
             KeyCode::Enter if !input.trim().is_empty() => ModelsTransition::Apply,
             KeyCode::Backspace => {
                 let mut next = input.clone();
@@ -2634,9 +2925,28 @@ fn help_lines(locale: Locale) -> Vec<String> {
     lines
 }
 
+/// The rows `line` occupies once wrapped to `width`, measured with the very wrapper the render
+/// below uses, so the measurement cannot disagree with the drawing.
+///
+/// `Paragraph::line_count` is unstable (`unstable-rendered-line-info`); hand-rolling the count
+/// instead would reintroduce exactly the measure/render disagreement this exists to remove.
+/// `max(1)` covers `width == 0`, where the wrapper yields nothing.
+fn wrapped_rows(line: &Line, width: u16) -> usize {
+    Paragraph::new(line.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .max(1)
+}
+
 /// Render a centered, bordered popup titled `title`, clearing what is underneath. `footer` is
 /// pinned to the bottom so it stays visible, and `focus` names a `body` row that must remain on
 /// screen — the body scrolls to keep it visible when the list is taller than the terminal.
+///
+/// The box is sized from the **wrapped** row count, not from `body.len()`. Sizing from the logical
+/// line count silently clipped every body line a provider-supplied string pushed past the 58-column
+/// inner width: `focus` is `None` on the notice steps, so the scroll offset is 0 and the overflow
+/// is never reachable. On the `/models` credential step that took the remedy off screen, and on the
+/// manual step it took the input box off screen while keystrokes still accumulated (#57).
 fn draw_popup(
     frame: &mut Frame,
     area: Rect,
@@ -2648,10 +2958,17 @@ fn draw_popup(
     // Borders take two rows and the pinned footer one.
     const CHROME: u16 = 3;
     let available = area.height.saturating_sub(2);
-    // Clamp in `usize` first: a remote-supplied list long enough to overflow `u16` must not wrap.
-    let wanted = body.len().saturating_add(CHROME as usize);
-    let height = u16::try_from(wanted).unwrap_or(u16::MAX).min(available);
     let width = 60u16.min(area.width.saturating_sub(2));
+    // The block's left and right borders each take a column.
+    let inner_width = width.saturating_sub(2);
+    let rows: Vec<usize> = body.iter().map(|l| wrapped_rows(l, inner_width)).collect();
+    // Clamp in `usize` first: a remote-supplied list long enough to overflow `u16` must not wrap.
+    let wanted = rows
+        .iter()
+        .copied()
+        .fold(0usize, usize::saturating_add)
+        .saturating_add(CHROME as usize);
+    let height = u16::try_from(wanted).unwrap_or(u16::MAX).min(available);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -2671,9 +2988,19 @@ fn draw_popup(
 
     let body_height = inner.height.saturating_sub(1);
     if body_height > 0 {
-        // Scroll just far enough to bring the focused row into view.
+        // Scroll just far enough to bring the focused row into view. `scroll` counts *wrapped*
+        // rows, so the focused body line's position is summed in wrapped rows too.
         let offset = match focus {
-            Some(row) => (row as u16).saturating_sub(body_height.saturating_sub(1)),
+            Some(row) => {
+                let end = rows
+                    .iter()
+                    .take(row.saturating_add(1))
+                    .copied()
+                    .fold(0usize, usize::saturating_add);
+                u16::try_from(end)
+                    .unwrap_or(u16::MAX)
+                    .saturating_sub(body_height)
+            }
             None => 0,
         };
         frame.render_widget(
@@ -2724,11 +3051,13 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{
-        App, ConnectStep, ConnectTransition, EngineForward, KeyCommand, Mode, ModelsStep,
-        ModelsTransition, ProviderRow, UiEvent, connect_step_next, cycle_index,
-        engine_approval_key, engine_forward_step, guard_panic, help_lines, mask,
-        models_apply_target, models_step_next, parse_ask_command, parse_connect_command,
-        parse_key_command, parse_model_command, parse_models_command,
+        App, ConnectStep, ConnectTransition, EngineForward, FetchError, FetchFailure, KeyCommand,
+        Mode, ModelChoice, ModelsStep, ModelsTransition, PROVIDER_ERROR_MAX_CHARS, ProviderRow,
+        UiEvent, class_for_provider, class_for_status, classify_fetch_error, connect_step_next,
+        cycle_index, draw_popup, engine_approval_key, engine_forward_step, fetch_error,
+        fetch_with_key, guard_panic, help_lines, mask, models_apply_target, models_step_next,
+        parse_ask_command, parse_connect_command, parse_key_command, parse_model_command,
+        parse_models_command, summarize_provider_error,
     };
     use crate::config::Config;
     use crate::provider::ProviderInfo;
@@ -2738,7 +3067,8 @@ mod tests {
     use light_factory_providers::{LocalProvider, OfflineReason, Provider};
     use light_factory_tui::credentials::{CredentialStore, MemStore};
     use light_factory_tui::i18n::Locale;
-    use ratatui::Terminal;
+    use ratatui::text::Line;
+    use ratatui::{Frame, Terminal};
     use tokio::sync::broadcast::error::RecvError;
     use tokio::sync::mpsc;
 
@@ -2808,6 +3138,17 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn fetch_err(class: FetchFailure, message: &str) -> FetchError {
+        FetchError {
+            class,
+            message: message.to_string(),
+        }
     }
 
     fn row(id: &str, connected: bool) -> ProviderRow {
@@ -3142,20 +3483,42 @@ mod tests {
         }
     }
 
+    /// A manual step shaped the way production produces one: with an error present.
+    /// `handle_models_fetched`'s `Err` arm is `Manual`'s only constructor and it always sets
+    /// `Some(_)`, so `error: None` was a state no code path could reach — and a render test built
+    /// on it asserted against fiction while dropping the very line that broke the layout.
     fn models_manual_step(input: &str) -> ModelsStep {
         ModelsStep::Manual {
             provider: "openai".to_string(),
             input: input.to_string(),
-            error: None,
+            error: Some("Couldn't fetch models: connection refused".to_string()),
         }
     }
 
-    /// Render the whole app to an off-screen terminal and return it as text, so modal rendering
-    /// can be asserted without a real terminal.
-    fn render(app: &mut App, width: u16, height: u16) -> String {
+    /// The popup contents as one whitespace-collapsed string, so an assertion can check that a
+    /// wrapped line survived *in full* without having to predict where the wrapper broke it.
+    fn flatten(screen: &str) -> String {
+        screen
+            .chars()
+            .map(|c| {
+                if "\u{2502}\u{250c}\u{2510}\u{2514}\u{2518}\u{2500}".contains(c) {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Draw `f` to an off-screen terminal and return the buffer as text, so rendering can be
+    /// asserted without a real terminal.
+    fn draw_to_text(width: u16, height: u16, f: impl FnOnce(&mut Frame)) -> String {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal.draw(f).unwrap();
         terminal
             .backend()
             .buffer()
@@ -3166,6 +3529,71 @@ mod tests {
             .join("\n")
     }
 
+    /// Render the whole app to an off-screen terminal and return it as text, so modal rendering
+    /// can be asserted without a real terminal.
+    fn render(app: &mut App, width: u16, height: u16) -> String {
+        draw_to_text(width, height, |frame| app.draw(frame))
+    }
+
+    /// The regression behind #57: `draw_popup` sized its box from `body.len()` — logical lines,
+    /// counted before wrapping — while rendering with `Wrap`. Every body line below a wrapping one
+    /// fell outside the box, and with `focus: None` the scroll offset is 0, so nothing could bring
+    /// it back. Two logical lines therefore rendered as one.
+    #[test]
+    fn draw_popup_sizes_itself_from_wrapped_rows_not_logical_lines() {
+        // ~200 columns: four rows against the 58-column inner width.
+        let long = "wrap ".repeat(40);
+        let screen = draw_to_text(80, 24, |frame| {
+            let area = frame.area();
+            draw_popup(
+                frame,
+                area,
+                "Title".to_string(),
+                vec![Line::from(long.clone()), Line::from("TAIL-MARKER")],
+                Line::from("FOOTER-MARKER"),
+                None,
+            );
+        });
+        assert!(
+            screen.contains("TAIL-MARKER"),
+            "a line below a wrapping one was clipped out of the box:\n{screen}"
+        );
+        assert!(
+            screen.contains("FOOTER-MARKER"),
+            "the pinned footer must survive:\n{screen}"
+        );
+    }
+
+    /// The box must still stop growing at the terminal, and the focused row must still be scrolled
+    /// into view — now counted in wrapped rows, since that is what `Paragraph::scroll` counts.
+    #[test]
+    fn draw_popup_scrolls_wrapped_rows_to_keep_the_focused_line_visible() {
+        let mut body: Vec<Line> = (0..40)
+            .map(|i| Line::from(format!("{} row-{i:02}", "pad ".repeat(20))))
+            .collect();
+        body.push(Line::from("FOCUSED-ROW"));
+        let focus = body.len() - 1;
+        let screen = draw_to_text(80, 12, |frame| {
+            let area = frame.area();
+            draw_popup(
+                frame,
+                area,
+                "Title".to_string(),
+                body.clone(),
+                Line::from("FOOTER-MARKER"),
+                Some(focus),
+            );
+        });
+        assert!(
+            screen.contains("FOCUSED-ROW"),
+            "the focused row scrolled off screen:\n{screen}"
+        );
+        assert!(
+            screen.contains("FOOTER-MARKER"),
+            "the pinned footer must survive:\n{screen}"
+        );
+    }
+
     #[test]
     fn models_modal_renders_its_own_header() {
         let mut app = test_app();
@@ -3174,6 +3602,134 @@ mod tests {
         let screen = render(&mut app, 80, 20);
         assert!(screen.contains("Select a model"), "{screen}");
         assert!(screen.contains("gpt-4o"), "{screen}");
+    }
+
+    /// The whole point of the credential step: it must point at the commands that can actually
+    /// fix the problem, and must not offer a model-id box.
+    ///
+    /// Built through `handle_models_fetched` from a real `reqwest` 401 rather than from a
+    /// hand-written 37-character string no code path can produce. The real message is 105
+    /// characters and wraps to two rows against the 58-column inner width, which is exactly the
+    /// case the old popup sizing clipped — so on every real 401 the remedy was off screen.
+    #[tokio::test]
+    async fn the_credentials_step_renders_the_remedy_and_no_input_box() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+
+        let err = fetch_error("openai", &status_error(401).await);
+        assert_eq!(
+            err.class,
+            FetchFailure::Auth,
+            "a 401 is a credential failure"
+        );
+        let cause = err.message.clone();
+        app.handle_models_fetched(5, "openai".to_string(), Err(err));
+
+        let screen = render(&mut app, 80, 20);
+        assert!(
+            screen.contains("/connect"),
+            "the remedy is clipped:\n{screen}"
+        );
+        assert!(
+            screen.contains("/key openai"),
+            "the remedy is clipped:\n{screen}"
+        );
+        assert!(
+            screen.contains("/model <id>"),
+            "a misclassified 401 needs an escape hatch:\n{screen}"
+        );
+        assert!(
+            flatten(&screen).contains(&flatten(&format!(
+                "openai rejected the credential: {cause}"
+            ))),
+            "the cause must be rendered in full, not clipped:\n{screen}"
+        );
+        assert!(
+            !screen.contains("Type a model id"),
+            "typing an id cannot repair a credential:\n{screen}"
+        );
+        assert!(
+            !screen.contains("save unverified"),
+            "the credential step must not offer to save an id:\n{screen}"
+        );
+        assert!(
+            screen.contains("Ctrl+R: retry"),
+            "a 401 from a proxy or a WAF is not a dead end:\n{screen}"
+        );
+    }
+
+    /// The transport step keeps the manual fallback (#36 AC 6) but must label it as unverified,
+    /// advertise the retry key, and — the part that was broken — actually show the input box.
+    ///
+    /// Built through `handle_models_fetched` from a real refused connection. The old test used a
+    /// helper that hardcoded `error: None`, which the `Err` arm never produces, so it dropped the
+    /// error line and never exercised the layout the user actually gets: the prompt and the input
+    /// row pushed off screen while keystrokes still accumulated and Enter still applied.
+    #[tokio::test]
+    async fn the_manual_step_labels_itself_unverified_and_offers_a_retry() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+
+        let err = fetch_error("openai", &transport_error().await);
+        assert_eq!(
+            err.class,
+            FetchFailure::Fetch,
+            "a refused connection is retryable"
+        );
+        let cause = err.message.clone();
+        app.handle_models_fetched(5, "openai".to_string(), Err(err));
+
+        // Type into the box the way the user does. What they type must be on screen.
+        for c in "o3-mini".chars() {
+            app.handle_models_key(key(KeyCode::Char(c)));
+        }
+        let screen = render(&mut app, 80, 20);
+        assert!(
+            screen.contains("Type a model id \u{2014} it won't be checked against openai"),
+            "the unverified prompt is clipped:\n{screen}"
+        );
+        assert!(
+            screen.contains("o3-mini"),
+            "the user must be able to see what they are typing:\n{screen}"
+        );
+        assert!(
+            flatten(&screen).contains(&flatten(&format!("Couldn't fetch models: {cause}"))),
+            "the cause must be rendered in full, not clipped:\n{screen}"
+        );
+        assert!(screen.contains("Ctrl+R: retry"), "{screen}");
+        assert!(screen.contains("save unverified"), "{screen}");
+    }
+
+    /// Every other render assertion in this file runs in EN, which is how a 63-column ES footer
+    /// shipped hard-truncated against a 58-column inner width, silently costing ES users
+    /// "Esc: cerrar".
+    #[test]
+    fn the_manual_step_footer_is_not_truncated_in_spanish() {
+        let mut app = test_app();
+        app.config.lang = Locale::Es;
+        app.mode = Mode::Connected;
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_models_fetched(
+            5,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::Fetch, "conexi\u{f3}n rechazada")),
+        );
+
+        let screen = render(&mut app, 80, 20);
+        assert!(
+            screen.contains("Esc: cerrar"),
+            "the ES footer lost its last key to truncation:\n{screen}"
+        );
+        assert!(
+            screen.contains("Ctrl+R: reintentar"),
+            "the ES footer lost its retry key:\n{screen}"
+        );
     }
 
     #[test]
@@ -3252,15 +3808,61 @@ mod tests {
     fn models_fetch_result_does_not_clobber_manual_entry() {
         let mut app = test_app();
         app.models_nonce = 5;
-        app.models = Some(ModelsStep::Manual {
-            provider: "openai".to_string(),
-            input: "gpt-4".to_string(),
-            error: None,
-        });
+        app.models = Some(models_manual_step("gpt-4"));
         app.handle_models_fetched(5, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
         assert!(
             matches!(&app.models, Some(ModelsStep::Manual { input, .. }) if input == "gpt-4"),
             "a late result must not discard what the user typed"
+        );
+    }
+
+    /// The same guard on the `Err` path, which every other stale-result test misses. A superseded
+    /// `Err(Auth)` landing on a manual step would wipe half-typed input *and* replace a step that
+    /// has an input box with one that does not — the worst version of the clobber.
+    #[test]
+    fn a_late_failure_does_not_clobber_manual_entry() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.models = Some(models_manual_step("gpt-4"));
+        app.handle_models_fetched(
+            5,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::Auth, "401 Unauthorized")),
+        );
+        assert!(
+            matches!(&app.models, Some(ModelsStep::Manual { input, .. }) if input == "gpt-4"),
+            "a late failure must not discard what the user typed, got {:?}",
+            app.models
+        );
+    }
+
+    /// The step is not a record: `close_models` drops it, so Esc would erase the only copy of the
+    /// failure. The transcript is what the user can scroll back to and paste when asking for help.
+    #[test]
+    fn a_fetch_failure_is_recorded_in_the_transcript() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_models_fetched(
+            5,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::Auth, "401 Unauthorized")),
+        );
+
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.contains("openai") && l.contains("401 Unauthorized")),
+            "the classified failure must outlive the modal: {:?}",
+            app.log
+        );
+
+        app.models_return = Mode::Connected;
+        app.close_models();
+        assert!(
+            app.log.iter().any(|l| l.contains("401 Unauthorized")),
+            "closing the modal must not erase the record: {:?}",
+            app.log
         );
     }
 
@@ -3478,7 +4080,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_panicking_fetch_reports_an_error_instead_of_spinning_forever() {
-        async fn panicking() -> Result<Vec<String>, String> {
+        async fn panicking() -> Result<Vec<String>, FetchError> {
             panic!("the keyring exploded");
         }
 
@@ -3488,8 +4090,15 @@ mod tests {
 
         assert_eq!(
             result,
-            Err("the fetch task failed unexpectedly".to_string()),
+            Err(FetchError {
+                class: FetchFailure::Fetch,
+                message: "the fetch task failed unexpectedly".to_string(),
+            }),
             "a panicked fetch must send a result, or `fetching: true` never clears"
+        );
+        assert!(
+            !result.unwrap_err().class.needs_credentials(),
+            "a panic says nothing about the key, so it must not route to the credentials step"
         );
     }
 
@@ -3707,7 +4316,12 @@ mod tests {
                 vec!["gpt-4o".to_string(), "o3".to_string()],
                 false
             )),
-            Some(("openai".to_string(), "gpt-4o".to_string()))
+            Some(ModelChoice {
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                verified: true,
+            }),
+            "an id picked off the provider's list is verified"
         );
         assert_eq!(
             models_apply_target(&models_list_step(vec!["gpt-4o".to_string()], true)),
@@ -3716,10 +4330,23 @@ mod tests {
         assert_eq!(models_apply_target(&models_list_step(vec![], false)), None);
         assert_eq!(
             models_apply_target(&models_manual_step("  o3-mini  ")),
-            Some(("openai".to_string(), "o3-mini".to_string()))
+            Some(ModelChoice {
+                provider: "openai".to_string(),
+                model: "o3-mini".to_string(),
+                verified: false,
+            }),
+            "a typed id is never verified"
         );
         assert_eq!(models_apply_target(&models_manual_step("   ")), None);
         assert_eq!(models_apply_target(&ModelsStep::Offline), None);
+        assert_eq!(
+            models_apply_target(&ModelsStep::Credentials {
+                provider: "openai".to_string(),
+                error: "nope".to_string(),
+            }),
+            None,
+            "the credential step can never persist a model"
+        );
     }
 
     #[test]
@@ -3774,19 +4401,435 @@ mod tests {
     }
 
     #[test]
-    fn handle_models_fetched_falls_back_to_manual_entry_on_a_fetch_error() {
+    fn handle_models_fetched_falls_back_to_manual_entry_on_a_transport_error() {
         let mut app = test_app();
         app.models_nonce = 5;
         app.models = Some(models_list_step(vec![], true));
-        app.handle_models_fetched(5, "openai".to_string(), Err("bad key".to_string()));
-        assert!(matches!(
-            &app.models,
-            Some(ModelsStep::Manual {
-                provider,
-                input,
-                error: Some(_),
-            }) if provider == "openai" && input.is_empty()
-        ));
+        app.handle_models_fetched(
+            5,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::Fetch, "connection refused")),
+        );
+        let Some(ModelsStep::Manual {
+            provider,
+            input,
+            error: Some(error),
+        }) = &app.models
+        else {
+            panic!(
+                "a transport failure must keep the manual fallback, got {:?}",
+                app.models
+            );
+        };
+        assert_eq!(provider, "openai");
+        assert!(input.is_empty());
+        assert!(
+            error.contains("connection refused"),
+            "the provider's own error must survive: {error}"
+        );
+    }
+
+    #[test]
+    fn handle_models_fetched_routes_a_rejected_credential_to_the_credentials_step() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_models_fetched(
+            5,
+            "openai".to_string(),
+            Err(fetch_err(
+                FetchFailure::Auth,
+                "HTTP status 401 Unauthorized",
+            )),
+        );
+        let Some(ModelsStep::Credentials { provider, error }) = &app.models else {
+            panic!("a 401 must not offer a model-id box, got {:?}", app.models);
+        };
+        assert_eq!(provider, "openai");
+        assert!(
+            error.contains("openai") && error.contains("401"),
+            "the credential notice must name the provider and the cause: {error}"
+        );
+    }
+
+    #[test]
+    fn handle_models_fetched_routes_a_missing_key_to_the_credentials_step_verbatim() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_models_fetched(
+            5,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::MissingKey, "No API key for openai")),
+        );
+        let Some(ModelsStep::Credentials { provider, error }) = &app.models else {
+            panic!(
+                "a missing key must not offer a model-id box, got {:?}",
+                app.models
+            );
+        };
+        assert_eq!(provider, "openai");
+        assert_eq!(
+            error, "No API key for openai",
+            "an already-complete sentence must not be wrapped again"
+        );
+    }
+
+    /// A 401/403 is not proof the key is wrong — a corporate proxy, a WAF, or an IP allowlist
+    /// produces the same status. Without a retry the step is a dead end pointing at two commands
+    /// that cannot help, which is #47's own defect inverted.
+    #[test]
+    fn the_credentials_step_offers_a_retry() {
+        let step = ModelsStep::Credentials {
+            provider: "openai".to_string(),
+            error: "refused".to_string(),
+        };
+        assert_eq!(
+            models_step_next(&step, ctrl_key(KeyCode::Char('r'))),
+            ModelsTransition::Retry
+        );
+        assert_eq!(
+            models_step_next(&step, ctrl_key(KeyCode::Char('R'))),
+            ModelsTransition::Retry,
+            "Ctrl+Shift+R arrives as an uppercase R"
+        );
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Char('r'))),
+            ModelsTransition::Step(step.clone()),
+            "an unmodified r is not a retry"
+        );
+    }
+
+    /// Retrying from the credential step must re-run the fetch, not silently do nothing —
+    /// `retry_models_fetch` reads the provider off the step, and `Credentials` carries one.
+    #[tokio::test]
+    async fn retry_re_triggers_the_fetch_from_the_credentials_step() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        app.models = Some(ModelsStep::Credentials {
+            provider: "openai".to_string(),
+            error: "openai rejected the credential".to_string(),
+        });
+        let before = app.models_nonce;
+
+        app.handle_models_key(ctrl_key(KeyCode::Char('r')));
+
+        assert!(
+            matches!(
+                &app.models,
+                Some(ModelsStep::ModelList { provider, fetching: true, .. }) if provider == "openai"
+            ),
+            "retry must return to a fetching list, got {:?}",
+            app.models
+        );
+        assert_ne!(
+            app.models_nonce, before,
+            "the in-flight result must be invalidated"
+        );
+    }
+
+    /// A successful fetch can legitimately return nothing (an Ollama install with no models
+    /// pulled). That is worth another try rather than a modal whose only key is Esc.
+    #[test]
+    fn an_empty_list_offers_a_retry() {
+        let step = models_list_step(vec![], false);
+        assert_eq!(
+            models_step_next(&step, ctrl_key(KeyCode::Char('r'))),
+            ModelsTransition::Retry
+        );
+        // A list still being fetched has a retry already in flight, so Ctrl+R is a no-op there.
+        let fetching = models_list_step(vec![], true);
+        assert_eq!(
+            models_step_next(&fetching, ctrl_key(KeyCode::Char('r'))),
+            ModelsTransition::Step(fetching.clone())
+        );
+    }
+
+    #[test]
+    fn the_credentials_step_closes_on_esc_and_enter_and_ignores_typing() {
+        let step = ModelsStep::Credentials {
+            provider: "openai".to_string(),
+            error: "refused".to_string(),
+        };
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Esc)),
+            ModelsTransition::Close
+        );
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Enter)),
+            ModelsTransition::Close
+        );
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Char('x'))),
+            ModelsTransition::Step(step.clone()),
+            "the credential step takes no input"
+        );
+    }
+
+    #[test]
+    fn manual_entry_offers_a_retry_key_that_a_bare_r_does_not_trigger() {
+        let step = models_manual_step("gpt-");
+        assert_eq!(
+            models_step_next(&step, ctrl_key(KeyCode::Char('r'))),
+            ModelsTransition::Retry
+        );
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Char('r'))),
+            ModelsTransition::Step(models_manual_step("gpt-r")),
+            "an unmodified r is still text"
+        );
+        // Ctrl+Shift+R arrives as an uppercase `R` with CONTROL|SHIFT; without the uppercase arm
+        // it falls through to the text arm and types an `R` into the model id.
+        assert_eq!(
+            models_step_next(
+                &step,
+                KeyEvent::new(
+                    KeyCode::Char('R'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )
+            ),
+            ModelsTransition::Retry
+        );
+        assert_eq!(
+            models_step_next(
+                &step,
+                KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)
+            ),
+            ModelsTransition::Step(models_manual_step("gpt-R")),
+            "a shifted R with no control is still text"
+        );
+    }
+
+    /// A blip must be recoverable in place: Ctrl+R returns the modal to a fetching list and
+    /// re-runs the fetch under a fresh nonce, so the superseded in-flight result is discarded.
+    #[tokio::test]
+    async fn retry_re_triggers_the_fetch_from_manual_entry() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        app.models = Some(ModelsStep::Manual {
+            provider: "local".to_string(),
+            input: "half-typed".to_string(),
+            error: Some("boom".to_string()),
+        });
+        let before = app.models_nonce;
+
+        app.handle_models_key(ctrl_key(KeyCode::Char('r')));
+
+        assert!(
+            matches!(
+                &app.models,
+                Some(ModelsStep::ModelList { provider, models, fetching: true, .. })
+                    if provider == "local" && models.is_empty()
+            ),
+            "retry must return to a fetching list, got {:?}",
+            app.models
+        );
+        assert!(
+            app.models_nonce > before,
+            "the retry must invalidate the superseded fetch"
+        );
+    }
+
+    #[test]
+    fn class_for_status_treats_only_401_and_403_as_credential_failures() {
+        assert_eq!(class_for_status(Some(401)), FetchFailure::Auth);
+        assert_eq!(class_for_status(Some(403)), FetchFailure::Auth);
+        for status in [400, 404, 429, 500, 503] {
+            assert_eq!(
+                class_for_status(Some(status)),
+                FetchFailure::Fetch,
+                "{status} is retryable, not a credential failure"
+            );
+        }
+        assert_eq!(class_for_status(None), FetchFailure::Fetch);
+    }
+
+    /// The client every network test in this module uses.
+    ///
+    /// `reqwest::get` builds a default client, which honours `http_proxy`/`HTTP_PROXY` and has no
+    /// timeout at all. Under an exported proxy the 401/403 mocks were observed returning 200 —
+    /// `expect_err` then failed — and against a sandbox that DROPs rather than RSTs the connection
+    /// to port 1, the transport test blocked on the kernel SYN-retry budget (~130s) with nothing to
+    /// bound it. Both are properties of the client, so both are fixed on the client.
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("test HTTP client")
+    }
+
+    /// A real `reqwest::Error` carrying `code`, produced the way a provider produces one.
+    async fn status_error(code: u16) -> anyhow::Error {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(code))
+            .mount(&server)
+            .await;
+        test_client()
+            .get(server.uri())
+            .send()
+            .await
+            .expect("the request reached the mock")
+            .error_for_status()
+            .expect_err("the mock returned an error status")
+            .into()
+    }
+
+    /// A real `reqwest::Error` with no HTTP status: a refused connection.
+    async fn transport_error() -> anyhow::Error {
+        test_client()
+            .get("http://127.0.0.1:1/models")
+            .send()
+            .await
+            .expect_err("nothing listens on port 1")
+            .into()
+    }
+
+    #[tokio::test]
+    async fn classify_reads_the_status_out_of_a_real_reqwest_error() {
+        assert_eq!(
+            classify_fetch_error(&status_error(401).await),
+            FetchFailure::Auth
+        );
+        assert_eq!(
+            classify_fetch_error(&status_error(403).await),
+            FetchFailure::Auth
+        );
+        assert_eq!(
+            classify_fetch_error(&status_error(500).await),
+            FetchFailure::Fetch
+        );
+    }
+
+    /// The classifier walks the whole source chain, so it keeps working if a caller wraps the
+    /// error with context (as #44's bounded fetch may).
+    #[tokio::test]
+    async fn classify_finds_the_status_through_added_context() {
+        use anyhow::Context;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let err = test_client()
+            .get(server.uri())
+            .send()
+            .await
+            .expect("the request reached the mock")
+            .error_for_status()
+            .context("listing models")
+            .expect_err("the mock returned an error status");
+
+        assert_eq!(classify_fetch_error(&err), FetchFailure::Auth);
+    }
+
+    /// An error with no HTTP status at all (DNS, refused connection, TLS) must degrade to the
+    /// retryable class rather than dead-ending the user on the credential step.
+    #[tokio::test]
+    async fn classify_treats_a_transport_failure_as_retryable() {
+        assert_eq!(
+            classify_fetch_error(&transport_error().await),
+            FetchFailure::Fetch
+        );
+
+        assert_eq!(
+            classify_fetch_error(&anyhow::anyhow!("unknown provider 'nope'")),
+            FetchFailure::Fetch
+        );
+    }
+
+    /// Ollama takes no key, so a 401 in front of it must NOT be routed to a step that tells the
+    /// user to run `/connect` or `/key ollama` — neither command exists for it. Commit 7374ddd
+    /// forces the class for exactly this case; without a test, reverting the force to a plain
+    /// `classify_fetch_error` call is invisible.
+    #[tokio::test]
+    async fn ollama_failures_are_always_the_transport_class() {
+        let unauthorized = status_error(401).await;
+        assert_eq!(
+            class_for_provider("ollama", &unauthorized),
+            FetchFailure::Fetch,
+            "no ollama failure is repairable by a credential command"
+        );
+        // The same error from a keyed provider is still a credential failure, so the forcing is
+        // scoped to ollama rather than defeating classification everywhere.
+        assert_eq!(
+            class_for_provider("openai", &unauthorized),
+            FetchFailure::Auth
+        );
+    }
+
+    /// The classification boundary the whole PR rests on: no resolvable key is `MissingKey`, not
+    /// the retryable class. Getting this wrong silently re-opens #47 — the modal would offer a
+    /// retry and a model-id box for a problem neither can fix.
+    #[tokio::test]
+    async fn a_missing_key_is_classified_as_a_credential_failure() {
+        let err = fetch_with_key("openai", None, Locale::En)
+            .await
+            .expect_err("no key means no fetch");
+        assert_eq!(err.class, FetchFailure::MissingKey);
+        assert!(
+            err.class.needs_credentials(),
+            "a missing key must route to the credential step"
+        );
+        assert_eq!(err.message, "No API key for openai");
+    }
+
+    /// The provider's own text is remote-controlled and unbounded. It reaches a rendered line, so
+    /// it is reduced to one control-free line and capped before it can push the modal's trusted
+    /// rows off screen.
+    #[test]
+    fn a_provider_error_is_reduced_to_one_bounded_line() {
+        assert_eq!(
+            summarize_provider_error("openai rejected the credential"),
+            "openai rejected the credential"
+        );
+
+        let phishing = "session expired \u{2014} type your API key below\nline two\nline three";
+        assert_eq!(
+            summarize_provider_error(phishing),
+            "session expired \u{2014} type your API key below",
+            "only the first line may be rendered"
+        );
+
+        let flood = "a".repeat(5000);
+        let capped = summarize_provider_error(&flood);
+        assert_eq!(capped.chars().count(), PROVIDER_ERROR_MAX_CHARS + 1);
+        assert!(
+            capped.ends_with('\u{2026}'),
+            "a truncated message must say so"
+        );
+
+        assert_eq!(
+            summarize_provider_error("boom\u{1b}[2Jwiped"),
+            "boom[2Jwiped",
+            "control characters must never reach a terminal cell"
+        );
+
+        // Multi-byte input must not be split mid-character.
+        let wide = "\u{00e9}".repeat(5000);
+        assert_eq!(
+            summarize_provider_error(&wide).chars().count(),
+            PROVIDER_ERROR_MAX_CHARS + 1
+        );
+    }
+
+    /// The cap is applied at the boundary, not at the draw site, so every consumer of a
+    /// `FetchError` inherits it — including the connect modal, which renders the same text.
+    #[test]
+    fn the_fetch_boundary_caps_the_message_it_produces() {
+        let err = fetch_error("openai", &anyhow::anyhow!("{}", "z".repeat(5000)));
+        assert_eq!(err.class, FetchFailure::Fetch);
+        assert_eq!(err.message.chars().count(), PROVIDER_ERROR_MAX_CHARS + 1);
     }
 
     #[test]
@@ -3837,6 +4880,59 @@ mod tests {
             Some("o3-mini")
         );
         assert!(app.settings.provider.is_none());
+        assert!(
+            app.status.contains("o3-mini")
+                && app.status.contains("openai")
+                && app.status.contains("not verified"),
+            "a blindly typed id must not be reported as verified: {}",
+            app.status
+        );
+    }
+
+    /// The counterpart of the test above: an id picked off the provider's own list keeps the
+    /// plain, unqualified status, so the two cases stay distinguishable.
+    #[test]
+    fn a_picked_model_reports_the_plain_status() {
+        let mut app = test_app();
+        let _cleanup = TempSettings(app.settings_path.clone());
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        app.models = Some(ModelsStep::ModelList {
+            provider: "openai".to_string(),
+            models: vec!["gpt-4o".to_string()],
+            selected: 0,
+            fetching: false,
+        });
+
+        app.handle_models_key(key(KeyCode::Enter));
+
+        assert_eq!(app.status, "Model set to gpt-4o");
+    }
+
+    /// `/model <id>` is a blindly typed id by definition — nothing checked it against the
+    /// provider's list — so its status must say so. This is the escape hatch the credential step
+    /// now points at, and a `verified: true` here would report the flat "Model set to o3" and
+    /// quietly imply the provider confirmed an id it has never seen.
+    #[tokio::test]
+    async fn the_model_command_reports_an_unverified_id() {
+        let mut app = test_app();
+        let _cleanup = TempSettings(app.settings_path.clone());
+        app.mode = Mode::Connected;
+        app.provider_info.id = "openai".to_string();
+
+        app.run_command("/model o3").await;
+
+        assert_eq!(
+            app.settings.models.get("openai").map(String::as_str),
+            Some("o3")
+        );
+        assert!(
+            app.status.contains("o3")
+                && app.status.contains("openai")
+                && app.status.contains("not verified"),
+            "/model must not claim a typed id was verified: {}",
+            app.status
+        );
     }
 
     /// A successful apply must re-derive `provider_info` from the updated settings. Asserting the
