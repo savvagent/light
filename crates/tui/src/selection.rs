@@ -14,6 +14,12 @@ use crate::settings::Settings;
 /// The remote provider ids, in key-precedence order.
 pub const REMOTE_IDS: [&str; 4] = ["anthropic", "openai", "gemini", "deepseek"];
 
+/// Whether a provider authenticates with an API key at all. `ollama` and the offline `local`
+/// provider do not, so `/key` refuses them and the connect modal skips straight to the model list.
+pub fn takes_key(provider: &str) -> bool {
+    env_key_var(provider).is_some()
+}
+
 /// Pure classification of a provider's key source.
 fn classify(env_key: Option<String>, keyring_key: Option<String>) -> KeyStatus {
     if env_key.as_ref().is_some_and(|k| !k.is_empty()) {

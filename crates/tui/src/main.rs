@@ -4,6 +4,7 @@ mod api;
 mod app;
 mod browser;
 mod config;
+mod modal;
 mod provider;
 mod selection;
 mod session;
