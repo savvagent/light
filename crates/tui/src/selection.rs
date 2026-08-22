@@ -25,8 +25,9 @@ fn classify(env_key: Option<String>, keyring_key: Option<String>) -> KeyStatus {
     }
 }
 
-/// Read a named environment variable. The single real-environment source for [`sources`] and
-/// [`resolve_key`]; every other caller supplies its own reader.
+/// Read a named environment variable. The only place this module touches the real environment:
+/// the public [`key_status`] and [`resolve_key`] pass it to their `_with` forms, and tests pass a
+/// stub instead.
 fn process_env(var: &str) -> Option<String> {
     std::env::var(var).ok()
 }
@@ -44,11 +45,6 @@ fn sources_with(
     (env_key, keyring_key)
 }
 
-/// The env key and keyring key for a provider, read from the process environment.
-fn sources(provider: &str, store: &dyn CredentialStore) -> (Option<String>, Option<String>) {
-    sources_with(provider, store, process_env)
-}
-
 /// Where a provider's key comes from, for the `/key` listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyStatus {
@@ -57,10 +53,21 @@ pub enum KeyStatus {
     None,
 }
 
+/// A provider's key source against an explicit environment. Lets the wiring (`env_key_var`
+/// naming, `store.get`, and the order the two reach [`classify`]) be tested without the process
+/// env deciding the result.
+fn key_status_with(
+    provider: &str,
+    store: &dyn CredentialStore,
+    env: impl Fn(&str) -> Option<String>,
+) -> KeyStatus {
+    let (env_key, keyring_key) = sources_with(provider, store, env);
+    classify(env_key, keyring_key)
+}
+
 /// Classify a provider's key source without revealing the value.
 pub fn key_status(provider: &str, store: &dyn CredentialStore) -> KeyStatus {
-    let (env_key, keyring_key) = sources(provider, store);
-    classify(env_key, keyring_key)
+    key_status_with(provider, store, process_env)
 }
 
 /// Resolve a provider's API key: env wins over keyring; an empty env value is treated as absent
@@ -218,13 +225,62 @@ mod tests {
             resolve_key_with("openai", &store, only_openai),
             Some("sk-env".to_string())
         );
-        // A provider with no declared env var never consults the environment.
+    }
+
+    /// `env_key_var` yields no name for a provider with no declared var, so the reader is never
+    /// invoked at all — the counting stub proves it, not just that the keyring value wins.
+    #[test]
+    fn resolve_key_never_reads_the_env_for_a_provider_with_no_declared_var() {
         let store = MemStore::new();
         store.set("ollama", "sk-ring").unwrap();
+        let reads = std::cell::Cell::new(0u32);
+        let counting = |_: &str| {
+            reads.set(reads.get() + 1);
+            Some("sk-env".to_string())
+        };
         assert_eq!(
-            resolve_key_with("ollama", &store, |_| Some("sk-env".to_string())),
+            resolve_key_with("ollama", &store, counting),
             Some("sk-ring".to_string())
         );
+        assert_eq!(reads.get(), 0);
+    }
+
+    /// The empty-env-value rule holds through the `sources_with` wiring, not only in the pure
+    /// `resolve_key_from`.
+    #[test]
+    fn resolve_key_with_treats_an_empty_env_value_as_absent() {
+        let store = MemStore::new();
+        store.set("openai", "sk-ring").unwrap();
+        assert_eq!(
+            resolve_key_with("openai", &store, |_| Some(String::new())),
+            Some("sk-ring".to_string())
+        );
+    }
+
+    /// The public entry point, deterministic under any ambient environment: `ollama` declares no
+    /// env var, so `process_env` is never consulted and only the keyring can answer.
+    #[test]
+    fn resolve_key_delegates_to_the_process_env_reader() {
+        let store = MemStore::new();
+        store.set("ollama", "sk-ring").unwrap();
+        assert_eq!(resolve_key("ollama", &store), Some("sk-ring".to_string()));
+    }
+
+    /// All four wiring outcomes of `key_status`, which also pins the order the two sources reach
+    /// `classify`: an env-supplied key with an empty store must report `Env`, never `Keyring`.
+    #[test]
+    fn key_status_with_classifies_every_wiring_outcome() {
+        let empty = MemStore::new();
+        let ring = MemStore::new();
+        ring.set("openai", "sk-ring").unwrap();
+        let set = |_: &str| Some("sk-env".to_string());
+        let blank = |_: &str| Some(String::new());
+        let unset = |_: &str| None;
+
+        assert_eq!(key_status_with("openai", &empty, set), KeyStatus::Env);
+        assert_eq!(key_status_with("openai", &ring, blank), KeyStatus::Keyring);
+        assert_eq!(key_status_with("openai", &ring, unset), KeyStatus::Keyring);
+        assert_eq!(key_status_with("openai", &empty, unset), KeyStatus::None);
     }
 
     #[test]
