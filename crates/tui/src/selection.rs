@@ -25,11 +25,22 @@ fn classify(env_key: Option<String>, keyring_key: Option<String>) -> KeyStatus {
     }
 }
 
-/// The env key and keyring key for a provider, resolved independently.
-fn sources(provider: &str, store: &dyn CredentialStore) -> (Option<String>, Option<String>) {
-    let env_key = env_key_var(provider).and_then(|var| std::env::var(var).ok());
+/// The env key and keyring key for a provider, resolved independently. `env` supplies the value
+/// of a named environment variable; tests pass a stub so the ambient environment cannot decide
+/// the outcome.
+fn sources_with(
+    provider: &str,
+    store: &dyn CredentialStore,
+    env: impl Fn(&str) -> Option<String>,
+) -> (Option<String>, Option<String>) {
+    let env_key = env_key_var(provider).and_then(env);
     let keyring_key = store.get(provider).ok().flatten();
     (env_key, keyring_key)
+}
+
+/// The env key and keyring key for a provider, read from the process environment.
+fn sources(provider: &str, store: &dyn CredentialStore) -> (Option<String>, Option<String>) {
+    sources_with(provider, store, |var| std::env::var(var).ok())
 }
 
 /// Where a provider's key comes from, for the `/key` listing.
@@ -57,10 +68,20 @@ fn resolve_key_from(env_key: Option<String>, keyring_key: Option<String>) -> Opt
     }
 }
 
+/// The resolved API key for a provider against an explicit environment. Lets the wiring
+/// (`env_key_var` naming plus `store.get`) be tested without the process env deciding the result.
+fn resolve_key_with(
+    provider: &str,
+    store: &dyn CredentialStore,
+    env: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let (env_key, keyring_key) = sources_with(provider, store, env);
+    resolve_key_from(env_key, keyring_key)
+}
+
 /// The resolved API key for a provider (env over keyring), or `None` when no key is available.
 pub fn resolve_key(provider: &str, store: &dyn CredentialStore) -> Option<String> {
-    let (env_key, keyring_key) = sources(provider, store);
-    resolve_key_from(env_key, keyring_key)
+    resolve_key_with(provider, store, |var| std::env::var(var).ok())
 }
 
 /// Layer the persisted preferences and keyring keys over an env-derived [`Selection`]. Pure and
@@ -168,12 +189,36 @@ mod tests {
         assert_eq!(resolve_key_from(Some(String::new()), None), None);
     }
 
+    /// The env stub is supplied explicitly so an ambient `OPENAI_API_KEY` cannot decide the
+    /// outcome; the process env is not read.
     #[test]
     fn resolve_key_reads_a_stored_keyring_key() {
+        let unset = |_: &str| None;
         let store = MemStore::new();
         store.set("openai", "sk-ring").unwrap();
-        assert_eq!(resolve_key("openai", &store), Some("sk-ring".to_string()));
-        assert_eq!(resolve_key("openai", &MemStore::new()), None);
+        assert_eq!(
+            resolve_key_with("openai", &store, unset),
+            Some("sk-ring".to_string())
+        );
+        assert_eq!(resolve_key_with("openai", &MemStore::new(), unset), None);
+    }
+
+    #[test]
+    fn resolve_key_reads_the_env_var_the_provider_declares() {
+        let store = MemStore::new();
+        store.set("openai", "sk-ring").unwrap();
+        let only_openai = |var: &str| (var == "OPENAI_API_KEY").then(|| "sk-env".to_string());
+        assert_eq!(
+            resolve_key_with("openai", &store, only_openai),
+            Some("sk-env".to_string())
+        );
+        // A provider with no declared env var never consults the environment.
+        let store = MemStore::new();
+        store.set("ollama", "sk-ring").unwrap();
+        assert_eq!(
+            resolve_key_with("ollama", &store, |_| Some("sk-env".to_string())),
+            Some("sk-ring".to_string())
+        );
     }
 
     #[test]
