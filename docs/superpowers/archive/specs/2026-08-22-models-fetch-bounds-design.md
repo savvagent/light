@@ -1,6 +1,6 @@
 # Bounded, time-limited model-list fetch — design
 
-> **Status:** DRAFT — a per-request deadline, a streaming byte cap, and a list-length cap on the
+> **Status:** IMPLEMENTED — a per-request deadline, a streaming byte cap, and a list-length cap on the
 > model-list path, plus an abortable fetch task in the TUI.
 >
 > **Revised after PR review.** Two claims in the original draft were wrong and are corrected in

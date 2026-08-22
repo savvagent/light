@@ -1,6 +1,6 @@
 # TUI modal module — design
 
-> **Status:** DRAFT — extract the help/connect/models modal machinery out of `app.rs` into
+> **Status:** IMPLEMENTED — extract the help/connect/models modal machinery out of `app.rs` into
 > `crates/tui/src/modal.rs`, behind a single `modal: ModalHost` field that makes "two modals open at
 > once" unrepresentable.
 
