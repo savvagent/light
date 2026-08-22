@@ -54,26 +54,26 @@ written to fail-for-the-right-reason until the seam exists.
 **Interfaces:** consumes `light_factory_providers::env_key_var`,
 `light_factory_tui::credentials::CredentialStore`; produces no new public items.
 
-- [ ] Confirm the reported failure reproduces:
+- [x] Confirm the reported failure reproduces:
       `OPENAI_API_KEY=sk-test cargo test -p light-factory-tui resolve_key` — expect
       `resolve_key_reads_a_stored_keyring_key` to FAIL with `left: Some("sk-test"), right: Some("sk-ring")`.
-- [ ] Add private `fn sources_with(provider, store, env: impl Fn(&str) -> Option<String>)` holding
+- [x] Add private `fn sources_with(provider, store, env: impl Fn(&str) -> Option<String>)` holding
       the current body of `sources`, with the env lookup supplied by the caller.
-- [ ] Reduce `sources` to `sources_with(provider, store, |var| std::env::var(var).ok())`.
-- [ ] Add private `fn resolve_key_with(provider, store, env: impl Fn(&str) -> Option<String>)`
+- [x] Reduce `sources` to `sources_with(provider, store, |var| std::env::var(var).ok())`.
+- [x] Add private `fn resolve_key_with(provider, store, env: impl Fn(&str) -> Option<String>)`
       holding the current body of `resolve_key`, and reduce `resolve_key` to a delegation with the
       real env lookup.
-- [ ] Rewrite `resolve_key_reads_a_stored_keyring_key` to call `resolve_key_with` with a stub env,
+- [x] Rewrite `resolve_key_reads_a_stored_keyring_key` to call `resolve_key_with` with a stub env,
       asserting: (a) an absent env yields the keyring value, (b) an empty store yields `None`, and
       (c) the lookup is made against the provider's declared var name (`OPENAI_API_KEY`), whose
       value wins over the keyring.
-- [ ] Run `cargo test -p light-factory-tui resolve_key` — expect PASS.
-- [ ] Run `OPENAI_API_KEY=sk-test cargo test -p light-factory-tui resolve_key` — expect PASS
+- [x] Run `cargo test -p light-factory-tui resolve_key` — expect PASS.
+- [x] Run `OPENAI_API_KEY=sk-test cargo test -p light-factory-tui resolve_key` — expect PASS
       (the acceptance criterion).
-- [ ] Run `cargo test -p light-factory-tui` and
+- [x] Run `cargo test -p light-factory-tui` and
       `OPENAI_API_KEY=sk-test cargo test -p light-factory-tui` — expect both green.
-- [ ] Run `cargo clippy --workspace --all-targets -- -D warnings` — expect clean.
-- [ ] Run `cargo fmt --all` and commit as `tui: make the resolve_key test independent of the ambient env`.
+- [x] Run `cargo clippy --workspace --all-targets -- -D warnings` — expect clean.
+- [x] Run `cargo fmt --all` and commit as `tui: make the resolve_key test independent of the ambient env`.
 
 ## Out-of-band verification
 
