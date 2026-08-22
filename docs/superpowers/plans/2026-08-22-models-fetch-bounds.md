@@ -39,8 +39,21 @@ no second HTTP client; truncation in `providers`, not in `fetch_model_list`; `cl
   leaf. `protocol` / `auth` / `persistence` / `server` / `web/` are not touched at all.
 - **Secrets never logged or echoed.** No new error message may carry response-body content, a URL, a
   base URL, or an API key. The provider key travels only in the request headers it already travels
-  in. `serde_json::Error`'s `Display` reports a line/column only, never body content — do not add a
-  body snippet to the parse-error context.
+  in. **Do not use `serde_json::Error`'s `Display` in the parse error.** An earlier revision of this
+  plan claimed it "reports a line/column only, never body content"; that is false for serde's
+  `invalid_type` errors, which embed the offending value — a body of `{"data":"<attacker text>"}`
+  renders as `invalid type: string "<attacker text>", expected a sequence`, and that message is
+  interpolated into `connect.fetch_error` and drawn in the modal. Build the message from
+  `Error::line()` and `Error::column()` by hand. Reaching it needs no credential: the Ollama path
+  targets `127.0.0.1:11434`. See the spec's §11.1.
+- **All three bounds reject; none degrades.** The byte cap, the deadline, and the list-length cap
+  each produce an `Err`. Do **not** `truncate` an over-long list: the modal falls back to row 0 when
+  the configured model is absent, so dropping it off the tail is a silent model substitution onto an
+  attacker-chosen prefix. See the spec's Assumption 5 and §11.2.
+- **The deadline is structural, not conventional.** Every model-list request is built through one
+  `model_list_request` chokepoint, the way the byte cap is funnelled through `parse_capped`. Do not
+  hand-repeat `.timeout(...)` on per-provider builder chains — that is the exact hazard
+  `base_url.rs`'s module doc names.
 - **The trust boundary is untouched.** `validate_base_url`, `build_http_client`, and
   `reject_redirect` keep their current behavior and ordering; `reject_redirect` still runs before any
   body is read and `error_for_status()` still runs before the capped read.
@@ -63,7 +76,8 @@ no second HTTP client; truncation in `providers`, not in `fetch_model_list`; `cl
 |---|---|
 | Modify. `crates/providers/src/models.rs` | `ListBounds` + `DEFAULT`; `bounds` parameter on `list_models_at` / `list_ollama_models_at` and the four private helpers; `.timeout(bounds.timeout)` on each request; `read_capped` replacing `.json::<T>()`; `normalize(ids, max)` truncation; new + updated tests |
 | Modify. `crates/providers/src/base_url.rs` | **Tests only** — pin that `build_http_client` puts no deadline on the client and none on a request built from it |
-| Modify. `crates/tui/src/app.rs` | `connect_fetch_task` / `models_fetch_task` fields + initializers; `abort_connect_fetch` / `abort_models_fetch`; abort+store in `begin_fetch` / `begin_models_fetch`; abort in `close_connect` / `close_models` / `dismiss_modals`; four `#[tokio::test]`s |
+| Modify. `crates/tui/src/app.rs` | `connect_fetch_task` / `models_fetch_task` fields + initializers; `abort_connect_fetch` / `abort_models_fetch`; abort+store in `begin_fetch` / `begin_models_fetch`; abort in `close_connect` / `close_models` / `dismiss_modals`; clear on delivery in both handlers; `guard_panic` around the fetch; `dismiss_modals()` before the logout await; tests |
+| Modify. `crates/tui/src/i18n.rs` | `connect.fetch_panicked` in EN and ES |
 | Modify. `docs/superpowers/specs/2026-08-22-models-fetch-bounds-design.md` | Status → IMPLEMENTED at close-out |
 | Modify. `docs/superpowers/plans/2026-08-22-models-fetch-bounds.md` | Checkboxes marked at close-out |
 
@@ -90,7 +104,8 @@ between commits, which `clippy -D warnings` rejects as dead code.
 
 **Interfaces:**
 - *Consumes:* `reqwest::RequestBuilder::timeout`, `reqwest::Response::chunk`, `serde_json::from_slice`,
-  `anyhow::Context`, `std::time::Duration`. All available today; no manifest change.
+  `std::time::Duration`. All available today; no manifest change. (`anyhow::Context` is **not**
+  used — the parse error is built by hand from `Error::line()`/`Error::column()`.)
 - *Produces:* `pub(crate) models::ListBounds` + `ListBounds::DEFAULT`; a `bounds: ListBounds`
   parameter on `pub(crate) list_models_at` / `pub(crate) list_ollama_models_at`; a private
   `read_capped`. **No public API change** — `pub async fn list_models(provider, key)` and
@@ -101,19 +116,32 @@ between commits, which `clippy -D warnings` rejects as dead code.
       harness already imported there):
       - `an_oversized_body_is_refused_instead_of_buffered`: mount `/v1/models` returning a JSON body
         comfortably larger than a tight cap (e.g. 4096 ids), call
-        `list_models_at("openai", &server.uri(), "k", ListBounds { max_body_bytes: 512, ..tight })`,
+        `list_models_at("openai", &server.uri(), "k", ListBounds { max_body_bytes: 1_048_576, ..tight })`,
         assert `is_err()`, and assert against the **full** anyhow chain (`format!("{err:#}")`, not
-        `err.to_string()`, which shows only the outermost message): it contains `"512"` and `"cap"`,
-        and it contains **no** model id from the body — no response content may reach an error the
-        modal renders.
+        `err.to_string()`, which shows only the outermost message): it contains `"1048576"` and
+        `"cap"`, and it contains **no** model id from the body — no response content may reach an
+        error the modal renders.
+        **The body must be ~3.7 MiB (150_000 ids, `model-{i:06}`) and the cap 1 MiB.** Both numbers
+        are load-bearing: hyper's read buffer grows adaptively (a measured sequence for this body
+        was 8081, 16384, 32768, 24697, …), so a cap below the *largest* frame makes the read bail on
+        iteration one with an **empty** buffer, and the guard's cumulative behaviour is never
+        exercised at all. Such a test passes just as happily against a per-frame cap
+        (`chunk.len() > max_bytes`), which is functionally unbounded memory. Raising the cap merely
+        above the *first* frame (e.g. 20_000) does not fix this.
+      - `a_body_one_byte_over_the_cap_is_refused`: the same literal `BODY` with
+        `max_body_bytes: BODY.len() - 1`, asserting `Err`. `a_body_at_the_cap_is_still_accepted`
+        pins `cap`; without this one, relaxing the guard to `> max_bytes + 1` goes unnoticed.
+      - `a_hostile_body_cannot_reach_the_modal_through_the_parse_error`: respond with
+        `{"data":"<MARKER>"}` and assert the full `format!("{err:#}")` chain does not contain
+        `<MARKER>` — same shape as the oversized-body assertion. This is what pins Global
+        Constraints' parse-error rule.
       - `a_body_at_the_cap_is_still_accepted`: respond with `set_body_string(BODY)` where `BODY` is a
         JSON **string literal** (so its byte length is knowable — `set_body_json` never hands the
         implementer the serialized bytes), set `max_body_bytes: BODY.len()`, and assert `Ok`. This
         pins the boundary as `>` rather than `>=`.
-      - `an_over_long_model_list_is_truncated`: mount 20 ids named so that sorted order is
-        unambiguous (e.g. `m00`..`m19`), call with `max_models: 5`, assert the result is exactly
-        `["m00","m01","m02","m03","m04"]` — proving the cap is applied *after* the sort, not to
-        arrival order.
+      - `an_over_long_model_list_is_refused`: mount 20 ids (`m00`..`m19`), call with
+        `max_models: 5`, assert `Err` whose chain names the count and the cap and carries no id.
+      - `a_list_exactly_at_the_cap_is_accepted`: 5 ids with `max_models: 5` is `Ok`.
       - `a_stalled_endpoint_fails_at_the_deadline`: mount a response with
         `ResponseTemplate::new(200).set_delay(Duration::from_secs(5))` (comfortably past the
         deadline, while keeping a *failing* run — one where the timeout was not applied — bounded at
@@ -121,7 +149,11 @@ between commits, which `clippy -D warnings` rejects as dead code.
         `timeout: Duration::from_millis(150)`, assert `is_err()`, and identify the timeout
         **structurally**:
         `err.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_timeout)`.
-        Assert **nothing** about elapsed wall-clock time.
+        Assert **nothing** about elapsed wall-clock time. Drive **every** provider path —
+        `anthropic`, `openai`, `gemini`, `deepseek`, and `ollama` — from one `Mock` matched on
+        `method("GET")` alone. Covering only `openai` leaves three of four request sites with no
+        deadline coverage at all; ollama matters most, since it needs no credential and anything on
+        `127.0.0.1:11434` reaches it.
       - `default_bounds_are_the_production_values`: assert
         `ListBounds::DEFAULT.timeout == Duration::from_secs(15)`,
         `max_body_bytes == 2 * 1024 * 1024`, `max_models == 1_000` — so a later accidental widening
@@ -135,18 +167,24 @@ between commits, which `clippy -D warnings` rejects as dead code.
         `an_unknown_provider_is_rejected_before_any_request`). These double as the proof that an
         ordinary response still round-trips through the capped read and `from_slice`.
 - [ ] Add the failing test to `crates/providers/src/base_url.rs`'s `#[cfg(test)] mod tests`:
-      - `the_completion_client_carries_no_deadline`: for both an `https` and a loopback `http` base,
-        assert `!format!("{:?}", build_http_client(base)).to_lowercase().contains("timeout")`
+      - `the_completion_client_carries_no_total_deadline`: for both an `https` and a loopback `http`
+        base, assert
+        `!format!("{:?}", build_http_client(base)).to_lowercase().contains("totaltimeout")`
         (reqwest emits a `reqwest::config::TotalTimeout` field in `Client`'s `Debug` only when one is
         configured) **and** that
         `build_http_client(base).get(url).build().unwrap().timeout().is_none()`. The second
         assertion is the structural one and is what makes "the timeout is scoped to the model-list
-        calls" checkable rather than merely claimed.
+        calls" checkable rather than merely claimed. Scope the Debug half to a **total** deadline:
+        asserting the absence of every timeout would cement "completions are unbounded" as a
+        deliberate invariant and make #54 harder to close, when `read_timeout` and `connect_timeout`
+        are both legitimate future additions. Treat the Debug half as best-effort — `Client`'s
+        `Debug` renders `connect_timeout` not at all (that field lives on `ClientBuilder`'s
+        `Debug`).
 - [ ] Run `cargo test -p light-factory-providers` — expect compile failures (`ListBounds` does not
       exist; the `*_at` functions take three/one arguments).
 - [ ] Implement in `crates/providers/src/models.rs`:
-      - `use std::time::Duration;` and `use anyhow::Context;` at the top (`anyhow` is already a
-        dependency; the crate does not currently import `Context` anywhere).
+      - `use std::time::Duration;` at the top (`anyhow` is already a
+        dependency).
       - `#[derive(Debug, Clone, Copy)] pub(crate) struct ListBounds { pub(crate) timeout: Duration,
         pub(crate) max_body_bytes: usize, pub(crate) max_models: usize }` with
         `impl ListBounds { pub(crate) const DEFAULT: Self = Self { timeout: Duration::from_secs(15),
@@ -156,9 +194,16 @@ between commits, which `clippy -D warnings` rejects as dead code.
       - Thread `bounds: ListBounds` through `list_models_at`, `list_ollama_models_at`, `list_anthropic`,
         `list_openai_compatible`, and `list_gemini`. `list_models` and `list_ollama_models` pass
         `ListBounds::DEFAULT` — **do not change their signatures**.
-      - Add `.timeout(bounds.timeout)` to each of the four `RequestBuilder` chains, between the
-        headers and `.send()`. Comment *why* it is per-request and not on the client: the same
-        `build_http_client` serves completions, where a long generation is legitimate.
+      - Add `fn model_list_request(base: &str, path: &str, bounds: ListBounds) ->
+        reqwest::RequestBuilder` returning
+        `build_http_client(base).get(join_url(base, path)).timeout(bounds.timeout)`, and build all
+        five provider paths through it (callers add only their own auth headers). Comment *why* it
+        is per-request and not on the client — the same `build_http_client` serves completions,
+        where a long generation is legitimate — and *why* it is a chokepoint: nothing fails if a
+        hand-repeated `.timeout(...)` is omitted on a new provider path.
+      - Add `ListBounds::debug_check()` and call it on both `*_at` seams: `timeout` non-zero,
+        `max_models >= 1`, `max_body_bytes` at or above the smallest well-formed body. `max_models:
+        0` is the one bound whose violation makes a fetch *succeed* with a wrong (empty) answer.
       - Add `async fn read_capped(mut resp: reqwest::Response, max_bytes: usize) -> anyhow::Result<Vec<u8>>`
         (`mut` is required — `Response::chunk` takes `&mut self`) that starts from an **empty** `Vec` (never reserving from an attacker-supplied length), loops
         `while let Some(chunk) = resp.chunk().await?`, bails with
@@ -169,12 +214,22 @@ between commits, which `clippy -D warnings` rejects as dead code.
       - Replace all four `raw.error_for_status()?.json::<T>().await?` with
         `let resp = raw.error_for_status()?;` →
         `let body = read_capped(resp, bounds.max_body_bytes).await?;` →
-        `let resp: T = serde_json::from_slice(&body).context("model list response was not valid JSON")?;`
+        ```rust
+        serde_json::from_slice(&body).map_err(|e| {
+            anyhow::anyhow!(
+                "model list response was not valid JSON (line {}, column {})",
+                e.line(),
+                e.column()
+            )
+        })
+        ```
+        (**not** `.context(...)` over `serde_json::Error` — see Global Constraints.)
         Keep `reject_redirect(&raw)?` before `error_for_status()`, exactly as today.
-      - Change `normalize(mut ids: Vec<String>)` to `normalize(mut ids: Vec<String>, max: usize)`,
-        adding `ids.truncate(max)` **after** `sort` + `dedup`, and update the four call sites to pass
-        `bounds.max_models`. Document that truncating after the sort is what makes the retained
-        subset deterministic.
+      - Change `normalize(mut ids: Vec<String>)` to
+        `normalize(mut ids: Vec<String>, max: usize) -> anyhow::Result<Vec<String>>`, which after
+        `sort` + `dedup` **bails** when `ids.len() > max` with a message naming the count and the cap
+        and **no id**. Update the four call sites to pass `bounds.max_models` and propagate the
+        `Result`. Document why refusing beats truncating (spec Assumption 5).
 - [ ] Run `cargo test -p light-factory-providers` — all tests green, including the nine updated
       pre-existing ones.
 - [ ] Verify the "no public API change" claim rather than remembering it:
@@ -216,6 +271,17 @@ between commits, which `clippy -D warnings` rejects as dead code.
         task, call `app.begin_models_fetch("local".to_string())` (`local` resolves no key, so the
         replacement fetch fails offline without touching the network), assert the **first** probe
         finished and `app.models_fetch_task.is_some()`.
+      - `starting_a_connect_fetch_aborts_the_previous_one`: the mirror, via
+        `app.begin_fetch("local".to_string(), None)`. Required, not optional — the three abort tests
+        above assign the field by hand, so they exercise `abort_connect_fetch` but never the
+        *producer*: `begin_fetch` could revert to a bare `tokio::spawn` with the handle never
+        stored and the whole TUI suite would stay green, while `close_connect` would have nothing to
+        abort and the credential-bearing connection would leak exactly as before.
+      - `a_delivered_models_result_stops_tracking_its_task` /
+        `a_delivered_connect_result_stops_tracking_its_task` — the handler clears its own handle.
+        `a_stale_result_leaves_the_current_fetch_tracked` — a superseded nonce must **not** clear it.
+      - `a_panicking_fetch_reports_an_error_instead_of_spinning_forever` — `guard_panic` over a
+        panicking future yields the `connect.fetch_panicked` string.
 - [ ] Run `cargo test -p light-factory-tui` — expect compile failures (the fields do not exist).
 - [ ] Implement in `crates/tui/src/app.rs`:
       - Add `connect_fetch_task: Option<tokio::task::JoinHandle<()>>` and
@@ -236,6 +302,19 @@ between commits, which `clippy -D warnings` rejects as dead code.
       - `dismiss_modals`: add `self.abort_connect_fetch();` and `self.abort_models_fetch();`
         **unconditionally**, outside the existing `if self.connect.is_some()` /
         `if self.models.is_some()` arms.
+      - Wrap the fetch in `guard_panic` (`futures_util::FutureExt::catch_unwind` over
+        `std::panic::AssertUnwindSafe`), reporting a new `connect.fetch_panicked` i18n key (EN + ES).
+        Nothing polls the `JoinHandle`, so an unwind inside the fetch sends no `UiEvent` at all and
+        leaves `fetching: true` until Esc; the 15 s deadline is inside reqwest, not around the task.
+      - Clear `connect_fetch_task` / `models_fetch_task` in `handle_connect_models` /
+        `handle_models_fetched`, **after** the nonce check (a stale result must not drop the live
+        fetch's handle), and document both fields as cancellation handles rather than "a fetch is in
+        flight" predicates — #47 and #46 are both likely to reach for them as an "already fetching"
+        guard, where they are wrong in both directions.
+      - Move `self.dismiss_modals()` in `sign_out` **above** `self.api.logout(...).await`. The TUI's
+        `Api` client is a `reqwest::Client::new()` with no timeout, so a server that never answers
+        logout would otherwise delay cancellation of the key-bearing fetch indefinitely — the exact
+        window this change set out to close.
       - Change **nothing else**. `apply_and_close_connect` / `apply_and_close_models` already
         delegate to `close_connect` / `close_models` and need no edit. Do not touch
         `handle_connect_models`, `handle_models_fetched`, `ModelsStep`, `ConnectStep`, the rendering
