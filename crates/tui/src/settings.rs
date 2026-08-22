@@ -21,7 +21,7 @@ pub struct Settings {
 
 /// Location of the settings file: `$XDG_CONFIG_HOME/light-factory/config.json`
 /// (falling back to `~/.config/light-factory/config.json`).
-fn path() -> PathBuf {
+pub fn path() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .or_else(|_| std::env::var("HOME").map(|home| format!("{home}/.config")))
         .unwrap_or_else(|_| ".".to_string());
@@ -40,12 +40,14 @@ pub fn save(settings: &Settings) -> anyhow::Result<()> {
     save_at(&path(), settings)
 }
 
-fn load_at(path: &Path) -> Option<Settings> {
+/// Load the settings stored at `path`, or `None` when the file is missing or malformed.
+pub fn load_at(path: &Path) -> Option<Settings> {
     let raw = fs::read_to_string(path).ok()?;
     serde_json::from_str::<Settings>(&raw).ok()
 }
 
-fn save_at(path: &Path, settings: &Settings) -> anyhow::Result<()> {
+/// Persist the settings to `path`, creating the parent directory as needed.
+pub fn save_at(path: &Path, settings: &Settings) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

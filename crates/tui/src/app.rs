@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -211,6 +212,7 @@ pub struct App {
     provider_info: ProviderInfo,
     store: Arc<dyn CredentialStore>,
     settings: Settings,
+    settings_path: PathBuf,
     key_target: Option<String>,
     key_input: String,
     key_return: Mode,
@@ -269,6 +271,7 @@ impl App {
             provider_info,
             store,
             settings,
+            settings_path: crate::settings::path(),
             key_target: None,
             key_input: String::new(),
             key_return: Mode::SignIn,
@@ -685,7 +688,7 @@ impl App {
                 if let Some(locale) = Locale::parse(arg) {
                     self.config.lang = locale;
                     self.settings.lang = locale.as_str().to_string();
-                    let _ = crate::settings::save(&self.settings);
+                    let _ = crate::settings::save_at(&self.settings_path, &self.settings);
                     self.status = self.t_with("status.lang_set", &[("lang", locale.as_str())]);
                 } else {
                     self.error = Some(self.t("status.lang_invalid").to_string());
@@ -743,7 +746,7 @@ impl App {
         if let Some((provider, model)) = apply {
             self.settings.models.insert(provider.clone(), model.clone());
             self.settings.provider = Some(provider);
-            if let Err(e) = crate::settings::save(&self.settings) {
+            if let Err(e) = crate::settings::save_at(&self.settings_path, &self.settings) {
                 let err = e.to_string();
                 self.status = self.t_with("status.settings_save_failed", &[("error", &err)]);
             } else {
@@ -760,19 +763,7 @@ impl App {
         let events = self.events.clone();
         let store = self.store.clone();
         tokio::spawn(async move {
-            let result = if provider == "ollama" {
-                list_ollama_models().await.map_err(|e| e.to_string())
-            } else {
-                // The just-typed key wins; a connected provider resolves its stored key here.
-                let key = match key {
-                    Some(k) => Some(k),
-                    None => crate::selection::resolve_key(&provider, store.as_ref()),
-                };
-                match key {
-                    Some(k) => list_models(&provider, &k).await.map_err(|e| e.to_string()),
-                    None => Err(format!("no API key for {provider}")),
-                }
-            };
+            let result = fetch_model_list(&provider, key, store.as_ref()).await;
             let _ = events.send(UiEvent::Models {
                 nonce,
                 provider,
@@ -845,14 +836,7 @@ impl App {
         let events = self.events.clone();
         let store = self.store.clone();
         tokio::spawn(async move {
-            let result = if provider == "ollama" {
-                list_ollama_models().await.map_err(|e| e.to_string())
-            } else {
-                match crate::selection::resolve_key(&provider, store.as_ref()) {
-                    Some(k) => list_models(&provider, &k).await.map_err(|e| e.to_string()),
-                    None => Err(format!("no API key for {provider}")),
-                }
-            };
+            let result = fetch_model_list(&provider, None, store.as_ref()).await;
             let _ = events.send(UiEvent::Picker {
                 nonce,
                 provider,
@@ -932,7 +916,7 @@ impl App {
         self.close_models();
         if let Some((provider, model)) = apply {
             self.settings.models.insert(provider.clone(), model.clone());
-            if let Err(e) = crate::settings::save(&self.settings) {
+            if let Err(e) = crate::settings::save_at(&self.settings_path, &self.settings) {
                 let err = e.to_string();
                 self.status = self.t_with("status.settings_save_failed", &[("error", &err)]);
             } else {
@@ -1003,7 +987,7 @@ impl App {
         self.settings
             .models
             .insert(active.clone(), model.to_string());
-        let _ = crate::settings::save(&self.settings);
+        let _ = crate::settings::save_at(&self.settings_path, &self.settings);
         self.rebuild_provider();
         self.status = self.t_with("status.model_set", &[("model", model)]);
     }
@@ -1871,9 +1855,16 @@ impl App {
         let footer: &str;
         match step {
             ModelsStep::Offline => {
+                if let Some(reason) = &self.provider_info.offline {
+                    lines.push(Line::from(Span::styled(
+                        crate::provider::offline_notice(self.config.lang, reason),
+                        Style::default().fg(Color::Yellow),
+                    )));
+                    lines.push(Line::from(""));
+                }
                 lines.push(Line::from(Span::styled(
                     self.t("models.offline"),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(Color::DarkGray),
                 )));
                 footer = self.t("models.footer_offline");
             }
@@ -2264,8 +2255,6 @@ fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ConnectTransition {
     }
 }
 
-/// Pure step-transition for the models modal: maps a key press in the current step to the next
-/// step, apply, or close. No network/keyring/terminal state.
 /// The `(provider, model)` pair a models-modal step would persist, or `None` when the step
 /// carries no usable selection (still fetching, an empty list, or a blank manual entry).
 fn models_apply_target(step: &ModelsStep) -> Option<(String, String)> {
@@ -2292,6 +2281,29 @@ fn models_apply_target(step: &ModelsStep) -> Option<(String, String)> {
     }
 }
 
+/// Fetch a provider's model list off the UI loop. `key_override` is a just-typed key that wins
+/// over the stored one; otherwise the key is resolved from the environment or the keyring. The key
+/// is consumed here and never returned to the caller.
+async fn fetch_model_list(
+    provider: &str,
+    key_override: Option<String>,
+    store: &dyn CredentialStore,
+) -> Result<Vec<String>, String> {
+    if provider == "ollama" {
+        return list_ollama_models().await.map_err(|e| e.to_string());
+    }
+    let key = match key_override {
+        Some(k) => Some(k),
+        None => crate::selection::resolve_key(provider, store),
+    };
+    match key {
+        Some(k) => list_models(provider, &k).await.map_err(|e| e.to_string()),
+        None => Err(format!("no API key for {provider}")),
+    }
+}
+
+/// Pure step-transition for the models modal: maps a key press in the current step to the next
+/// step, apply, or close. No network/keyring/terminal state.
 fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModelsTransition {
     match step {
         ModelsStep::Offline => match key.code {
@@ -2542,6 +2554,15 @@ mod tests {
 
     fn test_app() -> App {
         test_app_with_store(Arc::new(MemStore::new()))
+    }
+
+    /// A per-test settings file under the temp dir, so apply paths never touch the developer's
+    /// real `config.json`.
+    fn temp_settings_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "light-factory-app-{name}-{}.json",
+            std::process::id()
+        ))
     }
 
     /// A store whose `set` always fails, for exercising the keyring-failure branch.
@@ -3102,6 +3123,91 @@ mod tests {
                 error: Some(_),
             }) if provider == "openai" && input.is_empty()
         ));
+    }
+
+    #[test]
+    fn models_enter_persists_the_highlighted_model_and_rebuilds() {
+        let mut app = test_app();
+        app.settings_path = temp_settings_path("models-apply-list");
+        let _ = std::fs::remove_file(&app.settings_path);
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        app.models = Some(ModelsStep::ModelList {
+            provider: "openai".to_string(),
+            models: vec!["gpt-4o".to_string(), "o3".to_string()],
+            selected: 1,
+            fetching: false,
+        });
+
+        app.handle_models_key(key(KeyCode::Enter));
+
+        assert!(app.models.is_none());
+        assert_eq!(
+            app.settings.models.get("openai").map(String::as_str),
+            Some("o3")
+        );
+        assert!(
+            app.settings.provider.is_none(),
+            "/models must not activate a provider"
+        );
+        let saved = crate::settings::load_at(&app.settings_path).expect("settings were saved");
+        assert_eq!(saved.models.get("openai").map(String::as_str), Some("o3"));
+        let _ = std::fs::remove_file(&app.settings_path);
+    }
+
+    #[test]
+    fn models_manual_enter_persists_the_trimmed_id() {
+        let mut app = test_app();
+        app.settings_path = temp_settings_path("models-apply-manual");
+        let _ = std::fs::remove_file(&app.settings_path);
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        app.models = Some(ModelsStep::Manual {
+            provider: "openai".to_string(),
+            input: "  o3-mini  ".to_string(),
+            error: None,
+        });
+
+        app.handle_models_key(key(KeyCode::Enter));
+
+        assert!(app.models.is_none());
+        assert_eq!(
+            app.settings.models.get("openai").map(String::as_str),
+            Some("o3-mini")
+        );
+        assert!(app.settings.provider.is_none());
+        let _ = std::fs::remove_file(&app.settings_path);
+    }
+
+    /// A successful apply must re-derive `provider_info` from the updated settings. Asserting the
+    /// resulting model directly would depend on the ambient `LIGHT_*`/API-key environment, so this
+    /// plants a sentinel that only a real `rebuild_provider()` call can clear.
+    #[test]
+    fn models_apply_rebuilds_the_active_provider() {
+        let mut app = test_app();
+        app.settings_path = temp_settings_path("models-apply-rebuild");
+        let _ = std::fs::remove_file(&app.settings_path);
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        app.provider_info.model = Some("stale-sentinel".to_string());
+        app.models = Some(ModelsStep::Manual {
+            provider: "ollama".to_string(),
+            input: "llama3".to_string(),
+            error: None,
+        });
+
+        app.handle_models_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.settings.models.get("ollama").map(String::as_str),
+            Some("llama3")
+        );
+        assert_ne!(
+            app.provider_info.model.as_deref(),
+            Some("stale-sentinel"),
+            "apply must rebuild the active provider"
+        );
+        let _ = std::fs::remove_file(&app.settings_path);
     }
 
     #[test]

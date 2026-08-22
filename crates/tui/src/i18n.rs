@@ -272,10 +272,7 @@ const EN: Catalog = &[
     ("connect.footer_models", "Enter: select · Esc: back"),
     ("connect.footer_fetching", "Esc: cancel"),
     ("models.title", "Select a model"),
-    (
-        "models.offline",
-        "No active provider — use /connect to connect one first",
-    ),
+    ("models.offline", "Use /connect to connect a provider first"),
     ("models.manual", "Type a model id, or Esc to close"),
     (
         "models.footer_list",
@@ -570,7 +567,7 @@ const ES: Catalog = &[
     ("models.title", "Seleccionar un modelo"),
     (
         "models.offline",
-        "No hay un proveedor activo — usa /connect para conectar uno primero",
+        "Usa /connect para conectar un proveedor primero",
     ),
     (
         "models.manual",
