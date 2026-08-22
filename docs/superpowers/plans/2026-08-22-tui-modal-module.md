@@ -135,7 +135,7 @@ a type that no longer exists, and so that a rebase onto #44/#47 can be replayed 
   `fn centered_rect(u16, u16, Rect) -> Rect`.
   (Signatures are unchanged from `app.rs` — this task is code motion only. They change in Tasks 2–4.)
 
-- [ ] **Step 1: Create the module and wire it in**
+- [x] **Step 1: Create the module and wire it in**
 
 Create `crates/tui/src/modal.rs` with the module doc comment:
 
@@ -150,7 +150,7 @@ Create `crates/tui/src/modal.rs` with the module doc comment:
 Add `mod modal;` to `crates/tui/src/main.rs`, in alphabetical position between `mod config;` and
 `mod provider;`.
 
-- [ ] **Step 2: Move the types and pure functions verbatim**
+- [x] **Step 2: Move the types and pure functions verbatim**
 
 Cut these from `crates/tui/src/app.rs` and paste them into `crates/tui/src/modal.rs`, adding
 `pub(crate)` to each item **and to every field of `ProviderRow`, `ConnectStep` and `ModelsStep`**
@@ -189,7 +189,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::app::takes_key;
 ```
 
-- [ ] **Step 3: Fix the two cross-module helpers**
+- [x] **Step 3: Fix the two cross-module helpers**
 
 In `crates/tui/src/app.rs`, change `fn mask(` to `pub(crate) fn mask(` and `fn takes_key(` to
 `pub(crate) fn takes_key(` (they stay in `app.rs`: `mask` is also used by `draw_key`, and
@@ -208,7 +208,7 @@ list_ollama_models};` entries that moved (`list_models`, `list_ollama_models`) �
 `CompleteRequest` and `Provider`. Likewise drop any `ratatui::widgets` import in `app.rs` that is now
 only used by `modal.rs` (`Clear`), and keep the rest.
 
-- [ ] **Step 4: Move the tests that cover the moved code**
+- [x] **Step 4: Move the tests that cover the moved code**
 
 Create `#[cfg(test)] mod tests` at the bottom of `crates/tui/src/modal.rs` and **move** these tests
 from `app.rs`'s test module into it, unchanged apart from their `use super::…` line. They are pure
@@ -246,7 +246,7 @@ Leave in `app.rs` every test that constructs an `App` (`handle_connect_models_*`
 `handle_models_fetched_*`, `models_*_persists_*`, the render tests, the help-modal routing tests,
 the command parsers, `mask_never_echoes_input`, and the engine/ask tests) — they still belong there.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test -p light-factory-tui`
 Expected: PASS, **86 tests** in the `light-factory` bin target — the same count as before the move
@@ -256,7 +256,7 @@ Run: `cargo clippy -p light-factory-tui --all-targets -- -D warnings`
 Expected: clean. If clippy reports an unused import in `app.rs`, delete that import (do not
 `#[allow]` it).
 
-- [ ] **Step 6: Verify the move changed nothing**
+- [x] **Step 6: Verify the move changed nothing**
 
 Run: `git diff --stat`
 Expected: `crates/tui/src/app.rs` shows a large deletion, `crates/tui/src/modal.rs` a matching
@@ -267,7 +267,7 @@ Expected: the **only** added lines are (a) the `use crate::modal::{…}` import 
 `pub(crate) fn mask` / `pub(crate) fn takes_key` signature lines. Read the list; anything else is a
 stray edit made during the move and must be reverted. This task must not change one line of logic.
 
-- [ ] **Step 7: Format and commit**
+- [x] **Step 7: Format and commit**
 
 ```bash
 cargo fmt --all
@@ -334,7 +334,7 @@ impl ModalHost {
   merged `UiEvent::ModelsFetched`.
 - `ConnectTransition` and `ModelsTransition` are **deleted** in this task.
 
-- [ ] **Step 1: Write the failing tests in `modal.rs`**
+- [x] **Step 1: Write the failing tests in `modal.rs`**
 
 Append to `crates/tui/src/modal.rs`'s test module:
 
@@ -446,12 +446,12 @@ fn only_a_fetching_list_names_a_fetch_target() {
 `ModelsStep::ModelList` with `provider: "openai"`. If it uses a different provider id, use that id
 in the assertions above rather than editing the helper.
 
-- [ ] **Step 2: Run them and watch them fail to compile**
+- [x] **Step 2: Run them and watch them fail to compile**
 
 Run: `cargo test -p light-factory-tui modal::`
 Expected: FAIL — `cannot find type Modal`, `ModalHost`, `ModalTransition`, `ModalApply`.
 
-- [ ] **Step 3: Implement `Modal` and `ModalHost` in `modal.rs`**
+- [x] **Step 3: Implement `Modal` and `ModalHost` in `modal.rs`**
 
 Add the types from the Interfaces block above, plus:
 
@@ -568,14 +568,14 @@ impl ModalHost {
 }
 ```
 
-- [ ] **Step 4: Run the `modal.rs` tests**
+- [x] **Step 4: Run the `modal.rs` tests**
 
 Run: `cargo test -p light-factory-tui modal::`
 Expected: PASS for `modal.rs`'s module. `app.rs` will not compile yet — that is Step 5. If you
 cannot get a clean run because `app.rs` is broken, proceed to Step 5 and run them together at
 Step 6.
 
-- [ ] **Step 5: Migrate `App` in `crates/tui/src/app.rs`**
+- [x] **Step 5: Migrate `App` in `crates/tui/src/app.rs`**
 
 a. **Fields.** Delete `connect`, `connect_return`, `connect_nonce`, `models`, `models_return`,
    `models_nonce` from the `App` struct and from `App::new`'s initializer. Add `modal: ModalHost` in
@@ -796,7 +796,7 @@ if let Some(Modal::Models(_)) = self.modal.current() {
 
 Task 4 collapses these. Splitting it that way keeps this task's diff about state, not rendering.
 
-- [ ] **Step 6: Update the `app.rs` tests to the new field**
+- [x] **Step 6: Update the `app.rs` tests to the new field**
 
 The `app.rs` tests that reach into `app.connect` / `app.models` must be updated to
 `app.modal.current()` / `app.modal.open(...)` — **assertions unchanged**. Affected:
@@ -861,7 +861,7 @@ fn opening_a_second_modal_invalidates_the_first_modals_fetch() {
 }
 ```
 
-- [ ] **Step 7: Run the full crate**
+- [x] **Step 7: Run the full crate**
 
 Run: `cargo test -p light-factory-tui`
 Expected: PASS. `app.rs` and `modal.rs` compile into the same `light-factory` bin target, so this
@@ -872,7 +872,7 @@ it before continuing.
 Run: `cargo clippy -p light-factory-tui --all-targets -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 8: Format and commit**
+- [x] **Step 8: Format and commit**
 
 ```bash
 cargo fmt --all
@@ -896,7 +896,7 @@ git commit -m "tui: collapse the connect and models modals onto one modal host"
   `ModalHost::covers_base(&self) -> bool`. Deletes `Mode::Help` and `App.help_return`,
   `App::open_help`'s `help_return` write, `App::close_help`, `App::handle_help_key`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `crates/tui/src/modal.rs`'s test module:
 
@@ -925,12 +925,12 @@ fn only_help_hides_the_screen_underneath_it() {
 }
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [x] **Step 2: Run them and watch them fail**
 
 Run: `cargo test -p light-factory-tui modal::`
 Expected: FAIL — `no variant named Help`, `no method named covers_base`.
 
-- [ ] **Step 3: Implement in `modal.rs`**
+- [x] **Step 3: Implement in `modal.rs`**
 
 Add `Help` as the first variant of `Modal`. Add to `Modal::next` a `Modal::Help => help_step_next(key)`
 arm, with:
@@ -973,7 +973,7 @@ impl ModalHost {
 }
 ```
 
-- [ ] **Step 4: Migrate `App`**
+- [x] **Step 4: Migrate `App`**
 
 In `crates/tui/src/app.rs`:
 
@@ -1017,7 +1017,7 @@ f. In `draw`'s footer hint, replace `} else if self.mode == Mode::Help {` with
    `} else if matches!(self.modal.current(), Some(Modal::Help)) {`, keeping the `hint.help_close`
    key and the branch's position between `command_mode` and `Mode::Device`.
 
-- [ ] **Step 5: Update the three help tests in `app.rs`**
+- [x] **Step 5: Update the three help tests in `app.rs`**
 
 `help_modal_opens_and_restores_the_prior_mode`, `help_modal_returns_to_the_mode_it_was_opened_from`
 and `esc_and_ctrl_p_close_help_but_ctrl_c_quits` currently assert on `app.mode == Mode::Help`.
@@ -1073,7 +1073,7 @@ fn esc_and_ctrl_p_close_help_but_ctrl_c_quits() {
 Note what carries over: `handle_help_key` returned `true` on Ctrl-C, and `handle_modal_key`'s
 Ctrl-C check (added in Task 2) is what preserves that — the third test is its regression net.
 
-- [ ] **Step 6: Run**
+- [x] **Step 6: Run**
 
 Run: `cargo test -p light-factory-tui`
 Expected: PASS, with two more `modal.rs` tests than Task 2 left behind and **no** loss in `app.rs`.
@@ -1082,7 +1082,7 @@ Run: `cargo clippy -p light-factory-tui --all-targets -- -D warnings`
 Expected: clean. `Mode` now has seven variants and every `match self.mode` must still be exhaustive
 without a wildcard.
 
-- [ ] **Step 7: Format and commit**
+- [x] **Step 7: Format and commit**
 
 ```bash
 cargo fmt --all
@@ -1136,7 +1136,7 @@ pub(crate) fn draw_modal(frame: &mut Frame, area: Rect, view: ModalView);
   `draw_popup`'s signature changes to `draw_popup(&mut Frame, Rect, PopupView)`; `centered_rect`
   is unchanged. `App::draw_connect`, `App::draw_models` and `App::draw_help` are deleted.
 
-- [ ] **Step 1: Move the view construction into `modal.rs`**
+- [x] **Step 1: Move the view construction into `modal.rs`**
 
 Add to `modal.rs`:
 
@@ -1178,7 +1178,7 @@ so it is applied once instead of twice. Add to `modal.rs`'s imports:
 `use light_factory_providers::OfflineReason;` and
 `use ratatui::style::{Color, Modifier, Style};` and `use ratatui::text::Span;`.
 
-- [ ] **Step 2: Change `draw_popup` and add the renderers**
+- [x] **Step 2: Change `draw_popup` and add the renderers**
 
 ```rust
 /// Render a centered, bordered popup, clearing what is underneath. The footer is pinned to the
@@ -1219,7 +1219,7 @@ pub(crate) fn draw_modal(frame: &mut Frame, area: Rect, view: ModalView) {
 bordered `Block` titled `" {title} "`, `Wrap { trim: false }`) — the geometry and the absence of a
 `Clear` are load-bearing for byte-identical output.
 
-- [ ] **Step 3: Collapse `App::draw`**
+- [x] **Step 3: Collapse `App::draw`**
 
 Delete `App::draw_connect`, `App::draw_models` and `App::draw_help` from `app.rs`. Replace the two
 blocks Task 3 left behind with:
@@ -1239,7 +1239,7 @@ Update `app.rs`'s `use crate::modal::{…}` list: drop `draw_popup`, `centered_r
 if `app.rs` no longer names them; add `ModalContext`. Delete any `ratatui` import in `app.rs` that
 clippy now reports as unused.
 
-- [ ] **Step 4: Run the rendering tests with no expectation edits**
+- [x] **Step 4: Run the rendering tests with no expectation edits**
 
 Run: `cargo test -p light-factory-tui`
 Expected: PASS. In particular `models_modal_renders_its_own_header`,
@@ -1251,7 +1251,7 @@ the test.
 Run: `cargo clippy -p light-factory-tui --all-targets -- -D warnings`
 Expected: clean.
 
-- [ ] **Step 5: Format and commit**
+- [x] **Step 5: Format and commit**
 
 ```bash
 cargo fmt --all
@@ -1269,7 +1269,7 @@ git commit -m "tui: render every modal through one draw seam"
 
 **Interfaces:** none — this task adds no code.
 
-- [ ] **Step 1: Measure**
+- [x] **Step 1: Measure**
 
 ```bash
 BASE=$(git merge-base origin/master HEAD)
@@ -1292,7 +1292,7 @@ grep -rn 'connect_return\|models_return\|help_return\|connect_nonce\|models_nonc
 
 Expected: **no output**. Any hit is a leftover.
 
-- [ ] **Step 2: Count the tests**
+- [x] **Step 2: Count the tests**
 
 ```bash
 cargo test -p light-factory-tui 2>&1 | grep 'test result'
@@ -1318,7 +1318,7 @@ exists under that name. For each one, confirm it was **renamed**, not deleted, a
 in the PR body. A genuine deletion is a plan failure. (If the shell pipeline misbehaves on your
 platform, do the comparison by eye — the requirement is the audit, not the exact command.)
 
-- [ ] **Step 3: Full workspace gate**
+- [x] **Step 3: Full workspace gate**
 
 ```bash
 cargo fmt --all --check
@@ -1329,7 +1329,7 @@ cargo test --workspace
 Expected: all three clean. (`crates/persistence/tests/pg_store.rs` skips without `DATABASE_URL`;
 that is expected and pre-existing.)
 
-- [ ] **Step 4: Confirm nothing out-of-band moved**
+- [x] **Step 4: Confirm nothing out-of-band moved**
 
 ```bash
 git diff --name-only origin/master...HEAD
@@ -1340,7 +1340,7 @@ No `Cargo.toml`, no `crates/tui/src/i18n.rs`, no `Dockerfile`/`fly.toml`/`web/`/
 `crates/persistence/migrations/`/`.github/`. Phase 5 out-of-band verification is therefore
 **vacuously satisfied** — state it explicitly rather than skipping it.
 
-- [ ] **Step 5: Commit the plan checkboxes**
+- [x] **Step 5: Commit the plan checkboxes**
 
 ```bash
 git add docs/superpowers/plans/2026-08-22-tui-modal-module.md
