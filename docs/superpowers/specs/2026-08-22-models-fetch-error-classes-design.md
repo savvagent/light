@@ -38,7 +38,7 @@ live check, so the credential branch is load-bearing rather than defensive.
   `body.len()` (issue #57), and a cap on the provider-supplied error text at the
   `fetch_model_list` boundary. Both were originally deferred; see §11.
 - A new `ModelsStep::Credentials` terminal step for `MissingKey`/`Auth`, rendering the failure and
-  the remedy (`/connect`, `/key set <provider> <key>`) with **no** input box.
+  the remedy (`/connect`, `/key <provider>`, `/model <id>`) with **no** input box.
 - A retry key (`Ctrl+R`) on the transport-failure step, re-running the fetch in place.
 - Relabelling the manual box as an unverified fallback, and a distinct
   `status.model_set_unverified` status string for ids that were typed rather than picked.
