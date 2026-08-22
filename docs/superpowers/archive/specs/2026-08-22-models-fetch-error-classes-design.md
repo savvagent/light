@@ -1,6 +1,6 @@
 # Model-list fetch error classes — design
 
-> **Status:** DRAFT — branch the `/models` modal on *why* the fetch failed: credential failures point at `/connect`/`/key`, transport failures offer a retry plus an explicitly-unverified manual entry.
+> **Status:** IMPLEMENTED — branch the `/models` modal on *why* the fetch failed: credential failures point at `/connect`/`/key`, transport failures offer a retry plus an explicitly-unverified manual entry.
 
 > **Implements:** https://github.com/savvagent/light/issues/47
 > **Follows:** https://github.com/savvagent/light/issues/36 (the `/models` modal this corrects)

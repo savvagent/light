@@ -111,7 +111,7 @@ between commits, which `clippy -D warnings` rejects as dead code.
   `read_capped`. **No public API change** — `pub async fn list_models(provider, key)` and
   `pub async fn list_ollama_models()` keep their exact signatures and pass `ListBounds::DEFAULT`.
 
-- [ ] Add the failing tests to `crates/providers/src/models.rs`'s `#[cfg(test)] mod tests` (reusing
+- [x] Add the failing tests to `crates/providers/src/models.rs`'s `#[cfg(test)] mod tests` (reusing
       the existing `wiremock::{Mock, MockServer, ResponseTemplate}` + `matchers::{header, method, path}`
       harness already imported there):
       - `an_oversized_body_is_refused_instead_of_buffered`: mount `/v1/models` returning a JSON body
@@ -166,7 +166,7 @@ between commits, which `clippy -D warnings` rejects as dead code.
         `a_redirect_is_rejected_and_the_key_is_not_forwarded`,
         `an_unknown_provider_is_rejected_before_any_request`). These double as the proof that an
         ordinary response still round-trips through the capped read and `from_slice`.
-- [ ] Add the failing test to `crates/providers/src/base_url.rs`'s `#[cfg(test)] mod tests`:
+- [x] Add the failing test to `crates/providers/src/base_url.rs`'s `#[cfg(test)] mod tests`:
       - `the_completion_client_carries_no_total_deadline`: for both an `https` and a loopback `http`
         base, assert
         `!format!("{:?}", build_http_client(base)).to_lowercase().contains("totaltimeout")`
@@ -180,9 +180,9 @@ between commits, which `clippy -D warnings` rejects as dead code.
         are both legitimate future additions. Treat the Debug half as best-effort — `Client`'s
         `Debug` renders `connect_timeout` not at all (that field lives on `ClientBuilder`'s
         `Debug`).
-- [ ] Run `cargo test -p light-factory-providers` — expect compile failures (`ListBounds` does not
+- [x] Run `cargo test -p light-factory-providers` — expect compile failures (`ListBounds` does not
       exist; the `*_at` functions take three/one arguments).
-- [ ] Implement in `crates/providers/src/models.rs`:
+- [x] Implement in `crates/providers/src/models.rs`:
       - `use std::time::Duration;` at the top (`anyhow` is already a
         dependency).
       - `#[derive(Debug, Clone, Copy)] pub(crate) struct ListBounds { pub(crate) timeout: Duration,
@@ -230,16 +230,16 @@ between commits, which `clippy -D warnings` rejects as dead code.
         `sort` + `dedup` **bails** when `ids.len() > max` with a message naming the count and the cap
         and **no id**. Update the four call sites to pass `bounds.max_models` and propagate the
         `Result`. Document why refusing beats truncating (spec Assumption 5).
-- [ ] Run `cargo test -p light-factory-providers` — all tests green, including the nine updated
+- [x] Run `cargo test -p light-factory-providers` — all tests green, including the nine updated
       pre-existing ones.
-- [ ] Verify the "no public API change" claim rather than remembering it:
+- [x] Verify the "no public API change" claim rather than remembering it:
       `grep -rn "normalize(\|list_models_at\|list_ollama_models_at" crates/ --include="*.rs"` must
       show hits only inside `crates/providers/src/models.rs`.
-- [ ] Run `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` — both
+- [x] Run `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` — both
       clean. This is what makes the Task Order rationale's "a bisect between the two commits still
       builds" a verified statement rather than an assumption: `crates/tui` calls the public wrappers,
       whose signatures did not change.
-- [ ] Format and commit: `cargo fmt --all` then
+- [x] Format and commit: `cargo fmt --all` then
       `git commit -m "providers: bound and time-limit the model-list fetch"`.
       No attribution trailer of any kind.
 
@@ -253,7 +253,7 @@ between commits, which `clippy -D warnings` rejects as dead code.
 - *Produces:* private `App` fields and methods only. **No public API change, no i18n change, no
   rendering change, no state-machine change.**
 
-- [ ] Add the failing tests to `crates/tui/src/app.rs`'s `#[cfg(test)] mod tests`, using the existing
+- [x] Add the failing tests to `crates/tui/src/app.rs`'s `#[cfg(test)] mod tests`, using the existing
       `test_app()` helper and `#[tokio::test]` (already used by
       `models_command_opens_a_fetching_list_for_the_active_provider`). Each test spawns a task that
       never completes (`tokio::spawn(std::future::pending::<()>())`), keeps a probe via
@@ -282,8 +282,8 @@ between commits, which `clippy -D warnings` rejects as dead code.
         `a_stale_result_leaves_the_current_fetch_tracked` — a superseded nonce must **not** clear it.
       - `a_panicking_fetch_reports_an_error_instead_of_spinning_forever` — `guard_panic` over a
         panicking future yields the `connect.fetch_panicked` string.
-- [ ] Run `cargo test -p light-factory-tui` — expect compile failures (the fields do not exist).
-- [ ] Implement in `crates/tui/src/app.rs`:
+- [x] Run `cargo test -p light-factory-tui` — expect compile failures (the fields do not exist).
+- [x] Implement in `crates/tui/src/app.rs`:
       - Add `connect_fetch_task: Option<tokio::task::JoinHandle<()>>` and
         `models_fetch_task: Option<tokio::task::JoinHandle<()>>` to `struct App`, beside the existing
         `engine_forward_task`, and `connect_fetch_task: None` / `models_fetch_task: None` to
@@ -324,11 +324,11 @@ between commits, which `clippy -D warnings` rejects as dead code.
         delegate to `close_connect` / `close_models` and need no edit. Do not touch
         `handle_connect_models`, `handle_models_fetched`, `ModelsStep`, `ConnectStep`, the rendering
         functions, or `fetch_model_list`.
-- [ ] Run `cargo test -p light-factory-tui` — green.
-- [ ] Run `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` — both
+- [x] Run `cargo test -p light-factory-tui` — green.
+- [x] Run `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` — both
       clean. (The `crates/persistence` integration test skips without `DATABASE_URL`; that is the
       documented pre-existing behavior, not a regression.)
-- [ ] Format and commit: `cargo fmt --all` then
+- [x] Format and commit: `cargo fmt --all` then
       `git commit -m "tui: abort the in-flight model fetch on modal close"`.
       No attribution trailer of any kind.
 
@@ -340,11 +340,11 @@ step 14 is therefore vacuously satisfied — state it explicitly rather than ski
 
 ## Close-Out Obligations
 
-- [ ] **File a follow-up issue** for `crates/tui/src/api.rs:33` — `reqwest::Client::new()` gives the
+- [x] **File a follow-up issue** for `crates/tui/src/api.rs:33` — `reqwest::Client::new()` gives the
       auth/sign-in HTTP path no timeout, the same unbounded-client pattern this change fixes for the
       model-list path. Do **not** fix it here (different crate, different trust boundary; the
       workflow's "same bug pattern found elsewhere" rule requires a filed issue, not scope creep).
-- [ ] Update the spec's `> **Status:**` to IMPLEMENTED and mark this plan's checkboxes, then
+- [x] Update the spec's `> **Status:**` to IMPLEMENTED and mark this plan's checkboxes, then
       `git mv` both into `docs/superpowers/archive/{specs,plans}/`, add a row to
       `docs/superpowers/archive/README.md`, and commit as
       `docs: record the model-list fetch bounds as shipped`.
