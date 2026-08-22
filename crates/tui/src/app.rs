@@ -1893,8 +1893,8 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{
-        ApiError, App, ConnectStep, EngineForward, KeyCommand, Modal, Mode, ModelsStep, Session,
-        UiEvent, engine_approval_key, engine_forward_step, parse_ask_command,
+        ApiError, App, ConnectStep, EngineForward, KeyCommand, Modal, Mode, ModelsStep,
+        ProviderRow, Session, UiEvent, engine_approval_key, engine_forward_step, parse_ask_command,
         parse_connect_command, parse_key_command, parse_model_command, parse_models_command,
     };
     use crate::config::Config;
@@ -2175,6 +2175,27 @@ mod tests {
         let screen = render(&mut app, 80, 20);
         assert!(screen.contains("Select a model"), "{screen}");
         assert!(screen.contains("gpt-4o"), "{screen}");
+        assert!(
+            screen.contains("Activity"),
+            "a popup floats over the connected screen; drawing it instead of the screen leaves the \
+             base blank:\n{screen}"
+        );
+    }
+
+    /// The converse of the assertion above, and the other half of what `covers_base` decides:
+    /// help is a full-area pane, and `draw_full_screen` deliberately does not `Clear`, so the
+    /// screen underneath must not be drawn at all.
+    #[test]
+    fn help_replaces_the_screen_underneath_it() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.open_help();
+        let screen = render(&mut app, 80, 20);
+        assert!(screen.contains("Help"), "{screen}");
+        assert!(
+            !screen.contains("Activity"),
+            "help covers the base screen, which is not cleared behind it:\n{screen}"
+        );
     }
 
     #[test]
@@ -2435,6 +2456,168 @@ mod tests {
             app.provider_info.model.as_deref(),
             Some("stale-sentinel"),
             "a failed save must not activate the model"
+        );
+    }
+
+    /// The `ModalApply::Provider` arm of `apply_and_close_modal`: `/connect` adopts a provider as
+    /// well as pinning its model, which `/models` must never do.
+    #[test]
+    fn connect_enter_adopts_the_provider_and_persists_its_model() {
+        let mut app = test_app();
+        let _cleanup = TempSettings(app.settings_path.clone());
+        app.mode = Mode::Connected;
+        open(
+            &mut app,
+            Modal::Connect(ConnectStep::ModelList {
+                rows: vec![],
+                provider: "openai".to_string(),
+                models: vec!["gpt-4o".to_string(), "o3".to_string()],
+                selected: 1,
+                fetching: false,
+                error: None,
+                from_key: false,
+            }),
+        );
+
+        app.handle_modal_key(key(KeyCode::Enter));
+
+        assert!(app.modal.current().is_none());
+        assert_eq!(
+            app.settings.provider.as_deref(),
+            Some("openai"),
+            "/connect must adopt the provider it just configured"
+        );
+        assert_eq!(
+            app.settings.models.get("openai").map(String::as_str),
+            Some("o3")
+        );
+        let saved = crate::settings::load_at(&app.settings_path).expect("settings were saved");
+        assert_eq!(saved.provider.as_deref(), Some("openai"));
+        assert_eq!(saved.models.get("openai").map(String::as_str), Some("o3"));
+    }
+
+    /// Mirrors `a_failed_save_rolls_back_the_staged_model` for the `Provider` arm: the adopted
+    /// provider is staged before the write, so a failed write must put the previous one back.
+    #[test]
+    fn a_failed_save_rolls_back_the_adopted_provider_too() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        // A path under a non-directory can never be created, so the write always fails.
+        app.settings_path = std::path::PathBuf::from("/dev/null/nope/config.json");
+        app.settings.provider = Some("anthropic".to_string());
+        open(
+            &mut app,
+            Modal::Connect(ConnectStep::ModelList {
+                rows: vec![],
+                provider: "openai".to_string(),
+                models: vec!["gpt-4o".to_string()],
+                selected: 0,
+                fetching: false,
+                error: None,
+                from_key: false,
+            }),
+        );
+
+        app.handle_modal_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.settings.provider.as_deref(),
+            Some("anthropic"),
+            "a failed save must not leave the new provider staged"
+        );
+        assert!(
+            app.settings.models.is_empty(),
+            "a model that failed to save must not linger and be persisted by a later write"
+        );
+        assert!(app.error.is_some(), "the failure must be surfaced");
+    }
+
+    /// Undeclared on master and fixed here: `handle_connect_key` fired a fetch on *any* step
+    /// landing on a fetching list, and the arrow-key arm carries `fetching` through — so every
+    /// keypress while a list was loading spawned a duplicate request (each one carrying the API
+    /// key), bumped the nonce, discarded the in-flight result, and refetched with
+    /// `fetch_key = None`, dropping the key the user had just typed. Terminal key-repeat triggers
+    /// it. Only a step that *begins* waiting starts a fetch now.
+    ///
+    /// Not a `tokio::test`: under the old behaviour this panics on `tokio::spawn` outside a
+    /// runtime, which is itself proof no fetch is spawned here.
+    #[test]
+    fn moving_the_cursor_while_a_connect_list_loads_does_not_refetch() {
+        let mut app = test_app();
+        let step = ConnectStep::ModelList {
+            rows: vec![],
+            provider: "openai".to_string(),
+            models: vec![],
+            selected: 0,
+            fetching: true,
+            error: None,
+            from_key: true,
+        };
+        let nonce = open(&mut app, Modal::Connect(step));
+
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Up));
+
+        assert_eq!(
+            app.modal.nonce(),
+            nonce,
+            "the in-flight result must survive a keypress that did not change what is awaited"
+        );
+        assert!(matches!(
+            connect_step(&app),
+            Some(ConnectStep::ModelList {
+                fetching: true,
+                from_key: true,
+                ..
+            })
+        ));
+    }
+
+    /// Two fetches on one modal instance, with no open/close between them: the connect list is
+    /// entered, stepped back out of, and entered again. The first fetch's result must not be
+    /// accepted for the second.
+    #[tokio::test]
+    async fn a_second_fetch_on_one_modal_does_not_accept_the_first_ones_result() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        // `local` resolves no key, so each spawned fetch fails offline instead of hitting network.
+        open(
+            &mut app,
+            Modal::Connect(ConnectStep::ProviderList {
+                rows: vec![ProviderRow {
+                    id: "local".to_string(),
+                    connected: true,
+                }],
+                selected: 0,
+            }),
+        );
+
+        app.handle_modal_key(key(KeyCode::Enter));
+        let first = app.modal.nonce();
+        app.handle_modal_key(key(KeyCode::Esc));
+        app.handle_modal_key(key(KeyCode::Enter));
+        let second = app.modal.nonce();
+
+        assert_ne!(
+            first, second,
+            "the second fetch must not reuse the nonce the first is still carrying"
+        );
+        app.handle_connect_models(first, "local".to_string(), Ok(vec!["ghost".to_string()]));
+        assert!(
+            matches!(
+                connect_step(&app),
+                Some(ConnectStep::ModelList { fetching: true, models, .. }) if models.is_empty()
+            ),
+            "the abandoned fetch's result must not fill the list the new one is awaiting"
+        );
+        app.handle_connect_models(second, "local".to_string(), Ok(vec!["real".to_string()]));
+        assert!(
+            matches!(
+                connect_step(&app),
+                Some(ConnectStep::ModelList { fetching: false, models, .. })
+                    if *models == vec!["real".to_string()]
+            ),
+            "the live fetch's result must still be accepted"
         );
     }
 
