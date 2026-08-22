@@ -77,8 +77,11 @@ key, and unverified status string. **No public API change.**
       then `git diff --stat Cargo.lock` — expect an empty diff.
 - [ ] Write the failing tests first in `crates/tui/src/app.rs`'s `#[cfg(test)] mod tests`, reusing
       the existing `test_app()` / `key(code)` / `models_list_step` / `models_manual_step` /
-      `TempSettings` helpers. Add a `key_with(code, modifiers)` helper if the existing `key()` does
-      not take modifiers:
+      `TempSettings` helpers. The existing `key()` hardcodes `KeyModifiers::NONE`, so **add a
+      `ctrl_key(code)` helper** (`KeyEvent::new(code, KeyModifiers::CONTROL)`). Extend the explicit
+      `use super::{...}` list at the top of `mod tests` with `FetchError`, `FetchFailure`,
+      `ModelChoice`, `class_for_status`, `classify_fetch_error`, and add `use anyhow::Context;` plus
+      the `wiremock` imports inside the tests that need them:
       - `class_for_status`: `Some(401)` → `Auth`, `Some(403)` → `Auth`, `Some(400)`/`Some(404)`/
         `Some(429)`/`Some(500)`/`None` → `Fetch`.
       - `classify_fetch_error` (`#[tokio::test]`, wiremock): a 401 response → `Auth`; a 500 → `Fetch`;
@@ -140,8 +143,16 @@ key, and unverified status string. **No public API change.**
       10. `draw_models`: add the `Credentials` arm (red error line, blank line, dark-gray
           `models.credentials_hint`, footer `models.footer_offline`, no focus) and bind `provider` in
           the `Manual` arm so it can render `models.manual_unverified`.
-- [ ] Run `cargo test -p light-factory-tui` — expect **all green**, including the pre-existing
-      `/models` tests (update only those whose constructors changed shape, never their assertions).
+- [ ] Update the two pre-existing tests whose **constructors** changed shape — never their
+      assertions' intent:
+      - `handle_models_fetched_falls_back_to_manual_entry_on_a_fetch_error` passes
+        `Err("bad key".to_string())`; it must pass a
+        `FetchError { class: FetchFailure::Fetch, message: "bad key".into() }` and keep asserting the
+        `Manual` outcome (it is now the *transport* case, so rename it accordingly).
+      - `models_apply_target_reads_the_highlighted_or_typed_id` compares against
+        `Some(("openai", "gpt-4o"))` tuples; it must compare against `ModelChoice` values.
+- [ ] Run `cargo test -p light-factory-tui` — expect **all green**, including every other
+      pre-existing `/models` test unchanged.
 - [ ] Run `cargo test --workspace` — expect green (the `crates/persistence` PostgreSQL integration
       test skips without `DATABASE_URL`; that is not a failure).
 - [ ] Run `cargo clippy --workspace --all-targets -- -D warnings` — expect clean.
