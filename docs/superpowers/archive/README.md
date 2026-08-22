@@ -30,3 +30,4 @@ belongs in the active directories.
 | `turn-step-budget-transcript` | Bounded the execute loop with `MAX_STEPS_PER_TURN` and truncated transcript entries with `MAX_TRANSCRIPT_ENTRY_CHARS` (plan only) |
 | `help-modal` | Moved the TUI's per-mode help hints into a Ctrl-P help modal and replaced the status line with a short "Ctrl-P: help" indicator (plan only; fast-path) |
 | `connect-modal` | Guided `/connect` modal (provider → API key → model) replacing `/provider`, plus a `providers::models` module that lists provider model ids behind the base-URL trust boundary |
+| `models-command` | `/models` modal listing the active provider's models with the current one pre-highlighted, plus a scrolling popup viewport, a config-path seam making the apply path testable, and rollback on a failed settings save |
