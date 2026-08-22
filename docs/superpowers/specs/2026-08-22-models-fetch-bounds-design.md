@@ -512,3 +512,13 @@ Three cheap correctness fixes that fell out of storing the `JoinHandle`:
   otherwise grab the field as an "already fetching" guard, where it is wrong in both directions.
 - `sign_out` cancelled *after* `api.logout(...).await`, on a `reqwest::Client::new()` with no
   timeout. `dismiss_modals()` now runs first.
+
+### 11.5 One Esc path the abort helpers did not cover
+
+Esc from `ConnectStep::ModelList { fetching: true }` steps *back* to the provider list (or to key
+entry) rather than closing the modal, so `close_connect` — and therefore `abort_connect_fetch` —
+never ran. The request and the API key in its headers outlived the "Esc: cancel" the footer
+promises, which is the leak this change exists to close. `handle_connect_key` now aborts (and bumps
+the nonce, matching `close_connect`) whenever a transition leaves a fetching model-list step.
+Regression test: `stepping_back_out_of_a_fetching_connect_list_aborts_the_fetch`. The models modal
+has no equivalent gap — every Esc from `ModelsStep` is a `Close`.

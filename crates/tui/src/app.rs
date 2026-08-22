@@ -1065,6 +1065,14 @@ impl App {
                 } = &next
                 {
                     self.begin_fetch(provider.clone(), fetch_key);
+                } else if matches!(&step, ConnectStep::ModelList { fetching: true, .. }) {
+                    // Esc out of a fetching model list steps *back* to the provider list (or to
+                    // key entry) rather than closing the modal, so `close_connect` never runs.
+                    // Without this the request — and the API key in its headers — outlives the
+                    // "Esc: cancel" the footer promises, exactly as it did before this change.
+                    // The nonce bump matches `close_connect`: the in-flight result is now stale.
+                    self.abort_connect_fetch();
+                    self.connect_nonce += 1;
                 }
                 self.connect = Some(next);
             }
@@ -3483,6 +3491,40 @@ mod tests {
             Err("the fetch task failed unexpectedly".to_string()),
             "a panicked fetch must send a result, or `fetching: true` never clears"
         );
+    }
+
+    #[tokio::test]
+    async fn stepping_back_out_of_a_fetching_connect_list_aborts_the_fetch() {
+        let mut app = test_app();
+        let (handle, probe) = pending_task();
+        app.connect_fetch_task = Some(handle);
+        app.connect = Some(ConnectStep::ModelList {
+            rows: vec![ProviderRow {
+                id: "openai".to_string(),
+                connected: true,
+            }],
+            provider: "openai".to_string(),
+            models: vec![],
+            selected: 0,
+            fetching: true,
+            error: None,
+            from_key: false,
+        });
+
+        // Esc here steps back to the provider list instead of closing the modal, so
+        // `close_connect` never runs — the one Esc path the abort helpers do not cover.
+        app.handle_connect_key(key(KeyCode::Esc));
+
+        assert!(
+            matches!(&app.connect, Some(ConnectStep::ProviderList { .. })),
+            "Esc from a fetching list steps back to the provider list"
+        );
+        settle(&probe).await;
+        assert!(
+            probe.is_finished(),
+            "the footer says \"Esc: cancel\"; the key-bearing request must actually stop"
+        );
+        assert!(app.connect_fetch_task.is_none());
     }
 
     #[test]

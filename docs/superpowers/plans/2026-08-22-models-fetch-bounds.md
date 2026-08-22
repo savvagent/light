@@ -298,6 +298,11 @@ between commits, which `clippy -D warnings` rejects as dead code.
       - `begin_models_fetch`: call `self.abort_models_fetch();` before spawning, and store the handle
         in `self.models_fetch_task`.
       - `close_connect`: add `self.abort_connect_fetch();`.
+      - `handle_connect_key`: abort (and bump `connect_nonce`) when a transition leaves a
+        `ConnectStep::ModelList { fetching: true }` for something other than another fetching list.
+        Esc there steps *back* to the provider list rather than closing the modal, so
+        `close_connect` never runs — the one Esc path the abort helpers miss. The models modal has
+        no equivalent gap: every Esc from `ModelsStep` is a `Close`.
       - `close_models`: add `self.abort_models_fetch();`.
       - `dismiss_modals`: add `self.abort_connect_fetch();` and `self.abort_models_fetch();`
         **unconditionally**, outside the existing `if self.connect.is_some()` /
