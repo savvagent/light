@@ -51,6 +51,11 @@ pub enum UiEvent {
         provider: String,
         result: Result<Vec<String>, String>,
     },
+    Picker {
+        nonce: u64,
+        provider: String,
+        result: Result<Vec<String>, String>,
+    },
 }
 
 /// Which field currently owns keyboard input.
@@ -154,6 +159,32 @@ enum ConnectTransition {
     Close,
 }
 
+/// The `/models` modal's step.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum ModelsStep {
+    ModelList {
+        provider: String,
+        models: Vec<String>,
+        selected: usize,
+        fetching: bool,
+    },
+    Manual {
+        provider: String,
+        input: String,
+        error: Option<String>,
+    },
+    Offline,
+}
+
+/// The result of stepping the models modal: advance to a new [`ModelsStep`], apply the
+/// selection, or close.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelsTransition {
+    Step(ModelsStep),
+    Close,
+    Apply,
+}
+
 const LOG_CAPACITY: usize = 200;
 const KEEPALIVE_SECONDS: u64 = 30;
 
@@ -187,6 +218,9 @@ pub struct App {
     connect: Option<ConnectStep>,
     connect_return: Mode,
     connect_nonce: u64,
+    models: Option<ModelsStep>,
+    models_return: Mode,
+    models_nonce: u64,
     engine: Option<Engine>,
     engine_session: Option<SessionId>,
     engine_forward_task: Option<tokio::task::JoinHandle<()>>,
@@ -242,6 +276,9 @@ impl App {
             connect: None,
             connect_return: Mode::Connected,
             connect_nonce: 0,
+            models: None,
+            models_return: Mode::Connected,
+            models_nonce: 0,
             engine: None,
             engine_session: None,
             engine_forward_task: None,
@@ -278,6 +315,7 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && !self.command_mode
             && self.connect.is_none()
+            && self.models.is_none()
         {
             self.open_help();
             return false;
@@ -293,6 +331,9 @@ impl App {
         }
         if self.connect.is_some() {
             return self.handle_connect_key(key);
+        }
+        if self.models.is_some() {
+            return self.handle_models_key(key);
         }
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
@@ -612,6 +653,14 @@ impl App {
             }
             return;
         }
+        if parse_models_command(trimmed) {
+            if self.mode == Mode::Connected {
+                self.enter_models();
+            } else {
+                self.error = Some(self.t("status.models_not_connected").to_string());
+            }
+            return;
+        }
         if let Some(model) = parse_model_command(trimmed) {
             match model {
                 Some(id) => self.set_model(id),
@@ -770,6 +819,125 @@ impl App {
                     *fetching = false;
                     *error = err_msg;
                 }
+            }
+        }
+    }
+
+    fn enter_models(&mut self) {
+        self.models_return = self.mode;
+        let provider = self.provider_info.id.clone();
+        if self.provider_info.offline.is_some() {
+            self.models = Some(ModelsStep::Offline);
+            return;
+        }
+        self.models = Some(ModelsStep::ModelList {
+            provider: provider.clone(),
+            models: vec![],
+            selected: 0,
+            fetching: true,
+        });
+        self.begin_models_fetch(provider);
+    }
+
+    fn begin_models_fetch(&mut self, provider: String) {
+        self.models_nonce += 1;
+        let nonce = self.models_nonce;
+        let events = self.events.clone();
+        let store = self.store.clone();
+        tokio::spawn(async move {
+            let result = if provider == "ollama" {
+                list_ollama_models().await.map_err(|e| e.to_string())
+            } else {
+                match crate::selection::resolve_key(&provider, store.as_ref()) {
+                    Some(k) => list_models(&provider, &k).await.map_err(|e| e.to_string()),
+                    None => Err(format!("no API key for {provider}")),
+                }
+            };
+            let _ = events.send(UiEvent::Picker {
+                nonce,
+                provider,
+                result,
+            });
+        });
+    }
+
+    fn handle_picker(&mut self, nonce: u64, provider: String, result: Result<Vec<String>, String>) {
+        if nonce != self.models_nonce {
+            return;
+        }
+        if !matches!(
+            &self.models,
+            Some(ModelsStep::ModelList {
+                provider: p,
+                fetching: true,
+                ..
+            }) if *p == provider
+        ) {
+            return;
+        }
+        match result {
+            Ok(list) => {
+                let current = self.provider_info.model.clone();
+                let selected = current
+                    .as_ref()
+                    .and_then(|m| list.iter().position(|x| x == m))
+                    .unwrap_or(0);
+                if let Some(ModelsStep::ModelList {
+                    models,
+                    selected: sel,
+                    fetching,
+                    ..
+                }) = &mut self.models
+                {
+                    *models = list;
+                    *sel = selected;
+                    *fetching = false;
+                }
+            }
+            Err(e) => {
+                let err_msg = self.t_with("connect.fetch_error", &[("error", &e)]);
+                self.models = Some(ModelsStep::Manual {
+                    provider,
+                    input: String::new(),
+                    error: Some(err_msg),
+                });
+            }
+        }
+    }
+
+    fn handle_models_key(&mut self, key: KeyEvent) -> bool {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return true;
+        }
+        let Some(step) = self.models.clone() else {
+            return false;
+        };
+        let transition = models_step_next(&step, key);
+        match transition {
+            ModelsTransition::Close => self.close_models(),
+            ModelsTransition::Apply => self.apply_and_close_models(),
+            ModelsTransition::Step(next) => self.models = Some(next),
+        }
+        false
+    }
+
+    fn close_models(&mut self) {
+        self.models_nonce += 1;
+        self.models = None;
+        self.mode = self.models_return;
+    }
+
+    fn apply_and_close_models(&mut self) {
+        let apply = self.models.as_ref().and_then(models_apply_target);
+        self.close_models();
+        if let Some((provider, model)) = apply {
+            self.settings.models.insert(provider.clone(), model.clone());
+            if let Err(e) = crate::settings::save(&self.settings) {
+                let err = e.to_string();
+                self.status = self.t_with("status.settings_save_failed", &[("error", &err)]);
+            } else {
+                self.rebuild_provider();
+                self.status = self.t_with("status.model_set", &[("model", &model)]);
             }
         }
     }
@@ -1269,6 +1437,10 @@ impl App {
             self.draw_connect(frame, chunks[1]);
         }
 
+        if self.models.is_some() {
+            self.draw_models(frame, chunks[1]);
+        }
+
         let hints = if self.command_mode {
             format!("> {}", self.command)
         } else if self.mode == Mode::Help {
@@ -1687,26 +1859,80 @@ impl App {
             footer,
             Style::default().fg(Color::DarkGray),
         )));
+        draw_popup(frame, area, title, lines);
+    }
 
-        let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
-        let width = 60u16.min(area.width.saturating_sub(2));
-        let popup = Rect {
-            x: area.x + (area.width.saturating_sub(width)) / 2,
-            y: area.y + (area.height.saturating_sub(height)) / 2,
-            width,
-            height,
+    fn draw_models(&self, frame: &mut Frame, area: Rect) {
+        let Some(step) = &self.models else {
+            return;
         };
-        frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(format!(" {} ", title)),
-                )
-                .wrap(Wrap { trim: false }),
-            popup,
-        );
+        let title = self.t("models.title").to_string();
+        let mut lines: Vec<Line> = Vec::new();
+        let footer: &str;
+        match step {
+            ModelsStep::Offline => {
+                lines.push(Line::from(Span::styled(
+                    self.t("models.offline"),
+                    Style::default().fg(Color::Yellow),
+                )));
+                footer = self.t("models.footer_offline");
+            }
+            ModelsStep::ModelList {
+                models,
+                selected,
+                fetching,
+                ..
+            } => {
+                if *fetching {
+                    lines.push(Line::from(Span::styled(
+                        self.t("connect.fetching"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    footer = self.t("connect.footer_fetching");
+                } else if models.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        self.t("connect.no_models"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    footer = self.t("models.footer_list");
+                } else {
+                    for (i, model) in models.iter().enumerate() {
+                        let marker = if i == *selected { "> " } else { "  " };
+                        let style = if i == *selected {
+                            Style::default().fg(Color::Yellow)
+                        } else {
+                            Style::default()
+                        };
+                        lines.push(Line::from(Span::styled(format!("{marker}{model}"), style)));
+                    }
+                    footer = self.t("models.footer_list");
+                }
+            }
+            ModelsStep::Manual { input, error, .. } => {
+                if let Some(err) = error {
+                    lines.push(Line::from(Span::styled(
+                        err.clone(),
+                        Style::default().fg(Color::Red),
+                    )));
+                    lines.push(Line::from(""));
+                }
+                lines.push(Line::from(Span::styled(
+                    self.t("models.manual"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+                lines.push(Line::from(Span::styled(
+                    input.clone(),
+                    Style::default().add_modifier(Modifier::REVERSED),
+                )));
+                footer = self.t("models.footer_manual");
+            }
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            footer,
+            Style::default().fg(Color::DarkGray),
+        )));
+        draw_popup(frame, area, title, lines);
     }
 }
 
@@ -1792,6 +2018,11 @@ pub async fn run(
                         provider,
                         result,
                     } => app.handle_models(nonce, provider, result),
+                    UiEvent::Picker {
+                        nonce,
+                        provider,
+                        result,
+                    } => app.handle_picker(nonce, provider, result),
                 }
             }
             _ = tick.tick() => {
@@ -1886,6 +2117,16 @@ fn parse_connect_command(command: &str) -> bool {
     command
         .trim()
         .strip_prefix("/connect")
+        .map(word_boundary)
+        .unwrap_or(false)
+}
+
+/// Parse a `/models` command: `true` for `/models` (optionally followed by whitespace), `false`
+/// otherwise — including `/modelsX` (no word boundary), mirroring `/connect`.
+fn parse_models_command(command: &str) -> bool {
+    command
+        .trim()
+        .strip_prefix("/models")
         .map(word_boundary)
         .unwrap_or(false)
 }
@@ -2023,6 +2264,94 @@ fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ConnectTransition {
     }
 }
 
+/// Pure step-transition for the models modal: maps a key press in the current step to the next
+/// step, apply, or close. No network/keyring/terminal state.
+/// The `(provider, model)` pair a models-modal step would persist, or `None` when the step
+/// carries no usable selection (still fetching, an empty list, or a blank manual entry).
+fn models_apply_target(step: &ModelsStep) -> Option<(String, String)> {
+    match step {
+        ModelsStep::ModelList {
+            provider,
+            models,
+            selected,
+            fetching: false,
+        } => models
+            .get(*selected)
+            .map(|model| (provider.clone(), model.clone())),
+        ModelsStep::Manual {
+            provider, input, ..
+        } => {
+            let id = input.trim();
+            if id.is_empty() {
+                None
+            } else {
+                Some((provider.clone(), id.to_string()))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModelsTransition {
+    match step {
+        ModelsStep::Offline => match key.code {
+            KeyCode::Esc | KeyCode::Enter => ModelsTransition::Close,
+            _ => ModelsTransition::Step(step.clone()),
+        },
+        ModelsStep::ModelList {
+            provider,
+            models,
+            selected,
+            fetching,
+        } => {
+            if *fetching || models.is_empty() {
+                match key.code {
+                    KeyCode::Esc => ModelsTransition::Close,
+                    _ => ModelsTransition::Step(step.clone()),
+                }
+            } else {
+                match key.code {
+                    KeyCode::Esc => ModelsTransition::Close,
+                    KeyCode::Enter => ModelsTransition::Apply,
+                    KeyCode::Up | KeyCode::Down => {
+                        let delta = if key.code == KeyCode::Up { -1 } else { 1 };
+                        ModelsTransition::Step(ModelsStep::ModelList {
+                            provider: provider.clone(),
+                            models: models.clone(),
+                            selected: cycle_index(*selected, models.len(), delta),
+                            fetching: false,
+                        })
+                    }
+                    _ => ModelsTransition::Step(step.clone()),
+                }
+            }
+        }
+        ModelsStep::Manual {
+            provider,
+            input,
+            error,
+        } => match key.code {
+            KeyCode::Esc => ModelsTransition::Close,
+            KeyCode::Enter if !input.trim().is_empty() => ModelsTransition::Apply,
+            KeyCode::Backspace => {
+                let mut next = input.clone();
+                next.pop();
+                ModelsTransition::Step(ModelsStep::Manual {
+                    provider: provider.clone(),
+                    input: next,
+                    error: error.clone(),
+                })
+            }
+            KeyCode::Char(c) => ModelsTransition::Step(ModelsStep::Manual {
+                provider: provider.clone(),
+                input: format!("{input}{c}"),
+                error: error.clone(),
+            }),
+            _ => ModelsTransition::Step(step.clone()),
+        },
+    }
+}
+
 /// Parse a `/model` command: `Some(Some(id))` for `/model <id>`, `Some(None)` for a bare `/model`
 /// (empty arg), or `None` when the command is not `/model`.
 fn parse_model_command(command: &str) -> Option<Option<&str>> {
@@ -2103,6 +2432,7 @@ fn help_lines(locale: Locale) -> Vec<String> {
                 "help.commands.ask",
                 "help.commands.connect",
                 "help.commands.model",
+                "help.commands.models",
                 "help.commands.key",
                 "help.commands.auth",
                 "help.commands.lang",
@@ -2119,6 +2449,29 @@ fn help_lines(locale: Locale) -> Vec<String> {
         lines.push(String::new());
     }
     lines
+}
+
+/// Render `lines` in a centered, bordered popup titled `title`, clearing what is underneath.
+fn draw_popup(frame: &mut Frame, area: Rect, title: String, lines: Vec<Line>) {
+    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let width = 60u16.min(area.width.saturating_sub(2));
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {} ", title)),
+            )
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 /// Center a rectangle of `percent_x` by `percent_y` within `area` (a standard ratatui modal
@@ -2149,15 +2502,17 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{
-        App, ConnectStep, ConnectTransition, EngineForward, KeyCommand, Mode, ProviderRow, UiEvent,
-        connect_step_next, cycle_index, engine_approval_key, engine_forward_step, help_lines, mask,
-        parse_ask_command, parse_connect_command, parse_key_command, parse_model_command,
+        App, ConnectStep, ConnectTransition, EngineForward, KeyCommand, Mode, ModelsStep,
+        ModelsTransition, ProviderRow, UiEvent, connect_step_next, cycle_index,
+        engine_approval_key, engine_forward_step, help_lines, mask, models_apply_target,
+        models_step_next, parse_ask_command, parse_connect_command, parse_key_command,
+        parse_model_command, parse_models_command,
     };
     use crate::config::Config;
     use crate::provider::ProviderInfo;
     use crate::settings::Settings;
     use light_factory_protocol::session::{Event as EngineEvent, EventKind, SessionId};
-    use light_factory_providers::{LocalProvider, Provider};
+    use light_factory_providers::{LocalProvider, OfflineReason, Provider};
     use light_factory_tui::credentials::{CredentialStore, MemStore};
     use light_factory_tui::i18n::Locale;
     use tokio::sync::broadcast::error::RecvError;
@@ -2531,6 +2886,282 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn models_list_step(models: Vec<String>, fetching: bool) -> ModelsStep {
+        ModelsStep::ModelList {
+            provider: "openai".to_string(),
+            models,
+            selected: 0,
+            fetching,
+        }
+    }
+
+    fn models_manual_step(input: &str) -> ModelsStep {
+        ModelsStep::Manual {
+            provider: "openai".to_string(),
+            input: input.to_string(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn parses_models_command() {
+        assert!(parse_models_command("/models"));
+        assert!(parse_models_command("/models   "));
+        assert!(!parse_models_command("/modelsx"));
+        assert!(!parse_models_command("/model gpt-5"));
+        assert!(!parse_models_command("/connect"));
+    }
+
+    #[test]
+    fn models_offline_closes_on_esc_and_enter_and_ignores_typing() {
+        let step = ModelsStep::Offline;
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Esc)),
+            ModelsTransition::Close
+        );
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Enter)),
+            ModelsTransition::Close
+        );
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Char('x'))),
+            ModelsTransition::Step(ModelsStep::Offline)
+        );
+    }
+
+    #[test]
+    fn models_while_fetching_cancels_on_esc_and_ignores_enter() {
+        let step = models_list_step(vec![], true);
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Esc)),
+            ModelsTransition::Close
+        );
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Enter)),
+            ModelsTransition::Step(step.clone())
+        );
+    }
+
+    #[test]
+    fn models_empty_list_enter_is_a_noop_and_esc_closes() {
+        let step = models_list_step(vec![], false);
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Enter)),
+            ModelsTransition::Step(step.clone())
+        );
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Esc)),
+            ModelsTransition::Close
+        );
+    }
+
+    #[test]
+    fn models_list_enter_applies_esc_closes_and_arrows_wrap() {
+        let step = models_list_step(
+            vec![
+                "gpt-4o".to_string(),
+                "gpt-4o-mini".to_string(),
+                "o3".to_string(),
+            ],
+            false,
+        );
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Enter)),
+            ModelsTransition::Apply
+        );
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Esc)),
+            ModelsTransition::Close
+        );
+        assert!(matches!(
+            models_step_next(&step, key(KeyCode::Up)),
+            ModelsTransition::Step(ModelsStep::ModelList { selected: 2, .. })
+        ));
+        assert!(matches!(
+            models_step_next(&step, key(KeyCode::Down)),
+            ModelsTransition::Step(ModelsStep::ModelList { selected: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn models_manual_edits_input_and_applies_only_a_non_blank_id() {
+        let blank = models_manual_step("   ");
+        assert_eq!(
+            models_step_next(&blank, key(KeyCode::Enter)),
+            ModelsTransition::Step(blank.clone())
+        );
+        assert_eq!(
+            models_step_next(&blank, key(KeyCode::Esc)),
+            ModelsTransition::Close
+        );
+
+        let typed = models_step_next(&models_manual_step("gpt-4"), key(KeyCode::Char('o')));
+        assert!(matches!(
+            &typed,
+            ModelsTransition::Step(ModelsStep::Manual { input, .. }) if input == "gpt-4o"
+        ));
+
+        let popped = models_step_next(&models_manual_step("gpt-4o"), key(KeyCode::Backspace));
+        assert!(matches!(
+            &popped,
+            ModelsTransition::Step(ModelsStep::Manual { input, .. }) if input == "gpt-4"
+        ));
+
+        assert_eq!(
+            models_step_next(&models_manual_step("gpt-4o"), key(KeyCode::Enter)),
+            ModelsTransition::Apply
+        );
+    }
+
+    #[test]
+    fn models_apply_target_reads_the_highlighted_or_typed_id() {
+        assert_eq!(
+            models_apply_target(&models_list_step(
+                vec!["gpt-4o".to_string(), "o3".to_string()],
+                false
+            )),
+            Some(("openai".to_string(), "gpt-4o".to_string()))
+        );
+        assert_eq!(
+            models_apply_target(&models_list_step(vec!["gpt-4o".to_string()], true)),
+            None
+        );
+        assert_eq!(models_apply_target(&models_list_step(vec![], false)), None);
+        assert_eq!(
+            models_apply_target(&models_manual_step("  o3-mini  ")),
+            Some(("openai".to_string(), "o3-mini".to_string()))
+        );
+        assert_eq!(models_apply_target(&models_manual_step("   ")), None);
+        assert_eq!(models_apply_target(&ModelsStep::Offline), None);
+    }
+
+    #[test]
+    fn handle_picker_ignores_stale_nonces() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_picker(4, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+        assert!(matches!(
+            &app.models,
+            Some(ModelsStep::ModelList { fetching: true, models, .. }) if models.is_empty()
+        ));
+    }
+
+    #[test]
+    fn handle_picker_pre_highlights_the_current_model() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.provider_info.model = Some("o3".to_string());
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_picker(
+            5,
+            "openai".to_string(),
+            Ok(vec!["gpt-4o".to_string(), "o3".to_string()]),
+        );
+        assert!(matches!(
+            &app.models,
+            Some(ModelsStep::ModelList { fetching: false, selected: 1, models, .. })
+                if models.len() == 2
+        ));
+    }
+
+    #[test]
+    fn handle_picker_falls_back_to_the_first_row_when_the_model_is_absent() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.provider_info.model = Some("not-listed".to_string());
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_picker(
+            5,
+            "openai".to_string(),
+            Ok(vec!["gpt-4o".to_string(), "o3".to_string()]),
+        );
+        assert!(matches!(
+            &app.models,
+            Some(ModelsStep::ModelList {
+                fetching: false,
+                selected: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn handle_picker_falls_back_to_manual_entry_on_a_fetch_error() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_picker(5, "openai".to_string(), Err("bad key".to_string()));
+        assert!(matches!(
+            &app.models,
+            Some(ModelsStep::Manual {
+                provider,
+                input,
+                error: Some(_),
+            }) if provider == "openai" && input.is_empty()
+        ));
+    }
+
+    #[test]
+    fn models_esc_closes_without_touching_settings() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        app.models = Some(models_list_step(vec!["gpt-4o".to_string()], false));
+        app.handle_models_key(key(KeyCode::Esc));
+        assert!(app.models.is_none());
+        assert!(app.mode == Mode::Connected);
+        assert!(app.settings.models.is_empty());
+    }
+
+    #[test]
+    fn models_blank_manual_enter_stays_open_without_touching_settings() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        app.models = Some(models_manual_step("   "));
+        app.handle_models_key(key(KeyCode::Enter));
+        assert!(matches!(&app.models, Some(ModelsStep::Manual { .. })));
+        assert!(app.settings.models.is_empty());
+    }
+
+    #[test]
+    fn closing_the_models_modal_invalidates_an_in_flight_fetch() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_models_key(key(KeyCode::Esc));
+        assert!(app.models.is_none());
+        assert_ne!(app.models_nonce, 5);
+    }
+
+    #[tokio::test]
+    async fn models_command_requires_a_connected_session() {
+        let mut app = test_app();
+        app.mode = Mode::SignIn;
+        app.run_command("/models").await;
+        assert!(app.models.is_none());
+        assert!(app.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn models_command_opens_the_modal_offline_when_no_provider_is_active() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.provider_info.offline = Some(OfflineReason::NothingConfigured);
+        app.run_command("/models").await;
+        assert_eq!(app.models, Some(ModelsStep::Offline));
+        assert!(app.settings.models.is_empty());
+    }
+
+    #[test]
+    fn help_lists_the_models_command() {
+        let lines = help_lines(Locale::En);
+        assert!(lines.iter().any(|l| l.contains("/models")));
     }
 
     #[test]
