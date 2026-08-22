@@ -491,8 +491,14 @@ impl App {
         }
     }
 
-    /// Tear down any open modal and invalidate its in-flight fetch. Called when the session goes
-    /// away, so a modal cannot float over the sign-in screen or swallow its keys.
+    /// Tear down any open modal and invalidate its in-flight fetch.
+    ///
+    /// Called from every path that replaces the screen underneath a modal without the user asking:
+    /// losing the session, and the device-login result landing asynchronously under an overlay the
+    /// user opened while waiting for it. A modal is deliberately not a `Mode`, so assigning
+    /// `self.mode` no longer tears one down implicitly — without this call a help overlay opened
+    /// during device login survives into the screen that replaced it, suppressing that screen
+    /// entirely and swallowing every key but Ctrl-C until Esc.
     fn dismiss_modals(&mut self) {
         self.modal.close();
     }
@@ -1020,6 +1026,9 @@ impl App {
             }
             Err(e) => {
                 self.mode = Mode::SignIn;
+                // Ctrl-P is reachable from `Mode::Device`, so an overlay may be open over the
+                // screen this result is replacing.
+                self.dismiss_modals();
                 self.error = Some(self.error_text(&e.code, &e.message));
                 self.status = self.t("status.device_failed").to_string();
             }
@@ -1122,6 +1131,9 @@ impl App {
     async fn enter(&mut self, session: Session) {
         self.session = Some(session.clone());
         self.mode = Mode::Connected;
+        // Reached asynchronously from `handle_device_result`, where an overlay opened while the
+        // device code was pending would otherwise outlive the screen it was opened over.
+        self.dismiss_modals();
         self.focus = Focus::Code;
         self.code.clear();
         self.name.clear();
@@ -1876,9 +1888,9 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{
-        App, ConnectStep, EngineForward, KeyCommand, Modal, Mode, ModelsStep, UiEvent,
-        engine_approval_key, engine_forward_step, parse_ask_command, parse_connect_command,
-        parse_key_command, parse_model_command, parse_models_command,
+        ApiError, App, ConnectStep, EngineForward, KeyCommand, Modal, Mode, ModelsStep, Session,
+        UiEvent, engine_approval_key, engine_forward_step, parse_ask_command,
+        parse_connect_command, parse_key_command, parse_model_command, parse_models_command,
     };
     use crate::config::Config;
     use crate::provider::ProviderInfo;
@@ -2308,6 +2320,59 @@ mod tests {
         assert!(
             app.mode == Mode::Engine,
             "a modal never disturbs the mode it is opened over, so there is nothing to restore"
+        );
+    }
+
+    /// The regression that decoupling help from `Mode` made possible: on master, help *was*
+    /// `Mode::Help`, so assigning `self.mode` tore it down. Now nothing does implicitly, and
+    /// `handle_device_result` is reached asynchronously while Ctrl-P is available from
+    /// `Mode::Device`. Left open, `covers_base` would suppress the sign-in screen entirely and
+    /// `handle_modal_key` would swallow every key but Ctrl-C.
+    #[tokio::test]
+    async fn a_failed_device_login_dismisses_an_overlay_opened_while_waiting() {
+        let mut app = test_app();
+        app.mode = Mode::Device;
+        app.open_help();
+
+        app.handle_device_result(
+            app.device_nonce,
+            Err(ApiError {
+                code: "device_denied".to_string(),
+                message: "denied".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(app.mode == Mode::SignIn);
+        assert!(
+            app.modal.current().is_none(),
+            "a modal must not outlive the screen it was opened over"
+        );
+    }
+
+    /// The success half of the same asynchronous path: `enter` reaches `Mode::Connected` with the
+    /// overlay still open.
+    #[tokio::test]
+    async fn entering_the_connected_screen_dismisses_an_overlay_opened_while_waiting() {
+        let mut app = test_app();
+        app.mode = Mode::Device;
+        app.open_help();
+
+        // Port 1 is never listening, so the WebSocket attempt inside `enter` is refused at once
+        // instead of reaching a server a developer happens to be running.
+        app.config = Config::from_url("http://127.0.0.1:1").unwrap();
+        app.enter(Session {
+            token: "t".to_string(),
+            expires_at: 0,
+            email: "a@b.c".to_string(),
+            display_name: "A".to_string(),
+        })
+        .await;
+
+        assert!(app.mode == Mode::Connected);
+        assert!(
+            app.modal.current().is_none(),
+            "a modal must not outlive the screen it was opened over"
         );
     }
 
