@@ -1944,7 +1944,8 @@ impl App {
                         self.t("connect.no_models"),
                         Style::default().fg(Color::DarkGray),
                     )));
-                    footer = self.t("models.footer_list");
+                    // Enter is a no-op with nothing to select, so don't advertise it.
+                    footer = self.t("models.footer_offline");
                 } else {
                     for (i, model) in models.iter().enumerate() {
                         let marker = if i == *selected { "> " } else { "  " };
@@ -3106,6 +3107,19 @@ mod tests {
             screen.contains("Enter: select"),
             "the footer scrolled off screen:\n{screen}"
         );
+    }
+
+    #[test]
+    fn an_empty_list_does_not_advertise_enter() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models = Some(models_list_step(vec![], false));
+        let screen = render(&mut app, 80, 20);
+        assert!(
+            !screen.contains("Enter: select"),
+            "Enter is a no-op with nothing to select:\n{screen}"
+        );
+        assert!(screen.contains("Esc: close"), "{screen}");
     }
 
     #[test]

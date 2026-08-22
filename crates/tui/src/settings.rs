@@ -46,7 +46,8 @@ pub(crate) fn path() -> PathBuf {
         .join("config.json")
 }
 
-/// Load the settings stored at `path`, or `None` when the file is missing or malformed.
+/// Load the settings stored at `path`, or `None` when the file is missing, unreadable, or
+/// malformed — the caller falls back to defaults in every case.
 pub(crate) fn load_at(path: &Path) -> Option<Settings> {
     let raw = fs::read_to_string(path).ok()?;
     serde_json::from_str::<Settings>(&raw).ok()
