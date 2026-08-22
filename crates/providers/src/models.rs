@@ -5,10 +5,86 @@
 //! which routes `*_BASE_URL` overrides through `validate_base_url`) and every request uses the
 //! redirect-disabled client (`build_http_client` + `reject_redirect`), so a 3xx or an invalid
 //! override is refused before the API key is sent anywhere.
+//!
+//! This module also owns the *bounds* on that fetch ([`ListBounds`]): a deadline, a response-body
+//! byte cap, and a list-length cap. They live here rather than on the shared client because the
+//! same client serves completion requests, where a long generation is legitimate.
 
+use std::time::Duration;
+
+use anyhow::Context;
 use serde::Deserialize;
 
 use crate::base_url::{build_http_client, join_url, reject_redirect};
+
+/// The bounds one model-list fetch runs under.
+///
+/// Threaded through the `*_at` seams so tests can pin tight values without exposing a runtime knob:
+/// an env-configurable bound would be a new public interface for a hardening change, and would give
+/// an attacker-influenced environment a way to widen the very limit it is being held to.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ListBounds {
+    /// Total deadline for one request: DNS + connect + TLS + time-to-first-byte + body read.
+    ///
+    /// Applied per-request (`RequestBuilder::timeout`) and **never** on the client. Do not "simplify"
+    /// this onto `build_http_client`: the same client serves completion requests, where a long
+    /// generation is legitimate, and a client-level deadline would cut them off. A per-request total
+    /// deadline also subsumes a `connect_timeout`, which reqwest offers only at client level.
+    pub(crate) timeout: Duration,
+    /// Hard ceiling on buffered response bytes.
+    pub(crate) max_body_bytes: usize,
+    /// Hard ceiling on returned model ids.
+    pub(crate) max_models: usize,
+}
+
+impl ListBounds {
+    pub(crate) const DEFAULT: Self = Self {
+        // The fetch backs an interactive modal that renders "Fetching models..." with no progress,
+        // so a provider that has not answered in 15s has already failed the user. Real `/v1/models`
+        // responses land in well under a second; this is long enough to absorb a cold TLS handshake
+        // on a slow link and short enough that "Esc: cancel" is not the only way out.
+        timeout: Duration::from_secs(15),
+        // OpenAI's `/v1/models` is tens of kilobytes and Ollama's `/api/tags` is a few, so this is
+        // roughly fifty times the largest plausible honest response — and a bound a terminal
+        // process can absorb per in-flight fetch no matter what the endpoint sends.
+        max_body_bytes: 2 * 1024 * 1024,
+        // No provider publishes anywhere near this many models, and the modal is a scrolling list a
+        // human reads.
+        max_models: 1_000,
+    };
+}
+
+/// Read a response body, refusing to buffer more than `max_bytes`.
+///
+/// `Response::bytes()` / `Response::json()` buffer to completion, so a hostile endpoint's body
+/// length becomes this process's allocation — and the Ollama path needs no credential at all, so
+/// anything listening on `127.0.0.1:11434` could reach it. This reads frame by frame and bails the
+/// moment the running total would exceed the cap, then drops the response, which closes the
+/// connection rather than draining the rest of the body.
+///
+/// Peak buffering is `max_bytes` plus the frame that tripped the check, and that frame's size is
+/// chosen by the HTTP layer (hyper's read buffer for h1, the negotiated max frame size for h2) —
+/// not by the sender — so the bound is closed rather than one-frame-open. The buffer also starts
+/// empty and is never reserved from a length the sender supplied.
+///
+/// A `Content-Length` pre-check is deliberately absent: the header is attacker-controlled, may be
+/// missing on a chunked response, and would be a second rejection path that could drift from this
+/// one while buying nothing it does not already give.
+///
+/// Nothing about the body reaches the error. The sender controls its content and this message is
+/// rendered into a modal.
+async fn read_capped(mut resp: reqwest::Response, max_bytes: usize) -> anyhow::Result<Vec<u8>> {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if buf.len() + chunk.len() > max_bytes {
+            anyhow::bail!(
+                "model list response exceeded the {max_bytes}-byte cap; refusing to buffer it"
+            );
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
 
 /// List model ids for a keyed provider against an already-resolved, already-validated `base_url`.
 ///
@@ -19,12 +95,13 @@ pub(crate) async fn list_models_at(
     provider: &str,
     base_url: &str,
     key: &str,
+    bounds: ListBounds,
 ) -> anyhow::Result<Vec<String>> {
     match provider {
-        "anthropic" => list_anthropic(base_url, key).await,
-        "openai" => list_openai_compatible(base_url, "/v1/models", key).await,
-        "gemini" => list_gemini(base_url, key).await,
-        "deepseek" => list_openai_compatible(base_url, "/models", key).await,
+        "anthropic" => list_anthropic(base_url, key, bounds).await,
+        "openai" => list_openai_compatible(base_url, "/v1/models", key, bounds).await,
+        "gemini" => list_gemini(base_url, key, bounds).await,
+        "deepseek" => list_openai_compatible(base_url, "/models", key, bounds).await,
         other => {
             anyhow::bail!("unknown provider '{other}'; expected anthropic|openai|gemini|deepseek")
         }
@@ -34,23 +111,29 @@ pub(crate) async fn list_models_at(
 /// Resolve `provider`'s base URL (env override → production default) and list its model ids.
 pub async fn list_models(provider: &str, key: &str) -> anyhow::Result<Vec<String>> {
     let base = resolve_models_base(provider)?;
-    list_models_at(provider, &base, key).await
+    list_models_at(provider, &base, key, ListBounds::DEFAULT).await
 }
 
 /// List model ids from the local Ollama server at `base_url`, extracting each `name` (including
 /// any `:tag`) verbatim so a tagged model can be selected.
-pub(crate) async fn list_ollama_models_at(base_url: &str) -> anyhow::Result<Vec<String>> {
+pub(crate) async fn list_ollama_models_at(
+    base_url: &str,
+    bounds: ListBounds,
+) -> anyhow::Result<Vec<String>> {
     let url = join_url(base_url, "/api/tags");
     let client = build_http_client(base_url);
-    let raw = client.get(&url).send().await?;
+    let raw = client.get(&url).timeout(bounds.timeout).send().await?;
     reject_redirect(&raw)?;
-    let resp = raw.error_for_status()?.json::<OllamaTags>().await?;
-    Ok(normalize(resp.models.into_iter().map(|m| m.name).collect()))
+    let resp: OllamaTags = parse_capped(raw, bounds).await?;
+    Ok(normalize(
+        resp.models.into_iter().map(|m| m.name).collect(),
+        bounds.max_models,
+    ))
 }
 
 /// List model ids from the local Ollama server at the default localhost root.
 pub async fn list_ollama_models() -> anyhow::Result<Vec<String>> {
-    list_ollama_models_at(crate::ollama::LOCAL_BASE).await
+    list_ollama_models_at(crate::ollama::LOCAL_BASE, ListBounds::DEFAULT).await
 }
 
 /// Read the `*_BASE_URL` override for `provider` and resolve its base URL via the shared trust
@@ -65,43 +148,57 @@ fn resolve_models_base(provider: &str) -> anyhow::Result<String> {
     crate::selection::resolve_base_url_for(provider, override_value)
 }
 
-async fn list_anthropic(base: &str, key: &str) -> anyhow::Result<Vec<String>> {
+async fn list_anthropic(base: &str, key: &str, bounds: ListBounds) -> anyhow::Result<Vec<String>> {
     let url = join_url(base, "/v1/models");
     let client = build_http_client(base);
     let raw = client
         .get(&url)
         .header("x-api-key", key)
         .header("anthropic-version", crate::anthropic::ANTHROPIC_VERSION)
+        .timeout(bounds.timeout)
         .send()
         .await?;
     reject_redirect(&raw)?;
-    let resp = raw.error_for_status()?.json::<IdList>().await?;
-    Ok(normalize(resp.data.into_iter().map(|m| m.id).collect()))
+    let resp: IdList = parse_capped(raw, bounds).await?;
+    Ok(normalize(
+        resp.data.into_iter().map(|m| m.id).collect(),
+        bounds.max_models,
+    ))
 }
 
-async fn list_openai_compatible(base: &str, path: &str, key: &str) -> anyhow::Result<Vec<String>> {
+async fn list_openai_compatible(
+    base: &str,
+    path: &str,
+    key: &str,
+    bounds: ListBounds,
+) -> anyhow::Result<Vec<String>> {
     let url = join_url(base, path);
     let client = build_http_client(base);
     let raw = client
         .get(&url)
         .header("authorization", format!("Bearer {key}"))
+        .timeout(bounds.timeout)
         .send()
         .await?;
     reject_redirect(&raw)?;
-    let resp = raw.error_for_status()?.json::<IdList>().await?;
-    Ok(normalize(resp.data.into_iter().map(|m| m.id).collect()))
+    let resp: IdList = parse_capped(raw, bounds).await?;
+    Ok(normalize(
+        resp.data.into_iter().map(|m| m.id).collect(),
+        bounds.max_models,
+    ))
 }
 
-async fn list_gemini(base: &str, key: &str) -> anyhow::Result<Vec<String>> {
+async fn list_gemini(base: &str, key: &str, bounds: ListBounds) -> anyhow::Result<Vec<String>> {
     let url = join_url(base, "/v1beta/models");
     let client = build_http_client(base);
     let raw = client
         .get(&url)
         .header("x-goog-api-key", key)
+        .timeout(bounds.timeout)
         .send()
         .await?;
     reject_redirect(&raw)?;
-    let resp = raw.error_for_status()?.json::<GeminiModels>().await?;
+    let resp: GeminiModels = parse_capped(raw, bounds).await?;
     let ids = resp
         .models
         .into_iter()
@@ -112,13 +209,33 @@ async fn list_gemini(base: &str, key: &str) -> anyhow::Result<Vec<String>> {
                 .unwrap_or(m.name)
         })
         .collect();
-    Ok(normalize(ids))
+    Ok(normalize(ids, bounds.max_models))
 }
 
-/// Stable-sort and dedup a model-id list.
-fn normalize(mut ids: Vec<String>) -> Vec<String> {
+/// Reject a 3xx-cleared, status-cleared response's body into `T` under the byte cap.
+///
+/// Ordering is load-bearing and unchanged from before the cap existed: `reject_redirect` has
+/// already refused a 3xx, and `error_for_status` refuses a 4xx/5xx (discarding its body) before a
+/// single byte of a success body is read.
+async fn parse_capped<T: serde::de::DeserializeOwned>(
+    raw: reqwest::Response,
+    bounds: ListBounds,
+) -> anyhow::Result<T> {
+    let resp = raw.error_for_status()?;
+    let body = read_capped(resp, bounds.max_body_bytes).await?;
+    // `serde_json::Error`'s Display reports a line and column only, never body content, so a
+    // hostile body cannot inject text into the modal through this message.
+    serde_json::from_slice(&body).context("model list response was not valid JSON")
+}
+
+/// Stable-sort, dedup, and cap a model-id list.
+///
+/// Truncating *after* the sort is what makes the retained subset deterministic — the first `max`
+/// ids lexicographically — rather than whatever order the endpoint chose to emit.
+fn normalize(mut ids: Vec<String>, max: usize) -> Vec<String> {
     ids.sort();
     ids.dedup();
+    ids.truncate(max);
     ids
 }
 
@@ -174,7 +291,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let ids = list_models_at("anthropic", &server.uri(), "test-key")
+        let ids = list_models_at("anthropic", &server.uri(), "test-key", ListBounds::DEFAULT)
             .await
             .unwrap();
         assert_eq!(ids, vec!["claude-haiku-4-5", "claude-sonnet-4"]);
@@ -192,7 +309,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let ids = list_models_at("openai", &server.uri(), "test-key")
+        let ids = list_models_at("openai", &server.uri(), "test-key", ListBounds::DEFAULT)
             .await
             .unwrap();
         assert_eq!(ids, vec!["gpt-4o", "gpt-4o-mini"]);
@@ -213,7 +330,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let ids = list_models_at("gemini", &server.uri(), "test-key")
+        let ids = list_models_at("gemini", &server.uri(), "test-key", ListBounds::DEFAULT)
             .await
             .unwrap();
         assert_eq!(ids, vec!["gemini-2.5-flash", "gemini-2.5-pro"]);
@@ -231,7 +348,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let ids = list_models_at("deepseek", &server.uri(), "test-key")
+        let ids = list_models_at("deepseek", &server.uri(), "test-key", ListBounds::DEFAULT)
             .await
             .unwrap();
         assert_eq!(ids, vec!["deepseek-chat"]);
@@ -248,7 +365,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let ids = list_models_at("openai", &server.uri(), "test-key")
+        let ids = list_models_at("openai", &server.uri(), "test-key", ListBounds::DEFAULT)
             .await
             .unwrap();
         assert_eq!(ids, vec!["alpha", "zebra"]);
@@ -268,7 +385,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let ids = list_ollama_models_at(&server.uri()).await.unwrap();
+        let ids = list_ollama_models_at(&server.uri(), ListBounds::DEFAULT)
+            .await
+            .unwrap();
         assert_eq!(ids, vec!["llama3.2", "llama3.2:latest"]);
     }
 
@@ -281,7 +400,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = list_models_at("openai", &server.uri(), "bad-key")
+        let err = list_models_at("openai", &server.uri(), "bad-key", ListBounds::DEFAULT)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("401") || err.to_string().contains("status"));
@@ -312,7 +431,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let result = list_models_at("openai", &server.uri(), "test-key").await;
+        let result = list_models_at("openai", &server.uri(), "test-key", ListBounds::DEFAULT).await;
         assert!(
             result.is_err(),
             "a 3xx must be an error, not a parsed model list; got {result:?}"
@@ -330,9 +449,160 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_provider_is_rejected_before_any_request() {
         assert!(
-            list_models_at("local", "http://127.0.0.1:1", "k")
+            list_models_at("local", "http://127.0.0.1:1", "k", ListBounds::DEFAULT)
                 .await
                 .is_err()
         );
+    }
+
+    /// Bounds tight enough for a test to reach in milliseconds, so every bound below is exercised
+    /// deliberately rather than by accident of the production values.
+    fn tight() -> ListBounds {
+        ListBounds {
+            timeout: Duration::from_secs(5),
+            max_body_bytes: 64 * 1024,
+            max_models: 1_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_oversized_body_is_refused_instead_of_buffered() {
+        let server = MockServer::start().await;
+        let ids: Vec<_> = (0..4096)
+            .map(|i| serde_json::json!({ "id": format!("model-{i:04}") }))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": ids })),
+            )
+            .mount(&server)
+            .await;
+
+        let err = list_models_at(
+            "openai",
+            &server.uri(),
+            "test-key",
+            ListBounds {
+                max_body_bytes: 512,
+                ..tight()
+            },
+        )
+        .await
+        .unwrap_err();
+
+        // `{:#}` walks the whole anyhow chain; `to_string()` would show only the outermost message
+        // and could hide a leak added downstream.
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("512"),
+            "the error must name the cap: {chain}"
+        );
+        assert!(
+            chain.contains("cap"),
+            "the error must name the cap: {chain}"
+        );
+        assert!(
+            !chain.contains("model-"),
+            "no response content may reach an error the modal renders: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_at_the_cap_is_still_accepted() {
+        // A literal body, so its exact byte length is knowable and the boundary is genuinely
+        // pinned as `>` rather than `>=`.
+        const BODY: &str = r#"{"data":[{"id":"gpt-4o"}]}"#;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(BODY)
+                    .insert_header("content-type", "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let ids = list_models_at(
+            "openai",
+            &server.uri(),
+            "test-key",
+            ListBounds {
+                max_body_bytes: BODY.len(),
+                ..tight()
+            },
+        )
+        .await
+        .expect("a body of exactly max_body_bytes must be accepted");
+        assert_eq!(ids, vec!["gpt-4o"]);
+    }
+
+    #[tokio::test]
+    async fn an_over_long_model_list_is_truncated() {
+        let server = MockServer::start().await;
+        let ids: Vec<_> = (0..20)
+            .map(|i| serde_json::json!({ "id": format!("m{i:02}") }))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": ids })),
+            )
+            .mount(&server)
+            .await;
+
+        let ids = list_models_at(
+            "openai",
+            &server.uri(),
+            "test-key",
+            ListBounds {
+                max_models: 5,
+                ..tight()
+            },
+        )
+        .await
+        .unwrap();
+        // Sorted first, then truncated — so the retained subset is deterministic rather than
+        // whatever order the endpoint chose to emit.
+        assert_eq!(ids, vec!["m00", "m01", "m02", "m03", "m04"]);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_endpoint_fails_at_the_deadline() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+
+        let err = list_models_at(
+            "openai",
+            &server.uri(),
+            "test-key",
+            ListBounds {
+                timeout: Duration::from_millis(150),
+                ..tight()
+            },
+        )
+        .await
+        .unwrap_err();
+
+        // Identified structurally, never by message text, and with no assertion on elapsed
+        // wall-clock time (which would be flaky under load).
+        assert!(
+            err.downcast_ref::<reqwest::Error>()
+                .is_some_and(reqwest::Error::is_timeout),
+            "expected a reqwest timeout, got {err:#}"
+        );
+    }
+
+    #[test]
+    fn default_bounds_are_the_production_values() {
+        // Pinned so a later accidental widening is a failing test rather than a silent regression.
+        assert_eq!(ListBounds::DEFAULT.timeout, Duration::from_secs(15));
+        assert_eq!(ListBounds::DEFAULT.max_body_bytes, 2 * 1024 * 1024);
+        assert_eq!(ListBounds::DEFAULT.max_models, 1_000);
     }
 }
