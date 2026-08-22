@@ -296,7 +296,7 @@ const EN: Catalog = &[
     ),
     (
         "models.credentials_remedy",
-        "Use /connect, or /key {provider}",
+        "Use /connect, /key {provider}, or /model <id>",
     ),
     (
         "models.footer_list",
@@ -306,6 +306,7 @@ const EN: Catalog = &[
         "models.footer_manual",
         "Enter: save unverified · Ctrl+R: retry · Esc: close",
     ),
+    ("models.footer_retry", "Ctrl+R: retry · Esc: close"),
     ("models.footer_offline", "Esc: close"),
 ];
 
@@ -619,16 +620,21 @@ const ES: Catalog = &[
     ),
     (
         "models.credentials_remedy",
-        "Usa /connect, o /key {provider}",
+        "Usa /connect, /key {provider}, o /model <id>",
     ),
     (
         "models.footer_list",
         "Enter: elegir · Esc: cerrar · \u{2191}/\u{2193}: navegar",
     ),
+    // "sin verificar" is dropped deliberately: with it the line is 63 columns against a
+    // 58-column inner width and the footer is rendered without `Wrap`, so it was hard-truncated
+    // and ES users silently lost "Esc: cerrar". The prompt line above already says the id is not
+    // verified.
     (
         "models.footer_manual",
-        "Enter: guardar sin verificar · Ctrl+R: reintentar · Esc: cerrar",
+        "Enter: guardar · Ctrl+R: reintentar · Esc: cerrar",
     ),
+    ("models.footer_retry", "Ctrl+R: reintentar · Esc: cerrar"),
     ("models.footer_offline", "Esc: cerrar"),
 ];
 
@@ -710,6 +716,28 @@ mod tests {
     #[test]
     fn es_mirrors_en_exactly() {
         assert_eq!(keys(ES), keys(EN), "ES must define exactly the EN key set");
+    }
+
+    /// Footers are pinned to one row and rendered without `Wrap`, so anything past the popup's
+    /// inner width is hard-truncated and the tail of the line is silently lost. This bit ES first
+    /// — `models.footer_manual` was 63 columns and cost ES users "Esc: cerrar" — and was invisible
+    /// because every render assertion runs in EN.
+    #[test]
+    fn every_footer_fits_the_popup_in_both_locales() {
+        // `draw_popup` draws a 60-column box with a one-column border on each side.
+        const INNER_WIDTH: usize = 58;
+        for (catalog, name) in [(EN, "EN"), (ES, "ES")] {
+            for (key, value) in catalog {
+                if !key.contains(".footer") {
+                    continue;
+                }
+                let columns = value.chars().count();
+                assert!(
+                    columns <= INNER_WIDTH,
+                    "{name} {key} is {columns} columns; it is truncated at {INNER_WIDTH}: {value}"
+                );
+            }
+        }
     }
 
     #[test]

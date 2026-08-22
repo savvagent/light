@@ -1059,6 +1059,10 @@ impl App {
             }
             Err(err) => {
                 let message = self.fetch_error_message(&provider, &err);
+                // The modal is not a record: `close_models` drops the step, so Esc would erase the
+                // only copy of the failure. Log it too, so the user has something to scroll back
+                // to and paste when asking for help — the same thing `/key` and `/ask` do.
+                self.push_log(message.clone());
                 self.models = Some(if err.class.needs_credentials() {
                     ModelsStep::Credentials {
                         provider,
@@ -2119,8 +2123,9 @@ impl App {
                         self.t("connect.no_models"),
                         Style::default().fg(Color::DarkGray),
                     )));
-                    // Enter is a no-op with nothing to select, so don't advertise it.
-                    footer = self.t("models.footer_offline");
+                    // Enter is a no-op with nothing to select, so don't advertise it. A retry is
+                    // not: an empty list is reachable from an Ollama install with nothing pulled.
+                    footer = self.t("models.footer_retry");
                 } else {
                     for (i, model) in models.iter().enumerate() {
                         let marker = if i == *selected { "> " } else { "  " };
@@ -2134,14 +2139,11 @@ impl App {
                     footer = self.t("models.footer_list");
                 }
             }
+            // Trusted rows first, provider text last. `draw_popup` now sizes itself from the
+            // wrapped row count, so nothing should be clipped — but if a very short terminal
+            // clips anyway, what survives must be the remedy and the input box rather than the
+            // remote-supplied error that would otherwise have displaced them.
             ModelsStep::Credentials { provider, error } => {
-                lines.push(Line::from(Span::styled(
-                    error.clone(),
-                    Style::default().fg(Color::Red),
-                )));
-                lines.push(Line::from(""));
-                // Two lines rather than one sentence: `draw_popup` sizes the box from the line
-                // count, so a string long enough to wrap pushes the last row out of view.
                 lines.push(Line::from(Span::styled(
                     self.t("models.credentials_hint"),
                     Style::default().fg(Color::DarkGray),
@@ -2150,20 +2152,21 @@ impl App {
                     self.t_with("models.credentials_remedy", &[("provider", provider)]),
                     Style::default().fg(Color::DarkGray),
                 )));
-                footer = self.t("models.footer_offline");
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    error.clone(),
+                    Style::default().fg(Color::Red),
+                )));
+                // A 401/403 is not always about the key — a corporate proxy, a WAF, or an IP
+                // allowlist produces the same status — so the step keeps a retry rather than
+                // dead-ending on a remedy that cannot apply.
+                footer = self.t("models.footer_retry");
             }
             ModelsStep::Manual {
                 provider,
                 input,
                 error,
             } => {
-                if let Some(err) = error {
-                    lines.push(Line::from(Span::styled(
-                        err.clone(),
-                        Style::default().fg(Color::Red),
-                    )));
-                    lines.push(Line::from(""));
-                }
                 lines.push(Line::from(Span::styled(
                     self.t_with("models.manual_unverified", &[("provider", provider)]),
                     Style::default().fg(Color::DarkGray),
@@ -2172,6 +2175,13 @@ impl App {
                     input.clone(),
                     Style::default().add_modifier(Modifier::REVERSED),
                 )));
+                if let Some(err) = error {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        err.clone(),
+                        Style::default().fg(Color::Red),
+                    )));
+                }
                 footer = self.t("models.footer_manual");
             }
         }
@@ -2551,7 +2561,13 @@ fn models_apply_target(step: &ModelsStep) -> Option<ModelChoice> {
                 })
             }
         }
-        _ => None,
+        // Named rather than `_`: this is the one function where a wrong default persists a model
+        // the user never confirmed, so a new `ModelsStep` variant must fail to compile here rather
+        // than fall silently into "nothing to persist". A still-fetching list has no selection to
+        // apply, and neither notice step carries one.
+        ModelsStep::ModelList { fetching: true, .. }
+        | ModelsStep::Offline
+        | ModelsStep::Credentials { .. } => None,
     }
 }
 
@@ -2723,7 +2739,20 @@ async fn fetch_with_key(
 /// step, apply, retry, or close. No network/keyring/terminal state.
 fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModelsTransition {
     match step {
-        ModelsStep::Offline | ModelsStep::Credentials { .. } => match key.code {
+        // Nothing to retry: `Offline` is reached before a provider is chosen, so there is no
+        // fetch to re-run.
+        ModelsStep::Offline => match key.code {
+            KeyCode::Esc | KeyCode::Enter => ModelsTransition::Close,
+            _ => ModelsTransition::Step(step.clone()),
+        },
+        // A 401/403 does not always mean the API key is wrong — a corporate proxy, a WAF, an IP
+        // allowlist, or an org-level block produce the same status, and for those `/connect` and
+        // `/key` are as useless as the retry-only modal #47 replaced. Keeping the retry means a
+        // misclassification costs a keystroke rather than dead-ending the user.
+        ModelsStep::Credentials { .. } => match key.code {
+            KeyCode::Char('r' | 'R') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                ModelsTransition::Retry
+            }
             KeyCode::Esc | KeyCode::Enter => ModelsTransition::Close,
             _ => ModelsTransition::Step(step.clone()),
         },
@@ -2733,9 +2762,19 @@ fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModelsTransition {
             selected,
             fetching,
         } => {
-            if *fetching || models.is_empty() {
+            if *fetching {
                 match key.code {
                     KeyCode::Esc => ModelsTransition::Close,
+                    _ => ModelsTransition::Step(step.clone()),
+                }
+            } else if models.is_empty() {
+                // A successful fetch can still return nothing (an Ollama install with no models
+                // pulled). That is worth another try, so offer the same retry the failure steps do.
+                match key.code {
+                    KeyCode::Esc => ModelsTransition::Close,
+                    KeyCode::Char('r' | 'R') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        ModelsTransition::Retry
+                    }
                     _ => ModelsTransition::Step(step.clone()),
                 }
             } else {
@@ -2761,8 +2800,10 @@ fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModelsTransition {
             error,
         } => match key.code {
             KeyCode::Esc => ModelsTransition::Close,
-            // Ordered before the `Char(c)` arm below, which would otherwise type the `r`.
-            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ordered before the `Char(c)` arm below, which would otherwise type the `r`. `'R'`
+            // is matched too: Ctrl+Shift+R arrives as `Char('R')` with CONTROL|SHIFT and would
+            // otherwise fall through and type an `R` into the model id.
+            KeyCode::Char('r' | 'R') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 ModelsTransition::Retry
             }
             KeyCode::Enter if !input.trim().is_empty() => ModelsTransition::Apply,
@@ -3442,12 +3483,34 @@ mod tests {
         }
     }
 
+    /// A manual step shaped the way production produces one: with an error present.
+    /// `handle_models_fetched`'s `Err` arm is `Manual`'s only constructor and it always sets
+    /// `Some(_)`, so `error: None` was a state no code path could reach — and a render test built
+    /// on it asserted against fiction while dropping the very line that broke the layout.
     fn models_manual_step(input: &str) -> ModelsStep {
         ModelsStep::Manual {
             provider: "openai".to_string(),
             input: input.to_string(),
-            error: None,
+            error: Some("Couldn't fetch models: connection refused".to_string()),
         }
+    }
+
+    /// The popup contents as one whitespace-collapsed string, so an assertion can check that a
+    /// wrapped line survived *in full* without having to predict where the wrapper broke it.
+    fn flatten(screen: &str) -> String {
+        screen
+            .chars()
+            .map(|c| {
+                if "\u{2502}\u{250c}\u{2510}\u{2514}\u{2518}\u{2500}".contains(c) {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// Draw `f` to an off-screen terminal and return the buffer as text, so rendering can be
@@ -3542,36 +3605,131 @@ mod tests {
     }
 
     /// The whole point of the credential step: it must point at the commands that can actually
-    /// fix the problem, and must not advertise saving or retrying a model id.
-    #[test]
-    fn the_credentials_step_renders_the_remedy_and_no_input_box() {
+    /// fix the problem, and must not offer a model-id box.
+    ///
+    /// Built through `handle_models_fetched` from a real `reqwest` 401 rather than from a
+    /// hand-written 37-character string no code path can produce. The real message is 105
+    /// characters and wraps to two rows against the 58-column inner width, which is exactly the
+    /// case the old popup sizing clipped — so on every real 401 the remedy was off screen.
+    #[tokio::test]
+    async fn the_credentials_step_renders_the_remedy_and_no_input_box() {
         let mut app = test_app();
         app.mode = Mode::Connected;
-        app.models = Some(ModelsStep::Credentials {
-            provider: "openai".to_string(),
-            error: "openai rejected the credential: 401".to_string(),
-        });
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+
+        let err = fetch_error("openai", &status_error(401).await);
+        assert_eq!(
+            err.class,
+            FetchFailure::Auth,
+            "a 401 is a credential failure"
+        );
+        let cause = err.message.clone();
+        app.handle_models_fetched(5, "openai".to_string(), Err(err));
+
         let screen = render(&mut app, 80, 20);
-        assert!(screen.contains("/connect"), "{screen}");
-        assert!(screen.contains("/key openai"), "{screen}");
-        assert!(!screen.contains("retry"), "{screen}");
-        assert!(!screen.contains("save"), "{screen}");
+        assert!(
+            screen.contains("/connect"),
+            "the remedy is clipped:\n{screen}"
+        );
+        assert!(
+            screen.contains("/key openai"),
+            "the remedy is clipped:\n{screen}"
+        );
+        assert!(
+            screen.contains("/model <id>"),
+            "a misclassified 401 needs an escape hatch:\n{screen}"
+        );
+        assert!(
+            flatten(&screen).contains(&flatten(&format!(
+                "openai rejected the credential: {cause}"
+            ))),
+            "the cause must be rendered in full, not clipped:\n{screen}"
+        );
+        assert!(
+            !screen.contains("Type a model id"),
+            "typing an id cannot repair a credential:\n{screen}"
+        );
+        assert!(
+            !screen.contains("save unverified"),
+            "the credential step must not offer to save an id:\n{screen}"
+        );
+        assert!(
+            screen.contains("Ctrl+R: retry"),
+            "a 401 from a proxy or a WAF is not a dead end:\n{screen}"
+        );
     }
 
-    /// The transport step keeps the manual fallback (#36 AC 6) but must label it as unverified and
-    /// advertise the retry key.
-    #[test]
-    fn the_manual_step_labels_itself_unverified_and_offers_a_retry() {
+    /// The transport step keeps the manual fallback (#36 AC 6) but must label it as unverified,
+    /// advertise the retry key, and — the part that was broken — actually show the input box.
+    ///
+    /// Built through `handle_models_fetched` from a real refused connection. The old test used a
+    /// helper that hardcoded `error: None`, which the `Err` arm never produces, so it dropped the
+    /// error line and never exercised the layout the user actually gets: the prompt and the input
+    /// row pushed off screen while keystrokes still accumulated and Enter still applied.
+    #[tokio::test]
+    async fn the_manual_step_labels_itself_unverified_and_offers_a_retry() {
         let mut app = test_app();
         app.mode = Mode::Connected;
-        app.models = Some(models_manual_step(""));
+        app.models_return = Mode::Connected;
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+
+        let err = fetch_error("openai", &transport_error().await);
+        assert_eq!(
+            err.class,
+            FetchFailure::Fetch,
+            "a refused connection is retryable"
+        );
+        let cause = err.message.clone();
+        app.handle_models_fetched(5, "openai".to_string(), Err(err));
+
+        // Type into the box the way the user does. What they type must be on screen.
+        for c in "o3-mini".chars() {
+            app.handle_models_key(key(KeyCode::Char(c)));
+        }
         let screen = render(&mut app, 80, 20);
         assert!(
             screen.contains("Type a model id \u{2014} it won't be checked against openai"),
-            "the prompt must fit one line, or draw_popup pushes the input box out: {screen}"
+            "the unverified prompt is clipped:\n{screen}"
+        );
+        assert!(
+            screen.contains("o3-mini"),
+            "the user must be able to see what they are typing:\n{screen}"
+        );
+        assert!(
+            flatten(&screen).contains(&flatten(&format!("Couldn't fetch models: {cause}"))),
+            "the cause must be rendered in full, not clipped:\n{screen}"
         );
         assert!(screen.contains("Ctrl+R: retry"), "{screen}");
         assert!(screen.contains("save unverified"), "{screen}");
+    }
+
+    /// Every other render assertion in this file runs in EN, which is how a 63-column ES footer
+    /// shipped hard-truncated against a 58-column inner width, silently costing ES users
+    /// "Esc: cerrar".
+    #[test]
+    fn the_manual_step_footer_is_not_truncated_in_spanish() {
+        let mut app = test_app();
+        app.config.lang = Locale::Es;
+        app.mode = Mode::Connected;
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_models_fetched(
+            5,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::Fetch, "conexi\u{f3}n rechazada")),
+        );
+
+        let screen = render(&mut app, 80, 20);
+        assert!(
+            screen.contains("Esc: cerrar"),
+            "the ES footer lost its last key to truncation:\n{screen}"
+        );
+        assert!(
+            screen.contains("Ctrl+R: reintentar"),
+            "the ES footer lost its retry key:\n{screen}"
+        );
     }
 
     #[test]
@@ -3650,15 +3808,61 @@ mod tests {
     fn models_fetch_result_does_not_clobber_manual_entry() {
         let mut app = test_app();
         app.models_nonce = 5;
-        app.models = Some(ModelsStep::Manual {
-            provider: "openai".to_string(),
-            input: "gpt-4".to_string(),
-            error: None,
-        });
+        app.models = Some(models_manual_step("gpt-4"));
         app.handle_models_fetched(5, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
         assert!(
             matches!(&app.models, Some(ModelsStep::Manual { input, .. }) if input == "gpt-4"),
             "a late result must not discard what the user typed"
+        );
+    }
+
+    /// The same guard on the `Err` path, which every other stale-result test misses. A superseded
+    /// `Err(Auth)` landing on a manual step would wipe half-typed input *and* replace a step that
+    /// has an input box with one that does not — the worst version of the clobber.
+    #[test]
+    fn a_late_failure_does_not_clobber_manual_entry() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.models = Some(models_manual_step("gpt-4"));
+        app.handle_models_fetched(
+            5,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::Auth, "401 Unauthorized")),
+        );
+        assert!(
+            matches!(&app.models, Some(ModelsStep::Manual { input, .. }) if input == "gpt-4"),
+            "a late failure must not discard what the user typed, got {:?}",
+            app.models
+        );
+    }
+
+    /// The step is not a record: `close_models` drops it, so Esc would erase the only copy of the
+    /// failure. The transcript is what the user can scroll back to and paste when asking for help.
+    #[test]
+    fn a_fetch_failure_is_recorded_in_the_transcript() {
+        let mut app = test_app();
+        app.models_nonce = 5;
+        app.models = Some(models_list_step(vec![], true));
+        app.handle_models_fetched(
+            5,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::Auth, "401 Unauthorized")),
+        );
+
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.contains("openai") && l.contains("401 Unauthorized")),
+            "the classified failure must outlive the modal: {:?}",
+            app.log
+        );
+
+        app.models_return = Mode::Connected;
+        app.close_models();
+        assert!(
+            app.log.iter().any(|l| l.contains("401 Unauthorized")),
+            "closing the modal must not erase the record: {:?}",
+            app.log
         );
     }
 
@@ -4271,6 +4475,77 @@ mod tests {
         );
     }
 
+    /// A 401/403 is not proof the key is wrong — a corporate proxy, a WAF, or an IP allowlist
+    /// produces the same status. Without a retry the step is a dead end pointing at two commands
+    /// that cannot help, which is #47's own defect inverted.
+    #[test]
+    fn the_credentials_step_offers_a_retry() {
+        let step = ModelsStep::Credentials {
+            provider: "openai".to_string(),
+            error: "refused".to_string(),
+        };
+        assert_eq!(
+            models_step_next(&step, ctrl_key(KeyCode::Char('r'))),
+            ModelsTransition::Retry
+        );
+        assert_eq!(
+            models_step_next(&step, ctrl_key(KeyCode::Char('R'))),
+            ModelsTransition::Retry,
+            "Ctrl+Shift+R arrives as an uppercase R"
+        );
+        assert_eq!(
+            models_step_next(&step, key(KeyCode::Char('r'))),
+            ModelsTransition::Step(step.clone()),
+            "an unmodified r is not a retry"
+        );
+    }
+
+    /// Retrying from the credential step must re-run the fetch, not silently do nothing —
+    /// `retry_models_fetch` reads the provider off the step, and `Credentials` carries one.
+    #[tokio::test]
+    async fn retry_re_triggers_the_fetch_from_the_credentials_step() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        app.models_return = Mode::Connected;
+        app.models = Some(ModelsStep::Credentials {
+            provider: "openai".to_string(),
+            error: "openai rejected the credential".to_string(),
+        });
+        let before = app.models_nonce;
+
+        app.handle_models_key(ctrl_key(KeyCode::Char('r')));
+
+        assert!(
+            matches!(
+                &app.models,
+                Some(ModelsStep::ModelList { provider, fetching: true, .. }) if provider == "openai"
+            ),
+            "retry must return to a fetching list, got {:?}",
+            app.models
+        );
+        assert_ne!(
+            app.models_nonce, before,
+            "the in-flight result must be invalidated"
+        );
+    }
+
+    /// A successful fetch can legitimately return nothing (an Ollama install with no models
+    /// pulled). That is worth another try rather than a modal whose only key is Esc.
+    #[test]
+    fn an_empty_list_offers_a_retry() {
+        let step = models_list_step(vec![], false);
+        assert_eq!(
+            models_step_next(&step, ctrl_key(KeyCode::Char('r'))),
+            ModelsTransition::Retry
+        );
+        // A list still being fetched has a retry already in flight, so Ctrl+R is a no-op there.
+        let fetching = models_list_step(vec![], true);
+        assert_eq!(
+            models_step_next(&fetching, ctrl_key(KeyCode::Char('r'))),
+            ModelsTransition::Step(fetching.clone())
+        );
+    }
+
     #[test]
     fn the_credentials_step_closes_on_esc_and_enter_and_ignores_typing() {
         let step = ModelsStep::Credentials {
@@ -4303,6 +4578,26 @@ mod tests {
             models_step_next(&step, key(KeyCode::Char('r'))),
             ModelsTransition::Step(models_manual_step("gpt-r")),
             "an unmodified r is still text"
+        );
+        // Ctrl+Shift+R arrives as an uppercase `R` with CONTROL|SHIFT; without the uppercase arm
+        // it falls through to the text arm and types an `R` into the model id.
+        assert_eq!(
+            models_step_next(
+                &step,
+                KeyEvent::new(
+                    KeyCode::Char('R'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                )
+            ),
+            ModelsTransition::Retry
+        );
+        assert_eq!(
+            models_step_next(
+                &step,
+                KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)
+            ),
+            ModelsTransition::Step(models_manual_step("gpt-R")),
+            "a shifted R with no control is still text"
         );
     }
 
@@ -4612,6 +4907,32 @@ mod tests {
         app.handle_models_key(key(KeyCode::Enter));
 
         assert_eq!(app.status, "Model set to gpt-4o");
+    }
+
+    /// `/model <id>` is a blindly typed id by definition — nothing checked it against the
+    /// provider's list — so its status must say so. This is the escape hatch the credential step
+    /// now points at, and a `verified: true` here would report the flat "Model set to o3" and
+    /// quietly imply the provider confirmed an id it has never seen.
+    #[tokio::test]
+    async fn the_model_command_reports_an_unverified_id() {
+        let mut app = test_app();
+        let _cleanup = TempSettings(app.settings_path.clone());
+        app.mode = Mode::Connected;
+        app.provider_info.id = "openai".to_string();
+
+        app.run_command("/model o3").await;
+
+        assert_eq!(
+            app.settings.models.get("openai").map(String::as_str),
+            Some("o3")
+        );
+        assert!(
+            app.status.contains("o3")
+                && app.status.contains("openai")
+                && app.status.contains("not verified"),
+            "/model must not claim a typed id was verified: {}",
+            app.status
+        );
     }
 
     /// A successful apply must re-derive `provider_info` from the updated settings. Asserting the
