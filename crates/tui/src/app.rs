@@ -31,9 +31,11 @@ use tokio::sync::mpsc;
 use crate::api::{Api, ApiError};
 use crate::browser;
 use crate::config::Config;
+#[cfg(test)]
+use crate::modal::fetch_error;
 use crate::modal::{
-    ConnectStep, FetchSink, Modal, ModalApply, ModalContext, ModalHost, ModalTransition,
-    ModelsStep, ProviderRow, fetch_model_list, mask,
+    ConnectStep, FetchError, FetchFailure, FetchSink, Modal, ModalApply, ModalContext, ModalHost,
+    ModalTransition, ModelsStep, ProviderRow, fetch_model_list, mask,
 };
 use crate::provider::ProviderInfo;
 use crate::selection::takes_key;
@@ -52,19 +54,15 @@ pub enum UiEvent {
     Completion(Result<String, String>),
     Engine(EngineEvent),
     EngineDropped(u64),
-    /// A provider's model list, fetched for the `/connect` modal. `nonce` discards a result that
-    /// outlived the modal that asked for it.
     ConnectModels {
         nonce: u64,
         provider: String,
         result: Result<Vec<String>, String>,
     },
-    /// A provider's model list, fetched for the `/models` modal. Kept separate from
-    /// `ConnectModels` because the two modals render a failure differently.
     ModelsFetched {
         nonce: u64,
         provider: String,
-        result: Result<Vec<String>, String>,
+        result: Result<Vec<String>, FetchError>,
     },
 }
 
@@ -118,6 +116,8 @@ pub struct App {
     key_target: Option<String>,
     key_input: String,
     key_return: Mode,
+    /// The one overlay that owns the keyboard, if any, together with its fetch generation and
+    /// cancellation handle. One field, not six: "two modals open at once" is unrepresentable.
     modal: ModalHost,
     engine: Option<Engine>,
     engine_session: Option<SessionId>,
@@ -491,7 +491,7 @@ impl App {
         }
     }
 
-    /// Tear down any open modal and invalidate its in-flight fetch.
+    /// Tear down any open modal, and cancel and invalidate its in-flight fetch.
     ///
     /// Called from every path that replaces the screen underneath a modal without the user asking:
     /// losing the session, and the device-login result landing asynchronously under an overlay the
@@ -499,6 +499,9 @@ impl App {
     /// `self.mode` no longer tears one down implicitly — without this call a help overlay opened
     /// during device login survives into the screen that replaced it, suppressing that screen
     /// entirely and swallowing every key but Ctrl-C until Esc.
+    ///
+    /// `ModalHost::close` is unconditional for the same reason its predecessor was: cancellation is
+    /// tied to task state, not modal state, so no state combination can strand a live fetch.
     fn dismiss_modals(&mut self) {
         self.modal.close();
     }
@@ -519,11 +522,21 @@ impl App {
 
     /// Stage a model for a provider and persist it, rolling the in-memory map back if the write
     /// fails so a later unrelated save cannot silently resurrect it.
-    fn persist_model(&mut self, provider: String, model: String) -> bool {
+    ///
+    /// `verified` says whether the id came off the provider's own model list. A blindly typed id
+    /// reports a distinct status, so "Model set to o3" never implies the provider confirmed it.
+    fn persist_model(&mut self, provider: String, model: String, verified: bool) -> bool {
         let previous = self.settings.models.insert(provider.clone(), model.clone());
         if self.persist_settings() {
             self.rebuild_provider();
-            self.status = self.t_with("status.model_set", &[("model", &model)]);
+            self.status = if verified {
+                self.t_with("status.model_set", &[("model", &model)])
+            } else {
+                self.t_with(
+                    "status.model_set_unverified",
+                    &[("model", &model), ("provider", &provider)],
+                )
+            };
             return true;
         }
         match previous {
@@ -664,18 +677,26 @@ impl App {
         match apply {
             ModalApply::Provider { provider, model } => {
                 let previous_provider = self.settings.provider.replace(provider.clone());
-                if !self.persist_model(provider, model) {
+                // A model taken from the provider's own list is verified by construction.
+                if !self.persist_model(provider, model, true) {
                     self.settings.provider = previous_provider;
                 }
             }
-            ModalApply::Model { provider, model } => {
-                self.persist_model(provider, model);
+            ModalApply::Model {
+                provider,
+                model,
+                verified,
+            } => {
+                self.persist_model(provider, model, verified);
             }
         }
     }
 
-    /// Fetch a provider's model list off the UI loop for the open modal. The nonce claimed here is
-    /// what makes a result that outlives its modal discardable.
+    /// Fetch a provider's model list off the UI loop for the open modal.
+    ///
+    /// The nonce claimed here is what makes a result that outlives its modal discardable, and
+    /// claiming it also aborts whatever fetch the host was previously awaiting — the two are the
+    /// same event, inside [`ModalHost`], so neither can be forgotten at a call site.
     ///
     /// `sink` comes from the same [`Modal::fetch_target`] that named `provider`, so which event
     /// carries the answer back is decided by the state that asked for the fetch rather than by
@@ -685,13 +706,15 @@ impl App {
         let events = self.events.clone();
         let store = self.store.clone();
         let lang = self.config.lang;
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let result = fetch_model_list(&provider, key, store.as_ref(), lang).await;
             let event = match sink {
+                // The connect modal renders only the message; #47's classification is consumed by
+                // the `/models` modal alone.
                 FetchSink::Connect => UiEvent::ConnectModels {
                     nonce,
                     provider,
-                    result,
+                    result: result.map_err(|e| e.message),
                 },
                 FetchSink::Models => UiEvent::ModelsFetched {
                     nonce,
@@ -701,11 +724,9 @@ impl App {
             };
             let _ = events.send(event);
         });
+        self.modal.track_fetch(task);
     }
 
-    /// Fill the connect modal's model list, or surface the fetch error inline in it. The nonce
-    /// discards a result that outlived its modal; the provider and step shape discard one the open
-    /// modal has already stepped past.
     fn handle_connect_models(
         &mut self,
         nonce: u64,
@@ -715,14 +736,19 @@ impl App {
         if nonce != self.modal.nonce() {
             return;
         }
-        if !matches!(
+        // The nonce matched, so this is the current fetch's own result and that task is done.
+        // Drop its handle rather than leaving a finished task tracked: the handle is a cancellation
+        // handle, and a stale `Some` invites a future reader to treat it as "already fetching".
+        self.modal.forget_fetch();
+        let matches = matches!(
             self.modal.current(),
             Some(Modal::Connect(ConnectStep::ModelList {
                 provider: p,
                 fetching: true,
                 ..
             })) if *p == provider
-        ) {
+        );
+        if !matches {
             return;
         }
         let err_msg = result
@@ -769,17 +795,17 @@ impl App {
         );
     }
 
-    /// Fill the models modal's list, or fall back to manual entry when the fetch failed. Guarded
-    /// exactly like `handle_connect_models`.
     fn handle_models_fetched(
         &mut self,
         nonce: u64,
         provider: String,
-        result: Result<Vec<String>, String>,
+        result: Result<Vec<String>, FetchError>,
     ) {
         if nonce != self.modal.nonce() {
             return;
         }
+        // See `handle_connect_models`: the current fetch has delivered, so stop tracking it.
+        self.modal.forget_fetch();
         if !matches!(
             self.modal.current(),
             Some(Modal::Models(ModelsStep::ModelList {
@@ -809,19 +835,49 @@ impl App {
                     *fetching = false;
                 }
             }
-            Err(e) => {
-                let err_msg = self.t_with("connect.fetch_error", &[("error", &e)]);
-                self.modal.replace_step(Modal::Models(ModelsStep::Manual {
-                    provider,
-                    input: String::new(),
-                    error: Some(err_msg),
-                }));
+            Err(err) => {
+                let message = self.fetch_error_message(&provider, &err);
+                // The modal is not a record: `close_models` drops the step, so Esc would erase the
+                // only copy of the failure. Log it too, so the user has something to scroll back
+                // to and paste when asking for help — the same thing `/key` and `/ask` do.
+                self.push_log(message.clone());
+                self.modal
+                    .replace_step(Modal::Models(if err.class.needs_credentials() {
+                        ModelsStep::Credentials {
+                            provider,
+                            error: message,
+                        }
+                    } else {
+                        ModelsStep::Manual {
+                            provider,
+                            input: String::new(),
+                            error: Some(message),
+                        }
+                    }));
             }
+        }
+    }
+
+    /// Render a failed fetch for the user. A missing key already reads as a complete sentence
+    /// naming the provider, so wrapping it would produce "openai rejected the credential: No API
+    /// key for openai".
+    fn fetch_error_message(&self, provider: &str, err: &FetchError) -> String {
+        match err.class {
+            FetchFailure::MissingKey => err.message.clone(),
+            FetchFailure::Auth => self.t_with(
+                "models.auth_rejected",
+                &[("provider", provider), ("error", &err.message)],
+            ),
+            FetchFailure::Fetch => self.t_with("connect.fetch_error", &[("error", &err.message)]),
         }
     }
 
     /// The single key seam for every modal: Ctrl-C quits, the modal's own pure transition decides
     /// the rest, and a step that begins waiting on a model list starts exactly one fetch.
+    ///
+    /// A retry needs no transition of its own: a failure step's `fetch_target` is `None` and the
+    /// step it retries into names one, so the `None -> Some` rule below fires the fetch and
+    /// `replace_step` invalidates whatever was still in flight.
     fn handle_modal_key(&mut self, key: KeyEvent) -> bool {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return true;
@@ -880,6 +936,10 @@ impl App {
                 let after = next
                     .fetch_target()
                     .map(|(provider, sink)| (provider.to_string(), sink));
+                // Stepping away from a fetch cancels and invalidates it, inside `replace_step`:
+                // Esc out of a fetching connect list steps *back* rather than closing, so the
+                // request — and the API key in its headers — would otherwise outlive the
+                // "Esc: cancel" the footer promises.
                 self.modal.replace_step(next);
                 // Only a step that *begins* waiting on a list starts a fetch. A step that keeps
                 // waiting on the same one — arrow keys on a list still loading — must not respawn
@@ -899,7 +959,9 @@ impl App {
             self.error = Some(self.t("status.model_unsupported").to_string());
             return;
         }
-        self.persist_model(active, model.to_string());
+        // `/model <id>` is a blindly typed id by definition — nothing verified it against the
+        // provider's list.
+        self.persist_model(active, model.to_string(), false);
     }
 
     fn list_keys(&mut self) {
@@ -1164,6 +1226,10 @@ impl App {
     }
 
     async fn sign_out(&mut self) {
+        // Before the logout await, not after. `self.api` is a `reqwest::Client::new()` with no
+        // timeout, so a server that never answers `logout` would otherwise delay cancellation of
+        // the key-bearing model fetch indefinitely — the exact window the abort exists to close.
+        self.dismiss_modals();
         if let Some(session) = &self.session {
             let _ = self.api.logout(&session.token).await;
         }
@@ -1172,7 +1238,6 @@ impl App {
         self.ws_tx = None;
         self.mode = Mode::SignIn;
         self.focus = Focus::Email;
-        self.dismiss_modals();
         self.code.clear();
         self.log.clear();
         self.pongs = 0;
@@ -1893,19 +1958,32 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::{
-        ApiError, App, ConnectStep, EngineForward, KeyCommand, Modal, Mode, ModelsStep,
-        ProviderRow, Session, UiEvent, engine_approval_key, engine_forward_step, parse_ask_command,
-        parse_connect_command, parse_key_command, parse_model_command, parse_models_command,
+        ApiError, App, ConnectStep, EngineForward, FetchError, FetchFailure, FetchSink, KeyCommand,
+        Modal, Mode, ModelsStep, ProviderRow, Session, UiEvent, engine_approval_key,
+        engine_forward_step, fetch_error, parse_ask_command, parse_connect_command,
+        parse_key_command, parse_model_command, parse_models_command,
     };
+
     use crate::config::Config;
+
     use crate::provider::ProviderInfo;
+
     use crate::settings::{Settings, SettingsHandle};
+
     use light_factory_protocol::session::{Event as EngineEvent, EventKind, SessionId};
+
     use light_factory_protocol::wire::ServerMessage;
+
     use light_factory_providers::{LocalProvider, OfflineReason, Provider};
+
     use light_factory_tui::credentials::{CredentialStore, MemStore};
-    use ratatui::Terminal;
+
+    use light_factory_tui::i18n::Locale;
+
+    use ratatui::{Frame, Terminal};
+
     use tokio::sync::broadcast::error::RecvError;
+
     use tokio::sync::mpsc;
 
     fn test_app_with_store(store: Arc<dyn CredentialStore>) -> App {
@@ -1976,6 +2054,90 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    /// The popup contents as one whitespace-collapsed string, so an assertion can check that a
+    /// wrapped line survived *in full* without having to predict where the wrapper broke it.
+    fn flatten(screen: &str) -> String {
+        screen
+            .chars()
+            .map(|c| {
+                if "\u{2502}\u{250c}\u{2510}\u{2514}\u{2518}\u{2500}".contains(c) {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Draw `f` to an off-screen terminal and return the buffer as text, so rendering can be
+    /// asserted without a real terminal.
+    fn draw_to_text(width: u16, height: u16, f: impl FnOnce(&mut Frame)) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(f).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The client every network test in this module uses.
+    ///
+    /// `reqwest::get` builds a default client, which honours `http_proxy`/`HTTP_PROXY` and has no
+    /// timeout at all. Under an exported proxy the 401/403 mocks were observed returning 200 —
+    /// `expect_err` then failed — and against a sandbox that DROPs rather than RSTs the connection
+    /// to port 1, the transport test blocked on the kernel SYN-retry budget (~130s) with nothing to
+    /// bound it. Both are properties of the client, so both are fixed on the client.
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("test HTTP client")
+    }
+
+    /// A real `reqwest::Error` carrying `code`, produced the way a provider produces one.
+    async fn status_error(code: u16) -> anyhow::Error {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(code))
+            .mount(&server)
+            .await;
+        test_client()
+            .get(server.uri())
+            .send()
+            .await
+            .expect("the request reached the mock")
+            .error_for_status()
+            .expect_err("the mock returned an error status")
+            .into()
+    }
+
+    /// A real `reqwest::Error` with no HTTP status: a refused connection.
+    async fn transport_error() -> anyhow::Error {
+        test_client()
+            .get("http://127.0.0.1:1/models")
+            .send()
+            .await
+            .expect_err("nothing listens on port 1")
+            .into()
+    }
+
     /// Open a modal directly on the host, bypassing `App::open_modal` (which would spawn a fetch
     /// outside a runtime), and return the host's nonce afterwards.
     ///
@@ -2000,6 +2162,25 @@ mod tests {
         match app.modal.current() {
             Some(Modal::Models(step)) => Some(step),
             _ => None,
+        }
+    }
+
+    fn connect_model_list_step(models: Vec<String>, fetching: bool) -> ConnectStep {
+        ConnectStep::ModelList {
+            rows: vec![],
+            provider: "openai".to_string(),
+            models,
+            selected: 0,
+            fetching,
+            error: None,
+            from_key: false,
+        }
+    }
+
+    fn fetch_err(class: FetchFailure, message: &str) -> FetchError {
+        FetchError {
+            class,
+            message: message.to_string(),
         }
     }
 
@@ -2065,22 +2246,13 @@ mod tests {
         assert!(!parse_connect_command("/ask hello"));
     }
 
-    fn model_list_step(models: Vec<String>, fetching: bool) -> ConnectStep {
-        ConnectStep::ModelList {
-            rows: vec![],
-            provider: "openai".to_string(),
-            models,
-            selected: 0,
-            fetching,
-            error: None,
-            from_key: false,
-        }
-    }
-
     #[test]
     fn handle_connect_models_ignores_stale_nonces() {
         let mut app = test_app();
-        let nonce = open(&mut app, Modal::Connect(model_list_step(vec![], true)));
+        let nonce = open(
+            &mut app,
+            Modal::Connect(connect_model_list_step(vec![], true)),
+        );
         app.handle_connect_models(
             nonce - 1,
             "openai".to_string(),
@@ -2099,7 +2271,10 @@ mod tests {
     #[test]
     fn handle_connect_models_fills_models_for_a_matching_nonce() {
         let mut app = test_app();
-        let nonce = open(&mut app, Modal::Connect(model_list_step(vec![], true)));
+        let nonce = open(
+            &mut app,
+            Modal::Connect(connect_model_list_step(vec![], true)),
+        );
         app.handle_connect_models(
             nonce,
             "openai".to_string(),
@@ -2119,7 +2294,10 @@ mod tests {
     #[test]
     fn handle_connect_models_surfaces_a_fetch_error() {
         let mut app = test_app();
-        let nonce = open(&mut app, Modal::Connect(model_list_step(vec![], true)));
+        let nonce = open(
+            &mut app,
+            Modal::Connect(connect_model_list_step(vec![], true)),
+        );
         app.handle_connect_models(nonce, "openai".to_string(), Err("bad key".to_string()));
         assert!(matches!(
             connect_step(&app),
@@ -2140,28 +2318,22 @@ mod tests {
         }
     }
 
+    /// A manual step shaped the way production produces one: with an error present.
+    /// `handle_models_fetched`'s `Err` arm is `Manual`'s only constructor and it always sets
+    /// `Some(_)`, so `error: None` was a state no code path could reach — and a render test built
+    /// on it asserted against fiction while dropping the very line that broke the layout.
     fn models_manual_step(input: &str) -> ModelsStep {
         ModelsStep::Manual {
             provider: "openai".to_string(),
             input: input.to_string(),
-            error: None,
+            error: Some("Couldn't fetch models: connection refused".to_string()),
         }
     }
 
     /// Render the whole app to an off-screen terminal and return it as text, so modal rendering
     /// can be asserted without a real terminal.
     fn render(app: &mut App, width: u16, height: u16) -> String {
-        let backend = ratatui::backend::TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .chunks(width as usize)
-            .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
+        draw_to_text(width, height, |frame| app.draw(frame))
     }
 
     #[test]
@@ -2195,6 +2367,130 @@ mod tests {
         assert!(
             !screen.contains("Activity"),
             "help covers the base screen, which is not cleared behind it:\n{screen}"
+        );
+    }
+
+    /// The whole point of the credential step: it must point at the commands that can actually
+    /// fix the problem, and must not offer a model-id box.
+    ///
+    /// Built through `handle_models_fetched` from a real `reqwest` 401 rather than from a
+    /// hand-written 37-character string no code path can produce. The real message is 105
+    /// characters and wraps to two rows against the 58-column inner width, which is exactly the
+    /// case the old popup sizing clipped — so on every real 401 the remedy was off screen.
+    #[tokio::test]
+    async fn the_credentials_step_renders_the_remedy_and_no_input_box() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+
+        let err = fetch_error("openai", &status_error(401).await);
+        assert_eq!(
+            err.class,
+            FetchFailure::Auth,
+            "a 401 is a credential failure"
+        );
+        let cause = err.message.clone();
+        app.handle_models_fetched(nonce, "openai".to_string(), Err(err));
+
+        let screen = render(&mut app, 80, 20);
+        assert!(
+            screen.contains("/connect"),
+            "the remedy is clipped:\n{screen}"
+        );
+        assert!(
+            screen.contains("/key openai"),
+            "the remedy is clipped:\n{screen}"
+        );
+        assert!(
+            screen.contains("/model <id>"),
+            "a misclassified 401 needs an escape hatch:\n{screen}"
+        );
+        assert!(
+            flatten(&screen).contains(&flatten(&format!(
+                "openai rejected the credential: {cause}"
+            ))),
+            "the cause must be rendered in full, not clipped:\n{screen}"
+        );
+        assert!(
+            !screen.contains("Type a model id"),
+            "typing an id cannot repair a credential:\n{screen}"
+        );
+        assert!(
+            !screen.contains("save unverified"),
+            "the credential step must not offer to save an id:\n{screen}"
+        );
+        assert!(
+            screen.contains("Ctrl+R: retry"),
+            "a 401 from a proxy or a WAF is not a dead end:\n{screen}"
+        );
+    }
+
+    /// The transport step keeps the manual fallback (#36 AC 6) but must label it as unverified,
+    /// advertise the retry key, and — the part that was broken — actually show the input box.
+    ///
+    /// Built through `handle_models_fetched` from a real refused connection. The old test used a
+    /// helper that hardcoded `error: None`, which the `Err` arm never produces, so it dropped the
+    /// error line and never exercised the layout the user actually gets: the prompt and the input
+    /// row pushed off screen while keystrokes still accumulated and Enter still applied.
+    #[tokio::test]
+    async fn the_manual_step_labels_itself_unverified_and_offers_a_retry() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+
+        let err = fetch_error("openai", &transport_error().await);
+        assert_eq!(
+            err.class,
+            FetchFailure::Fetch,
+            "a refused connection is retryable"
+        );
+        let cause = err.message.clone();
+        app.handle_models_fetched(nonce, "openai".to_string(), Err(err));
+
+        // Type into the box the way the user does. What they type must be on screen.
+        for c in "o3-mini".chars() {
+            app.handle_modal_key(key(KeyCode::Char(c)));
+        }
+        let screen = render(&mut app, 80, 20);
+        assert!(
+            screen.contains("Type a model id \u{2014} it won't be checked against openai"),
+            "the unverified prompt is clipped:\n{screen}"
+        );
+        assert!(
+            screen.contains("o3-mini"),
+            "the user must be able to see what they are typing:\n{screen}"
+        );
+        assert!(
+            flatten(&screen).contains(&flatten(&format!("Couldn't fetch models: {cause}"))),
+            "the cause must be rendered in full, not clipped:\n{screen}"
+        );
+        assert!(screen.contains("Ctrl+R: retry"), "{screen}");
+        assert!(screen.contains("save unverified"), "{screen}");
+    }
+
+    /// Every other render assertion in this file runs in EN, which is how a 63-column ES footer
+    /// shipped hard-truncated against a 58-column inner width, silently costing ES users
+    /// "Esc: cerrar".
+    #[test]
+    fn the_manual_step_footer_is_not_truncated_in_spanish() {
+        let mut app = test_app();
+        app.config.lang = Locale::Es;
+        app.mode = Mode::Connected;
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.handle_models_fetched(
+            nonce,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::Fetch, "conexi\u{f3}n rechazada")),
+        );
+
+        let screen = render(&mut app, 80, 20);
+        assert!(
+            screen.contains("Esc: cerrar"),
+            "the ES footer lost its last key to truncation:\n{screen}"
+        );
+        assert!(
+            screen.contains("Ctrl+R: reintentar"),
+            "the ES footer lost its retry key:\n{screen}"
         );
     }
 
@@ -2282,22 +2578,58 @@ mod tests {
     #[test]
     fn models_fetch_result_does_not_clobber_manual_entry() {
         let mut app = test_app();
-        open(
-            &mut app,
-            Modal::Models(ModelsStep::Manual {
-                provider: "openai".to_string(),
-                input: "gpt-4".to_string(),
-                error: None,
-            }),
-        );
-        app.handle_models_fetched(
-            app.modal.nonce(),
-            "openai".to_string(),
-            Ok(vec!["gpt-4o".to_string()]),
-        );
+        let nonce = open(&mut app, Modal::Models(models_manual_step("gpt-4")));
+        app.handle_models_fetched(nonce, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
         assert!(
             matches!(models_step(&app), Some(ModelsStep::Manual { input, .. }) if input == "gpt-4"),
             "a late result must not discard what the user typed"
+        );
+    }
+
+    /// The same guard on the `Err` path, which every other stale-result test misses. A superseded
+    /// `Err(Auth)` landing on a manual step would wipe half-typed input *and* replace a step that
+    /// has an input box with one that does not — the worst version of the clobber.
+    #[test]
+    fn a_late_failure_does_not_clobber_manual_entry() {
+        let mut app = test_app();
+        let nonce = open(&mut app, Modal::Models(models_manual_step("gpt-4")));
+        app.handle_models_fetched(
+            nonce,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::Auth, "401 Unauthorized")),
+        );
+        assert!(
+            matches!(models_step(&app), Some(ModelsStep::Manual { input, .. }) if input == "gpt-4"),
+            "a late failure must not discard what the user typed, got {:?}",
+            models_step(&app)
+        );
+    }
+
+    /// The step is not a record: `close_models` drops it, so Esc would erase the only copy of the
+    /// failure. The transcript is what the user can scroll back to and paste when asking for help.
+    #[test]
+    fn a_fetch_failure_is_recorded_in_the_transcript() {
+        let mut app = test_app();
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.handle_models_fetched(
+            nonce,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::Auth, "401 Unauthorized")),
+        );
+
+        assert!(
+            app.log
+                .iter()
+                .any(|l| l.contains("openai") && l.contains("401 Unauthorized")),
+            "the classified failure must outlive the modal: {:?}",
+            app.log
+        );
+
+        app.modal.close();
+        assert!(
+            app.log.iter().any(|l| l.contains("401 Unauthorized")),
+            "closing the modal must not erase the record: {:?}",
+            app.log
         );
     }
 
@@ -2337,6 +2669,230 @@ mod tests {
         assert_ne!(app.modal.nonce(), 0, "the fetch nonce must be bumped");
     }
 
+    /// Spawn a task that never completes, plus a probe that can observe its cancellation after the
+    /// `JoinHandle` has been moved into the `App`. Bounded yields rather than a sleep, so the test
+    /// is deterministic and makes no assertion about elapsed wall-clock time.
+    fn pending_task() -> (tokio::task::JoinHandle<()>, tokio::task::AbortHandle) {
+        let handle = tokio::spawn(std::future::pending::<()>());
+        let probe = handle.abort_handle();
+        (handle, probe)
+    }
+
+    async fn settle(probe: &tokio::task::AbortHandle) {
+        for _ in 0..32 {
+            if probe.is_finished() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Esc on a `/models` list, which routes to `ModalTransition::Close`.
+    #[tokio::test]
+    async fn closing_the_models_modal_aborts_the_in_flight_fetch() {
+        let mut app = test_app();
+        let (handle, probe) = pending_task();
+        open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.modal.track_fetch(handle);
+
+        app.handle_modal_key(key(KeyCode::Esc));
+
+        settle(&probe).await;
+        assert!(
+            probe.is_finished(),
+            "Esc must cancel the request, not just hide the modal: the connection carries the API key"
+        );
+        assert!(!app.modal.tracks_fetch());
+    }
+
+    /// Was `closing_the_connect_modal_aborts_the_in_flight_fetch`, which is now the same call as
+    /// the test above — one host, one close. Renamed to cover the other close path instead, which
+    /// the one host makes the *only* other one: `Apply` closes a `/connect` list whose fetch may
+    /// still be running. There is no per-modal close method left to forget the abort in.
+    #[tokio::test]
+    async fn applying_from_the_connect_modal_aborts_the_in_flight_fetch() {
+        let mut app = test_app();
+        let _cleanup = TempSettings(app.settings_path.clone());
+        let (handle, probe) = pending_task();
+        open(
+            &mut app,
+            Modal::Connect(connect_model_list_step(vec!["gpt-4o".to_string()], false)),
+        );
+        app.modal.track_fetch(handle);
+
+        app.handle_modal_key(key(KeyCode::Enter));
+
+        assert!(app.modal.current().is_none());
+        settle(&probe).await;
+        assert!(probe.is_finished(), "the connect modal leaks the same way");
+        assert!(!app.modal.tracks_fetch());
+    }
+
+    /// Was `dismissing_modals_aborts_both_in_flight_fetches`; there is one fetch to abort now,
+    /// because there is one host.
+    #[tokio::test]
+    async fn dismissing_modals_aborts_an_in_flight_fetch_with_nothing_open() {
+        let mut app = test_app();
+        let (handle, probe) = pending_task();
+        app.modal.track_fetch(handle);
+        // No modal is open: cancellation is tied to TASK state, not modal state, so a handle can
+        // never be stranded by the state combination the abort was gated on. `Apply` closes the
+        // modal while its fetch is still in flight, which is how that state is reached.
+        assert!(!app.modal.is_open());
+
+        app.dismiss_modals();
+
+        settle(&probe).await;
+        assert!(
+            probe.is_finished(),
+            "losing the session must cancel the fetch even with no modal to close"
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_a_models_fetch_aborts_the_previous_one() {
+        let mut app = test_app();
+        let (handle, probe) = pending_task();
+        app.modal.track_fetch(handle);
+
+        // `local` resolves no key against the MemStore, so the replacement fetch fails offline
+        // instead of touching the network.
+        app.begin_model_fetch("local".to_string(), FetchSink::Models, None);
+
+        settle(&probe).await;
+        assert!(
+            probe.is_finished(),
+            "re-entering the modal must not strand the previous fetch"
+        );
+        assert!(
+            app.modal.tracks_fetch(),
+            "the replacement fetch must be tracked too"
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_a_connect_fetch_aborts_the_previous_one() {
+        let mut app = test_app();
+        let (handle, probe) = pending_task();
+        app.modal.track_fetch(handle);
+
+        // The mirror of `starting_a_models_fetch_aborts_the_previous_one`. Without it the four
+        // abort tests only ever cover `abort_connect_fetch`, because each one assigns the field by
+        // hand — `begin_fetch` could go back to a bare `tokio::spawn` with the handle dropped and
+        // the whole suite would stay green, while `close_connect` would have nothing to abort and
+        // the credential-bearing connection would leak exactly as before.
+        //
+        // `local` resolves no key against the MemStore, so the replacement fetch fails offline
+        // instead of touching the network.
+        app.begin_model_fetch("local".to_string(), FetchSink::Connect, None);
+
+        settle(&probe).await;
+        assert!(
+            probe.is_finished(),
+            "retyping a key must not strand the previous fetch"
+        );
+        assert!(
+            app.modal.tracks_fetch(),
+            "the replacement fetch must be tracked too"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delivered_models_result_stops_tracking_its_task() {
+        let mut app = test_app();
+        let (handle, _probe) = pending_task();
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.modal.track_fetch(handle);
+
+        app.handle_models_fetched(nonce, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+
+        assert!(
+            !app.modal.tracks_fetch(),
+            "a fetch that already delivered must not stay tracked as cancellable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delivered_connect_result_stops_tracking_its_task() {
+        let mut app = test_app();
+        let (handle, _probe) = pending_task();
+        let nonce = open(
+            &mut app,
+            Modal::Connect(ConnectStep::ModelList {
+                rows: vec![],
+                provider: "openai".to_string(),
+                models: vec![],
+                selected: 0,
+                fetching: true,
+                error: None,
+                from_key: false,
+            }),
+        );
+        app.modal.track_fetch(handle);
+
+        app.handle_connect_models(nonce, "openai".to_string(), Ok(vec!["gpt-4o".to_string()]));
+
+        assert!(
+            !app.modal.tracks_fetch(),
+            "a fetch that already delivered must not stay tracked as cancellable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_result_leaves_the_current_fetch_tracked() {
+        let mut app = test_app();
+        let (handle, _probe) = pending_task();
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.modal.track_fetch(handle);
+
+        // A result from a superseded fetch must not drop the *current* fetch's cancellation
+        // handle — that would strand the live, key-bearing request.
+        app.handle_models_fetched(
+            nonce - 1,
+            "openai".to_string(),
+            Ok(vec!["gpt-4o".to_string()]),
+        );
+
+        assert!(app.modal.tracks_fetch());
+    }
+
+    #[tokio::test]
+    async fn stepping_back_out_of_a_fetching_connect_list_aborts_the_fetch() {
+        let mut app = test_app();
+        let (handle, probe) = pending_task();
+        app.modal.track_fetch(handle);
+        open(
+            &mut app,
+            Modal::Connect(ConnectStep::ModelList {
+                rows: vec![ProviderRow {
+                    id: "openai".to_string(),
+                    connected: true,
+                }],
+                provider: "openai".to_string(),
+                models: vec![],
+                selected: 0,
+                fetching: true,
+                error: None,
+                from_key: false,
+            }),
+        );
+
+        // Esc here steps back to the provider list instead of closing the modal, so
+        // `close_connect` never runs — the one Esc path the abort helpers do not cover.
+        app.handle_modal_key(key(KeyCode::Esc));
+
+        assert!(
+            matches!(connect_step(&app), Some(ConnectStep::ProviderList { .. })),
+            "Esc from a fetching list steps back to the provider list"
+        );
+        settle(&probe).await;
+        assert!(
+            probe.is_finished(),
+            "the footer says \"Esc: cancel\"; the key-bearing request must actually stop"
+        );
+        assert!(!app.modal.tracks_fetch());
+    }
+
     /// Was `closing_the_modal_returns_to_the_mode_it_was_opened_from`: there is no restore left to
     /// assert, because a modal no longer disturbs the mode it is opened over.
     #[test]
@@ -2352,59 +2908,6 @@ mod tests {
         assert!(
             app.mode == Mode::Engine,
             "a modal never disturbs the mode it is opened over, so there is nothing to restore"
-        );
-    }
-
-    /// The regression that decoupling help from `Mode` made possible: on master, help *was*
-    /// `Mode::Help`, so assigning `self.mode` tore it down. Now nothing does implicitly, and
-    /// `handle_device_result` is reached asynchronously while Ctrl-P is available from
-    /// `Mode::Device`. Left open, `covers_base` would suppress the sign-in screen entirely and
-    /// `handle_modal_key` would swallow every key but Ctrl-C.
-    #[tokio::test]
-    async fn a_failed_device_login_dismisses_an_overlay_opened_while_waiting() {
-        let mut app = test_app();
-        app.mode = Mode::Device;
-        app.open_help();
-
-        app.handle_device_result(
-            app.device_nonce,
-            Err(ApiError {
-                code: "device_denied".to_string(),
-                message: "denied".to_string(),
-            }),
-        )
-        .await;
-
-        assert!(app.mode == Mode::SignIn);
-        assert!(
-            app.modal.current().is_none(),
-            "a modal must not outlive the screen it was opened over"
-        );
-    }
-
-    /// The success half of the same asynchronous path: `enter` reaches `Mode::Connected` with the
-    /// overlay still open.
-    #[tokio::test]
-    async fn entering_the_connected_screen_dismisses_an_overlay_opened_while_waiting() {
-        let mut app = test_app();
-        app.mode = Mode::Device;
-        app.open_help();
-
-        // Port 1 is never listening, so the WebSocket attempt inside `enter` is refused at once
-        // instead of reaching a server a developer happens to be running.
-        app.config = Config::from_url("http://127.0.0.1:1").unwrap();
-        app.enter(Session {
-            token: "t".to_string(),
-            expires_at: 0,
-            email: "a@b.c".to_string(),
-            display_name: "A".to_string(),
-        })
-        .await;
-
-        assert!(app.mode == Mode::Connected);
-        assert!(
-            app.modal.current().is_none(),
-            "a modal must not outlive the screen it was opened over"
         );
     }
 
@@ -2459,6 +2962,59 @@ mod tests {
         );
     }
 
+    /// The regression that decoupling help from `Mode` made possible: on master, help *was*
+    /// `Mode::Help`, so assigning `self.mode` tore it down. Now nothing does implicitly, and
+    /// `handle_device_result` is reached asynchronously while Ctrl-P is available from
+    /// `Mode::Device`. Left open, `covers_base` would suppress the sign-in screen entirely and
+    /// `handle_modal_key` would swallow every key but Ctrl-C.
+    #[tokio::test]
+    async fn a_failed_device_login_dismisses_an_overlay_opened_while_waiting() {
+        let mut app = test_app();
+        app.mode = Mode::Device;
+        app.open_help();
+
+        app.handle_device_result(
+            app.device_nonce,
+            Err(ApiError {
+                code: "device_denied".to_string(),
+                message: "denied".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(app.mode == Mode::SignIn);
+        assert!(
+            app.modal.current().is_none(),
+            "a modal must not outlive the screen it was opened over"
+        );
+    }
+
+    /// The success half of the same asynchronous path: `enter` reaches `Mode::Connected` with the
+    /// overlay still open.
+    #[tokio::test]
+    async fn entering_the_connected_screen_dismisses_an_overlay_opened_while_waiting() {
+        let mut app = test_app();
+        app.mode = Mode::Device;
+        app.open_help();
+        // Port 1 is never listening, so the WebSocket attempt inside `enter` is refused at once
+        // instead of reaching a server a developer happens to be running.
+        app.config = Config::from_url("http://127.0.0.1:1").unwrap();
+
+        app.enter(Session {
+            token: "t".to_string(),
+            expires_at: 0,
+            email: "a@b.c".to_string(),
+            display_name: "A".to_string(),
+        })
+        .await;
+
+        assert!(app.mode == Mode::Connected);
+        assert!(
+            app.modal.current().is_none(),
+            "a modal must not outlive the screen it was opened over"
+        );
+    }
+
     /// The `ModalApply::Provider` arm of `apply_and_close_modal`: `/connect` adopts a provider as
     /// well as pinning its model, which `/models` must never do.
     #[test]
@@ -2507,15 +3063,7 @@ mod tests {
         app.settings.provider = Some("anthropic".to_string());
         open(
             &mut app,
-            Modal::Connect(ConnectStep::ModelList {
-                rows: vec![],
-                provider: "openai".to_string(),
-                models: vec!["gpt-4o".to_string()],
-                selected: 0,
-                fetching: false,
-                error: None,
-                from_key: false,
-            }),
+            Modal::Connect(connect_model_list_step(vec!["gpt-4o".to_string()], false)),
         );
 
         app.handle_modal_key(key(KeyCode::Enter));
@@ -2544,16 +3092,18 @@ mod tests {
     #[test]
     fn moving_the_cursor_while_a_connect_list_loads_does_not_refetch() {
         let mut app = test_app();
-        let step = ConnectStep::ModelList {
-            rows: vec![],
-            provider: "openai".to_string(),
-            models: vec![],
-            selected: 0,
-            fetching: true,
-            error: None,
-            from_key: true,
-        };
-        let nonce = open(&mut app, Modal::Connect(step));
+        let nonce = open(
+            &mut app,
+            Modal::Connect(ConnectStep::ModelList {
+                rows: vec![],
+                provider: "openai".to_string(),
+                models: vec![],
+                selected: 0,
+                fetching: true,
+                error: None,
+                from_key: true,
+            }),
+        );
 
         app.handle_modal_key(key(KeyCode::Down));
         app.handle_modal_key(key(KeyCode::Up));
@@ -2618,6 +3168,39 @@ mod tests {
                     if *models == vec!["real".to_string()]
             ),
             "the live fetch's result must still be accepted"
+        );
+    }
+
+    #[test]
+    fn opening_the_models_modal_replaces_an_open_connect_modal() {
+        let mut app = test_app();
+        open(
+            &mut app,
+            Modal::Connect(ConnectStep::ProviderList {
+                rows: vec![],
+                selected: 0,
+            }),
+        );
+        app.provider_info.offline = Some(OfflineReason::NothingConfigured);
+        app.enter_models();
+        assert!(
+            matches!(app.modal.current(), Some(Modal::Models(_))),
+            "only one modal can be open at a time"
+        );
+    }
+
+    #[test]
+    fn opening_a_second_modal_invalidates_the_first_modals_fetch() {
+        let mut app = test_app();
+        let stale = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.enter_connect();
+        app.handle_models_fetched(stale, "openai".to_string(), Ok(vec!["m".to_string()]));
+        assert!(
+            matches!(
+                app.modal.current(),
+                Some(Modal::Connect(ConnectStep::ProviderList { .. }))
+            ),
+            "a fetch from the replaced modal must not reach the new one"
         );
     }
 
@@ -2692,18 +3275,143 @@ mod tests {
     }
 
     #[test]
-    fn handle_models_fetched_falls_back_to_manual_entry_on_a_fetch_error() {
+    fn handle_models_fetched_falls_back_to_manual_entry_on_a_transport_error() {
         let mut app = test_app();
         let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
-        app.handle_models_fetched(nonce, "openai".to_string(), Err("bad key".to_string()));
-        assert!(matches!(
-            models_step(&app),
-            Some(ModelsStep::Manual {
-                provider,
-                input,
-                error: Some(_),
-            }) if provider == "openai" && input.is_empty()
-        ));
+        app.handle_models_fetched(
+            nonce,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::Fetch, "connection refused")),
+        );
+        let Some(ModelsStep::Manual {
+            provider,
+            input,
+            error: Some(error),
+        }) = models_step(&app)
+        else {
+            panic!(
+                "a transport failure must keep the manual fallback, got {:?}",
+                models_step(&app)
+            );
+        };
+        assert_eq!(provider, "openai");
+        assert!(input.is_empty());
+        assert!(
+            error.contains("connection refused"),
+            "the provider's own error must survive: {error}"
+        );
+    }
+
+    #[test]
+    fn handle_models_fetched_routes_a_rejected_credential_to_the_credentials_step() {
+        let mut app = test_app();
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.handle_models_fetched(
+            nonce,
+            "openai".to_string(),
+            Err(fetch_err(
+                FetchFailure::Auth,
+                "HTTP status 401 Unauthorized",
+            )),
+        );
+        let Some(ModelsStep::Credentials { provider, error }) = models_step(&app) else {
+            panic!(
+                "a 401 must not offer a model-id box, got {:?}",
+                models_step(&app)
+            );
+        };
+        assert_eq!(provider, "openai");
+        assert!(
+            error.contains("openai") && error.contains("401"),
+            "the credential notice must name the provider and the cause: {error}"
+        );
+    }
+
+    #[test]
+    fn handle_models_fetched_routes_a_missing_key_to_the_credentials_step_verbatim() {
+        let mut app = test_app();
+        let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
+        app.handle_models_fetched(
+            nonce,
+            "openai".to_string(),
+            Err(fetch_err(FetchFailure::MissingKey, "No API key for openai")),
+        );
+        let Some(ModelsStep::Credentials { provider, error }) = models_step(&app) else {
+            panic!(
+                "a missing key must not offer a model-id box, got {:?}",
+                models_step(&app)
+            );
+        };
+        assert_eq!(provider, "openai");
+        assert_eq!(
+            error, "No API key for openai",
+            "an already-complete sentence must not be wrapped again"
+        );
+    }
+
+    /// Retrying from the credential step must re-run the fetch, not silently do nothing —
+    /// `retry_models_fetch` reads the provider off the step, and `Credentials` carries one.
+    #[tokio::test]
+    async fn retry_re_triggers_the_fetch_from_the_credentials_step() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        open(
+            &mut app,
+            Modal::Models(ModelsStep::Credentials {
+                provider: "openai".to_string(),
+                error: "openai rejected the credential".to_string(),
+            }),
+        );
+        let before = app.modal.nonce();
+
+        app.handle_modal_key(ctrl_key(KeyCode::Char('r')));
+
+        assert!(
+            matches!(
+                models_step(&app),
+                Some(ModelsStep::ModelList { provider, fetching: true, .. }) if provider == "openai"
+            ),
+            "retry must return to a fetching list, got {:?}",
+            models_step(&app)
+        );
+        assert_ne!(
+            app.modal.nonce(),
+            before,
+            "the in-flight result must be invalidated"
+        );
+    }
+
+    /// A blip must be recoverable in place: Ctrl+R returns the modal to a fetching list and
+    /// re-runs the fetch under a fresh nonce, so the superseded in-flight result is discarded.
+    #[tokio::test]
+    async fn retry_re_triggers_the_fetch_from_manual_entry() {
+        let mut app = test_app();
+        app.mode = Mode::Connected;
+        open(
+            &mut app,
+            Modal::Models(ModelsStep::Manual {
+                provider: "local".to_string(),
+                input: "half-typed".to_string(),
+                error: Some("boom".to_string()),
+            }),
+        );
+        let before = app.modal.nonce();
+
+        app.handle_modal_key(ctrl_key(KeyCode::Char('r')));
+
+        assert!(
+            matches!(
+                models_step(&app),
+                Some(ModelsStep::ModelList { provider, models, fetching: true, .. })
+                    if provider == "local" && models.is_empty()
+            ),
+            "retry must return to a fetching list, got {:?}",
+            models_step(&app)
+        );
+        assert!(
+            app.modal.nonce() > before,
+            "the retry must invalidate the superseded fetch"
+        );
     }
 
     #[test]
@@ -2758,6 +3466,61 @@ mod tests {
             Some("o3-mini")
         );
         assert!(app.settings.provider.is_none());
+        assert!(
+            app.status.contains("o3-mini")
+                && app.status.contains("openai")
+                && app.status.contains("not verified"),
+            "a blindly typed id must not be reported as verified: {}",
+            app.status
+        );
+    }
+
+    /// The counterpart of the test above: an id picked off the provider's own list keeps the
+    /// plain, unqualified status, so the two cases stay distinguishable.
+    #[test]
+    fn a_picked_model_reports_the_plain_status() {
+        let mut app = test_app();
+        let _cleanup = TempSettings(app.settings_path.clone());
+        app.mode = Mode::Connected;
+        open(
+            &mut app,
+            Modal::Models(ModelsStep::ModelList {
+                provider: "openai".to_string(),
+                models: vec!["gpt-4o".to_string()],
+                selected: 0,
+                fetching: false,
+            }),
+        );
+
+        app.handle_modal_key(key(KeyCode::Enter));
+
+        assert_eq!(app.status, "Model set to gpt-4o");
+    }
+
+    /// `/model <id>` is a blindly typed id by definition — nothing checked it against the
+    /// provider's list — so its status must say so. This is the escape hatch the credential step
+    /// now points at, and a `verified: true` here would report the flat "Model set to o3" and
+    /// quietly imply the provider confirmed an id it has never seen.
+    #[tokio::test]
+    async fn the_model_command_reports_an_unverified_id() {
+        let mut app = test_app();
+        let _cleanup = TempSettings(app.settings_path.clone());
+        app.mode = Mode::Connected;
+        app.provider_info.id = "openai".to_string();
+
+        app.run_command("/model o3").await;
+
+        assert_eq!(
+            app.settings.models.get("openai").map(String::as_str),
+            Some("o3")
+        );
+        assert!(
+            app.status.contains("o3")
+                && app.status.contains("openai")
+                && app.status.contains("not verified"),
+            "/model must not claim a typed id was verified: {}",
+            app.status
+        );
     }
 
     /// A successful apply must re-derive `provider_info` from the updated settings. Asserting the
@@ -2816,50 +3579,13 @@ mod tests {
     }
 
     #[test]
-    fn opening_the_models_modal_replaces_an_open_connect_modal() {
-        let mut app = test_app();
-        open(
-            &mut app,
-            Modal::Connect(ConnectStep::ProviderList {
-                rows: vec![],
-                selected: 0,
-            }),
-        );
-        app.provider_info.offline = Some(OfflineReason::NothingConfigured);
-        app.enter_models();
-        assert!(
-            matches!(app.modal.current(), Some(Modal::Models(_))),
-            "only one modal can be open at a time"
-        );
-    }
-
-    #[test]
-    fn opening_a_second_modal_invalidates_the_first_modals_fetch() {
-        let mut app = test_app();
-        let stale = open(&mut app, Modal::Models(models_list_step(vec![], true)));
-        app.enter_connect();
-        app.handle_models_fetched(stale, "openai".to_string(), Ok(vec!["m".to_string()]));
-        assert!(
-            matches!(
-                app.modal.current(),
-                Some(Modal::Connect(ConnectStep::ProviderList { .. }))
-            ),
-            "a fetch from the replaced modal must not reach the new one"
-        );
-    }
-
-    #[test]
     fn closing_the_models_modal_invalidates_an_in_flight_fetch() {
         let mut app = test_app();
         app.mode = Mode::Connected;
         let nonce = open(&mut app, Modal::Models(models_list_step(vec![], true)));
         app.handle_modal_key(key(KeyCode::Esc));
         assert!(app.modal.current().is_none());
-        assert_ne!(
-            app.modal.nonce(),
-            nonce,
-            "the in-flight fetch must be invalidated"
-        );
+        assert_ne!(app.modal.nonce(), nonce);
     }
 
     #[tokio::test]

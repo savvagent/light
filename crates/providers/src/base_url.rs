@@ -470,6 +470,41 @@ mod tests {
     }
 
     #[test]
+    fn the_completion_client_carries_no_total_deadline() {
+        // The bound on the model-list fetch is a per-REQUEST deadline (see `models::ListBounds`),
+        // deliberately not a client-level one: the same `build_http_client` serves completion
+        // requests, where a long generation is legitimate. This test is what makes "scoped to the
+        // model-list calls" checkable rather than merely claimed.
+        //
+        // Scoped to a **total** deadline on purpose. Asserting the absence of every timeout would
+        // cement "completions are unbounded" as a deliberate invariant, which it is not:
+        // `read_timeout` (idle-between-bytes, which does not cut off a slow but progressing
+        // generation) and `connect_timeout` are both legitimate future additions here.
+        for base in ["https://api.openai.com", "http://127.0.0.1:8080"] {
+            let client = build_http_client(base);
+            // reqwest renders a `reqwest::config::TotalTimeout` field in `Client`'s Debug only when
+            // one is configured. Best-effort only: `Client`'s Debug is not a stable interface, and
+            // it renders `connect_timeout` not at all (that field is on `ClientBuilder`'s Debug),
+            // so this half cannot even see the knob the alternatives above would use. The
+            // structural `Request::timeout().is_none()` assertion below carries the real weight.
+            let rendered = format!("{client:?}").to_lowercase();
+            assert!(
+                !rendered.contains("totaltimeout"),
+                "the completion client must carry no total deadline: {rendered}"
+            );
+            // The structural half, on stable public API: a request built from it has none either.
+            let request = client
+                .get(join_url(base, "/v1/chat/completions"))
+                .build()
+                .expect("a validated base must build a request");
+            assert!(
+                request.timeout().is_none(),
+                "a completion request must carry no deadline"
+            );
+        }
+    }
+
+    #[test]
     fn join_url_produces_exactly_one_separator() {
         for suffix in ["/v1/chat/completions", "/chat/completions"] {
             // No trailing slash on the base.
