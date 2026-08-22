@@ -168,3 +168,52 @@ key, and unverified status string. **No public API change.**
       rather than skipping it.
 - [x] Format and commit: `cargo fmt --all` then
       `git commit -m "tui: branch the /models modal on the fetch error class"`.
+
+### Task 2: PR review round (added after review of PR #55)
+
+Seven reviews (rust-pro, type-design-analyzer, code-reviewer, security-auditor,
+silent-failure-hunter, pr-test-analyzer, architect) landed blocking findings that changed the
+design. Spec §11 records each deviation and why. Grouped as three commits.
+
+**Files:** `crates/tui/src/app.rs`, `crates/tui/src/i18n.rs`, `crates/tui/Cargo.toml`, this plan,
+the spec.
+
+- [x] **`tui: size the popup from wrapped rows, not logical lines`** — `draw_popup` measures with
+      `Paragraph::line_count` (enabling ratatui's `unstable-rendered-line-info` feature) instead of
+      `body.len()`, and scrolls `focus` in wrapped rows. Two `TestBackend` tests, both verified to
+      fail against the old sizing. Closes #57, which was filed as a follow-up and turned out to be
+      load-bearing: the credential step's remedy was clipped on every real 401.
+- [x] **`tui: bound the provider error text at the fetch boundary`** — `summarize_provider_error`
+      (first line, control characters stripped, 120-char cap) applied in the single
+      `fetch_error(provider, &err)` constructor, so the `/connect` modal inherits the bound. Split
+      the no-key arm into `fetch_with_key` and the Ollama class forcing into `class_for_provider`
+      so both are testable without the process environment. Rebuilt all four network tests on an
+      explicit `no_proxy()` + timeout client.
+- [x] **`tui: keep the models modal usable when a fetch fails`** — trusted rows drawn first;
+      `Ctrl+R` on `Credentials` and on a settled empty list; `Ctrl+Shift+R` handled; `/model <id>`
+      named in the remedy; `models.footer_retry` in EN + ES; `push_log` on the `Err` arm; named
+      variants in `models_apply_target`; ES footer shortened; footer width test.
+- [x] Rebuild both render tests through `handle_models_fetched` with a real `reqwest` error — a
+      wiremock 401 and a refused connection — asserting the trusted rows **and** that the provider
+      message survives in full. The originals asserted against states production cannot produce
+      (a 37-char hand-written error; `models_manual_step`'s unreachable `error: None`).
+- [x] Add the tests that kill the four mutations the analyzer found surviving: `MissingKey → Fetch`
+      in the no-key arm, the Ollama forced class, `set_model`'s `verified: false`, and the
+      late-result guard narrowed to `result.is_ok() && …`.
+- [x] Re-run each of those four mutations by hand and confirm each now fails, then restore.
+- [x] Run `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+      `cargo fmt --all --check` — all clean.
+- [x] Update the spec: scope, Assumption 1 (the semver-major claim is withdrawn — an additive seam
+      in `crates/providers` is semver-minor), Assumption 5 (reversed), §5.2/§5.3/§5.5, §6, §7, §9,
+      §10, and a new §11 recording all ten deviations.
+- [x] **Out-of-band surfaces:** none. `Dockerfile`/`fly.toml`, `web/`, and
+      `crates/persistence/migrations/` are unchanged.
+
+**Deferred by the coordinator to separate issues, deliberately not in this PR:** the remedy being
+inert against an env-sourced key (`/key` writes the keyring but `resolve_key` prefers the env var;
+`/connect` bypasses `resolve_key` via `key_override`); `/key <provider>` reporting success without
+verifying; `error_for_status()` discarding the response body before classification sees Gemini's
+`"API key not valid"`; `verified` not surviving a restart (`Settings.models` is
+`BTreeMap<String, String>`); `/ask`'s `Err(e) => Err(e.to_string())` dropping the source chain;
+`Ctrl+R` discarding typed input on retry; and a cross-crate classification test via
+`OPENAI_BASE_URL` (needs `unsafe` env mutation, which races the rest of the test binary).
