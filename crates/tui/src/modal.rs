@@ -135,6 +135,19 @@ pub(crate) enum ModalApply {
     Model { provider: String, model: String },
 }
 
+/// Which `UiEvent` a spawned model-list fetch reports back on.
+///
+/// Carried out of [`Modal::fetch_target`] by the state that asked for the fetch, so the sink is
+/// decided by the same match that decided there was a fetch at all — never re-derived from `App`'s
+/// state after the fact, which would be correct only for as long as nothing else had moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FetchSink {
+    /// `UiEvent::ConnectModels` — filled into the `/connect` modal's list.
+    Connect,
+    /// `UiEvent::ModelsFetched` — filled into the `/models` modal's list.
+    Models,
+}
+
 /// The result of stepping any modal: advance to a new state, commit a [`ModalApply`], or close.
 ///
 /// `Apply` carries what it commits rather than naming it for the caller to look up again. That
@@ -159,21 +172,40 @@ impl Modal {
         }
     }
 
-    /// The provider whose model list this state is waiting on, or `None`. Comparing this across a
-    /// transition is what starts a fetch exactly once, on the step that begins waiting.
-    pub(crate) fn fetch_target(&self) -> Option<&str> {
+    /// The provider whose model list this state is waiting on, and where the result must be
+    /// delivered. Comparing this across a transition is what starts a fetch exactly once, on the
+    /// step that begins waiting.
+    ///
+    /// Every variant is spelled out rather than falling through a `_ => None`: a modal or step
+    /// added later must say here whether it fetches, and the compiler asks. A catch-all would
+    /// answer "no fetch" on its behalf, and the failure would be a list that loads forever.
+    pub(crate) fn fetch_target(&self) -> Option<(&str, FetchSink)> {
         match self {
             Modal::Connect(ConnectStep::ModelList {
                 provider,
                 fetching: true,
                 ..
-            })
-            | Modal::Models(ModelsStep::ModelList {
+            }) => Some((provider.as_str(), FetchSink::Connect)),
+            Modal::Models(ModelsStep::ModelList {
                 provider,
                 fetching: true,
                 ..
-            }) => Some(provider.as_str()),
-            _ => None,
+            }) => Some((provider.as_str(), FetchSink::Models)),
+            Modal::Help
+            | Modal::Connect(
+                ConnectStep::ProviderList { .. }
+                | ConnectStep::KeyEntry { .. }
+                | ConnectStep::ModelList {
+                    fetching: false, ..
+                },
+            )
+            | Modal::Models(
+                ModelsStep::ModelList {
+                    fetching: false, ..
+                }
+                | ModelsStep::Manual { .. }
+                | ModelsStep::Offline,
+            ) => None,
         }
     }
 
@@ -1560,7 +1592,8 @@ mod tests {
     fn only_a_fetching_list_names_a_fetch_target() {
         assert_eq!(
             Modal::Models(models_list_step(vec![], true)).fetch_target(),
-            Some("openai")
+            Some(("openai", FetchSink::Models)),
+            "the models modal names its own sink, not the connect one"
         );
         assert_eq!(
             Modal::Models(models_list_step(vec!["m".into()], false)).fetch_target(),
@@ -1570,6 +1603,15 @@ mod tests {
             Modal::Connect(ConnectStep::ProviderList {
                 rows: vec![],
                 selected: 0
+            })
+            .fetch_target(),
+            None
+        );
+        assert_eq!(
+            Modal::Connect(ConnectStep::KeyEntry {
+                rows: vec![],
+                provider: "openai".into(),
+                input: String::new(),
             })
             .fetch_target(),
             None
@@ -1585,8 +1627,11 @@ mod tests {
                 from_key: false,
             })
             .fetch_target(),
-            Some("openai")
+            Some(("openai", FetchSink::Connect)),
+            "the connect modal names its own sink, not the models one"
         );
+        assert_eq!(Modal::Models(models_manual_step("m")).fetch_target(), None);
+        assert_eq!(Modal::Models(ModelsStep::Offline).fetch_target(), None);
     }
 
     #[test]

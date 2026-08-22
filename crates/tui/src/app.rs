@@ -32,8 +32,8 @@ use crate::api::{Api, ApiError};
 use crate::browser;
 use crate::config::Config;
 use crate::modal::{
-    ConnectStep, Modal, ModalApply, ModalContext, ModalHost, ModalTransition, ModelsStep,
-    ProviderRow, fetch_model_list, mask,
+    ConnectStep, FetchSink, Modal, ModalApply, ModalContext, ModalHost, ModalTransition,
+    ModelsStep, ProviderRow, fetch_model_list, mask,
 };
 use crate::provider::ProviderInfo;
 use crate::selection::takes_key;
@@ -616,10 +616,12 @@ impl App {
 
     /// Open `modal`, replacing any other, and start its model-list fetch if it is waiting on one.
     fn open_modal(&mut self, modal: Modal, key: Option<String>) {
-        let target = modal.fetch_target().map(str::to_string);
+        let target = modal
+            .fetch_target()
+            .map(|(provider, sink)| (provider.to_string(), sink));
         self.modal.open(modal);
-        if let Some(provider) = target {
-            self.begin_model_fetch(provider, key);
+        if let Some((provider, sink)) = target {
+            self.begin_model_fetch(provider, sink, key);
         }
     }
 
@@ -667,28 +669,29 @@ impl App {
     }
 
     /// Fetch a provider's model list off the UI loop for the open modal. The nonce claimed here is
-    /// what makes a result that outlives its modal discardable; the open modal decides which event
-    /// carries the answer back.
-    fn begin_model_fetch(&mut self, provider: String, key: Option<String>) {
+    /// what makes a result that outlives its modal discardable.
+    ///
+    /// `sink` comes from the same [`Modal::fetch_target`] that named `provider`, so which event
+    /// carries the answer back is decided by the state that asked for the fetch rather than by
+    /// inspecting `self.modal` once the task is already being spawned.
+    fn begin_model_fetch(&mut self, provider: String, sink: FetchSink, key: Option<String>) {
         let nonce = self.modal.next_fetch_nonce();
-        let for_connect = matches!(self.modal.current(), Some(Modal::Connect(_)));
         let events = self.events.clone();
         let store = self.store.clone();
         let lang = self.config.lang;
         tokio::spawn(async move {
             let result = fetch_model_list(&provider, key, store.as_ref(), lang).await;
-            let event = if for_connect {
-                UiEvent::ConnectModels {
+            let event = match sink {
+                FetchSink::Connect => UiEvent::ConnectModels {
                     nonce,
                     provider,
                     result,
-                }
-            } else {
-                UiEvent::ModelsFetched {
+                },
+                FetchSink::Models => UiEvent::ModelsFetched {
                     nonce,
                     provider,
                     result,
-                }
+                },
             };
             let _ = events.send(event);
         });
@@ -856,15 +859,23 @@ impl App {
             fetch_key = Some(key_value);
         }
 
-        let before = current.fetch_target().map(str::to_string);
+        let before = current
+            .fetch_target()
+            .map(|(provider, sink)| (provider.to_string(), sink));
         match transition {
             ModalTransition::Close => self.modal.close(),
             ModalTransition::Apply(apply) => self.apply_and_close_modal(apply),
             ModalTransition::Step(next) => {
-                let after = next.fetch_target().map(str::to_string);
+                let after = next
+                    .fetch_target()
+                    .map(|(provider, sink)| (provider.to_string(), sink));
                 self.modal.replace_step(next);
-                if let Some(provider) = after.filter(|a| Some(a) != before.as_ref()) {
-                    self.begin_model_fetch(provider, fetch_key);
+                // Only a step that *begins* waiting on a list starts a fetch. A step that keeps
+                // waiting on the same one — arrow keys on a list still loading — must not respawn
+                // it: that would discard the in-flight result and, on the key-entry path, refetch
+                // without the key the user just typed.
+                if let Some((provider, sink)) = after.filter(|a| Some(a) != before.as_ref()) {
+                    self.begin_model_fetch(provider, sink, fetch_key);
                 }
             }
         }
