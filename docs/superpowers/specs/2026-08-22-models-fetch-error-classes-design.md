@@ -160,15 +160,21 @@ ModelsStep::Credentials { provider: String, error: String }
 
 Rendered by `draw_models` as: the failure message (red), a blank line, then
 `models.credentials_hint` (dark gray) — "Typing a model id can't fix this. Use /connect, or
-/key set {provider} <key>". Footer reuses the existing `models.footer_offline` ("Esc: close").
-No input box, no list, `focus: None`.
+/key {provider}". Footer reuses the existing `models.footer_offline` ("Esc: close"). No input box,
+no list, `focus: None`.
+
+The hint's command syntax is taken from `parse_key_command` (`app.rs:2464`), which accepts `/key`
+(list), `/key <provider>` (masked entry) and `/key <provider> clear` — **not** `/key set …`. Naming
+a command that does not exist would be the same class of misdirection this issue exists to fix.
 
 `models_step_next` for `Credentials`: `Esc | Enter → Close`, every other key → `Step(self.clone())`
 (matching `Offline`, the other terminal notice step). `models_apply_target` returns `None`, so the
 step can never persist anything.
 
 A small `ModelsStep::provider(&self) -> Option<&str>` accessor is added so the retry path can read
-the provider from any step without a three-arm match at the call site.
+the provider from any step without a three-arm match at the call site. It returns `None` only for
+`Offline`, which never emits `Retry`; `retry_models_fetch` returns early on `None` rather than
+panicking, so an unreachable case stays inert instead of aborting the UI loop.
 
 ### 5.3 Retry
 
@@ -202,7 +208,7 @@ Call sites: `apply_and_close_connect` → `true` (picked from a fetched list);
 |---|---|
 | `status.model_set_unverified` | `Model set to {model} — not verified against {provider}` |
 | `models.auth_rejected` | `{provider} rejected the credential: {error}` |
-| `models.credentials_hint` | `Typing a model id can't fix this. Use /connect, or /key set {provider} <key>` |
+| `models.credentials_hint` | `Typing a model id can't fix this. Use /connect, or /key {provider}` |
 | `models.manual_unverified` | `Type a model id to use anyway — it won't be checked against {provider}` (replaces `models.manual`) |
 | `models.footer_manual` | `Enter: save unverified · Ctrl+R: retry · Esc: close` (value updated) |
 
@@ -217,6 +223,7 @@ and is kept green.
 | Successful but **empty** list | Unchanged — stays a `ModelList` with the "no models reported" notice. An empty list is not a failure. |
 | Late result for a superseded fetch | Unchanged — `models_nonce` guard drops it. Retry bumps the nonce, so a slow first response cannot overwrite the retry's state. |
 | Late result while the user is typing in `Manual` | Unchanged — `handle_models_fetched` only accepts results while the step is `ModelList { fetching: true }`, so typed input is never clobbered. Retry deliberately leaves `Manual`, discarding the partial id; that is the user's explicit action. |
+| Late result while the step is `Credentials` | Dropped by the same `ModelList { fetching: true }` guard, so a slow response cannot replace the credential notice with a list fetched under a key that was already refused. |
 | Session lost mid-fetch | Unchanged — `dismiss_modals` clears the modal and bumps the nonce. `Credentials` needs no special handling. |
 | Ollama (keyless) | Never `MissingKey` (no key is resolved); a refused connection to localhost is `Fetch`, so retry + unverified manual is offered. Correct: `ollama serve` may simply not be running yet. |
 | `unknown provider '<x>'` bail from `list_models_at` | `Fetch`. A programming error surfaced as a retryable failure is the status quo; no new dead end. |
@@ -241,9 +248,11 @@ All in `crates/tui/src/app.rs`'s `#[cfg(test)] mod tests`, offline-deterministic
 7. `class_for_status`: `401`/`403` → `Auth`; `400`/`404`/`429`/`500`/`None` → `Fetch`.
 8. `classify_fetch_error` against a real `reqwest` error: a wiremock 401 → `Auth`, a 500 → `Fetch`,
    a 401 wrapped in `.context(...)` → `Auth` (proves chain traversal), a connection-refused error →
-   `Fetch`. Requires `wiremock` as a `crates/tui` **dev**-dependency (already in `Cargo.lock` via
-   `crates/providers`; no new third-party code enters the build graph, and nothing ships in the
-   binary).
+   `Fetch`. Requires `wiremock` as a `crates/tui` **dev**-dependency — a `[dev-dependencies]`
+   section is added to `crates/tui/Cargo.toml` (the crate has none today). `wiremock 0.6` is already
+   in `Cargo.lock` via `crates/providers`, so no new third-party code enters the graph;
+   `cargo build --workspace` and the shipped binary are unaffected because dev-dependencies are
+   compiled only for test targets.
 9. `i18n::es_mirrors_en_exactly` (existing) covers EN/ES parity for the new keys.
 
 ## 8. Goal & success criteria
