@@ -102,16 +102,22 @@ between commits, which `clippy -D warnings` rejects as dead code.
       - `an_oversized_body_is_refused_instead_of_buffered`: mount `/v1/models` returning a JSON body
         comfortably larger than a tight cap (e.g. 4096 ids), call
         `list_models_at("openai", &server.uri(), "k", ListBounds { max_body_bytes: 512, ..tight })`,
-        assert `is_err()`, assert the message contains `"512"` and `"cap"`, and assert the message
-        does **not** contain any model id from the body (no body content in the error).
-      - `a_body_at_the_cap_is_still_accepted`: build a body, set `max_body_bytes` to exactly
-        `body.len()`, assert `Ok` — the boundary is `>`, not `>=`.
+        assert `is_err()`, and assert against the **full** anyhow chain (`format!("{err:#}")`, not
+        `err.to_string()`, which shows only the outermost message): it contains `"512"` and `"cap"`,
+        and it contains **no** model id from the body — no response content may reach an error the
+        modal renders.
+      - `a_body_at_the_cap_is_still_accepted`: respond with `set_body_string(BODY)` where `BODY` is a
+        JSON **string literal** (so its byte length is knowable — `set_body_json` never hands the
+        implementer the serialized bytes), set `max_body_bytes: BODY.len()`, and assert `Ok`. This
+        pins the boundary as `>` rather than `>=`.
       - `an_over_long_model_list_is_truncated`: mount 20 ids named so that sorted order is
         unambiguous (e.g. `m00`..`m19`), call with `max_models: 5`, assert the result is exactly
         `["m00","m01","m02","m03","m04"]` — proving the cap is applied *after* the sort, not to
         arrival order.
       - `a_stalled_endpoint_fails_at_the_deadline`: mount a response with
-        `ResponseTemplate::new(200).set_delay(Duration::from_secs(30))`, call with
+        `ResponseTemplate::new(200).set_delay(Duration::from_secs(5))` (comfortably past the
+        deadline, while keeping a *failing* run — one where the timeout was not applied — bounded at
+        5 s rather than 30), call with
         `timeout: Duration::from_millis(150)`, assert `is_err()`, and identify the timeout
         **structurally**:
         `err.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_timeout)`.
@@ -120,8 +126,8 @@ between commits, which `clippy -D warnings` rejects as dead code.
         `ListBounds::DEFAULT.timeout == Duration::from_secs(15)`,
         `max_body_bytes == 2 * 1024 * 1024`, `max_models == 1_000` — so a later accidental widening
         is a failing test rather than a silent regression.
-      - Update the seven existing `list_models_at` / `list_ollama_models_at` call sites in that module
-        to pass `ListBounds::DEFAULT` (`anthropic_lists_models_with_required_version_header`,
+      - Update the **nine** existing `list_models_at` / `list_ollama_models_at` call sites in that
+        module to pass `ListBounds::DEFAULT` (`anthropic_lists_models_with_required_version_header`,
         `openai_lists_models_with_bearer`, `gemini_lists_models_and_strips_the_models_prefix`,
         `deepseek_lists_models_on_the_models_path`, `model_lists_are_deduped_and_stable_sorted`,
         `ollama_lists_tags_extracting_names_with_tags`, `an_auth_error_is_surfaced_as_an_error`,
@@ -154,7 +160,7 @@ between commits, which `clippy -D warnings` rejects as dead code.
         headers and `.send()`. Comment *why* it is per-request and not on the client: the same
         `build_http_client` serves completions, where a long generation is legitimate.
       - Add `async fn read_capped(mut resp: reqwest::Response, max_bytes: usize) -> anyhow::Result<Vec<u8>>`
-        that starts from an **empty** `Vec` (never reserving from an attacker-supplied length), loops
+        (`mut` is required — `Response::chunk` takes `&mut self`) that starts from an **empty** `Vec` (never reserving from an attacker-supplied length), loops
         `while let Some(chunk) = resp.chunk().await?`, bails with
         `anyhow::bail!("model list response exceeded the {max_bytes}-byte cap; refusing to buffer it")`
         when `buf.len() + chunk.len() > max_bytes`, and otherwise `extend_from_slice`. Document that
@@ -171,7 +177,13 @@ between commits, which `clippy -D warnings` rejects as dead code.
         subset deterministic.
 - [ ] Run `cargo test -p light-factory-providers` — all tests green, including the nine updated
       pre-existing ones.
-- [ ] Run `cargo clippy -p light-factory-providers --all-targets -- -D warnings` — clean.
+- [ ] Verify the "no public API change" claim rather than remembering it:
+      `grep -rn "normalize(\|list_models_at\|list_ollama_models_at" crates/ --include="*.rs"` must
+      show hits only inside `crates/providers/src/models.rs`.
+- [ ] Run `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` — both
+      clean. This is what makes the Task Order rationale's "a bisect between the two commits still
+      builds" a verified statement rather than an assumption: `crates/tui` calls the public wrappers,
+      whose signatures did not change.
 - [ ] Format and commit: `cargo fmt --all` then
       `git commit -m "providers: bound and time-limit the model-list fetch"`.
       No attribution trailer of any kind.
