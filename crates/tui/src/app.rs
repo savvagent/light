@@ -848,8 +848,13 @@ impl App {
             Modal::Connect(ConnectStep::KeyEntry {
                 provider, input, ..
             }),
+            // `fetching: true` is pinned alongside `from_key: true` because it is what makes the
+            // step name a `fetch_target`. If the two ever diverge, writing the key here while no
+            // fetch starts would strand the user on a list that never loads.
             ModalTransition::Step(Modal::Connect(ConnectStep::ModelList {
-                from_key: true, ..
+                from_key: true,
+                fetching: true,
+                ..
             })),
         ) = (&current, &transition)
         {
@@ -1972,7 +1977,11 @@ mod tests {
     }
 
     /// Open a modal directly on the host, bypassing `App::open_modal` (which would spawn a fetch
-    /// outside a runtime), and return the nonce a fetch started for it would carry.
+    /// outside a runtime), and return the host's nonce afterwards.
+    ///
+    /// That is the nonce a *result* must carry to be accepted while nothing else has moved — not
+    /// the nonce a real fetch would carry, which is one higher: production `open_modal` bumps once
+    /// to open and again in `begin_model_fetch`.
     fn open(app: &mut App, modal: Modal) -> u64 {
         app.modal.open(modal);
         app.modal.nonce()
@@ -2307,8 +2316,10 @@ mod tests {
         assert_ne!(app.modal.nonce(), 0, "the fetch nonce must be bumped");
     }
 
+    /// Was `closing_the_modal_returns_to_the_mode_it_was_opened_from`: there is no restore left to
+    /// assert, because a modal no longer disturbs the mode it is opened over.
     #[test]
-    fn closing_the_modal_returns_to_the_mode_it_was_opened_from() {
+    fn closing_the_modal_leaves_the_base_mode_undisturbed() {
         let mut app = test_app();
         app.mode = Mode::Engine;
         open(
@@ -2749,8 +2760,9 @@ mod tests {
         assert!(parse_key_command("/keyx").is_none());
     }
 
+    /// Was `help_modal_opens_and_restores_the_prior_mode`.
     #[test]
-    fn help_modal_opens_and_restores_the_prior_mode() {
+    fn help_modal_opens_without_disturbing_the_base_mode() {
         let mut app = test_app();
         assert!(matches!(app.mode, Mode::SignIn));
         app.open_help();
@@ -2762,8 +2774,9 @@ mod tests {
         assert!(matches!(app.mode, Mode::SignIn));
     }
 
+    /// Was `help_modal_returns_to_the_mode_it_was_opened_from`.
     #[test]
-    fn help_modal_returns_to_the_mode_it_was_opened_from() {
+    fn help_modal_closes_without_disturbing_the_base_mode() {
         let mut app = test_app();
         app.mode = Mode::Connected;
         app.open_help();

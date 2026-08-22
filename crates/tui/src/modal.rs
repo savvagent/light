@@ -1,8 +1,8 @@
 //! The modal overlays layered over the TUI's screens: `/connect`, `/models`, and help.
 //!
 //! Each modal is a state enum plus a pure key-transition function, so the whole state machine is
-//! testable without a terminal, a keyring, or the network. `App` owns exactly one of them at a
-//! time.
+//! testable without a terminal, a keyring, or the network. `App` owns at most one of them at a
+//! time — the normal state is none open, which is what `Option<Modal>` says.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use light_factory_providers::{OfflineReason, list_models, list_ollama_models};
@@ -32,7 +32,14 @@ pub(crate) struct ProviderRow {
 }
 
 /// The connect modal's step. `rows` is carried through every step so "back" navigation can
-/// reconstruct the provider list without re-querying the keyring.
+/// reconstruct the provider list without re-querying the keyring — which is what keeps
+/// [`connect_step_next`] pure.
+///
+/// The cost of that purity: `rows` is a snapshot taken when the modal opened. After a key is
+/// written on [`ConnectStep::KeyEntry`], stepping back to [`ConnectStep::ProviderList`] still
+/// renders that provider as unconnected. Re-reading the keyring to correct the display would put
+/// I/O back into the transition; fix it, if it is ever worth fixing, by restating `rows` at the
+/// call site that owns the store, not from inside here.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum ConnectStep {
     ProviderList {
@@ -51,6 +58,10 @@ pub(crate) enum ConnectStep {
         selected: usize,
         fetching: bool,
         error: Option<String>,
+        /// Whether this list was reached by typing a key rather than from an already-connected
+        /// provider. It decides where Esc goes: back to [`ConnectStep::KeyEntry`] when
+        /// `takes_key(provider) && (from_key || error.is_some())`, so a user who has just mistyped
+        /// a key lands on the field to retype it instead of on the provider list.
         from_key: bool,
     },
 }
@@ -221,7 +232,9 @@ impl Modal {
 }
 
 /// Pure step-transition for the help modal. Esc and Ctrl-P close it; every other key is ignored,
-/// so the screen underneath cannot be driven from behind the overlay.
+/// so the screen underneath cannot be driven from behind the overlay. "Every other key" is every
+/// key that reaches here — the global Ctrl-C quit is intercepted by `App::handle_modal_key` before
+/// any modal's transition runs.
 fn help_step_next(key: KeyEvent) -> ModalTransition {
     match key.code {
         KeyCode::Esc => ModalTransition::Close,
@@ -632,7 +645,9 @@ pub(crate) struct PopupView {
     pub(crate) title: String,
     pub(crate) body: Vec<Line<'static>>,
     pub(crate) footer: String,
-    /// A `body` row that must stay on screen; the body scrolls to keep it visible.
+    /// A `body` row that must stay on screen. [`draw_popup`] scrolls to keep it visible **as long
+    /// as no body line wraps** — it counts logical lines, while ratatui counts wrapped rows. Tracked
+    /// as #57; see the matching note on [`draw_popup`].
     pub(crate) focus: Option<usize>,
 }
 
@@ -903,8 +918,15 @@ fn draw_full_screen(frame: &mut Frame, area: Rect, view: FullScreenView) {
 }
 
 /// Render a centered, bordered popup, clearing what is underneath. The footer is pinned to the
-/// bottom so it stays visible, and `view.focus` names a body row that must remain on screen — the
-/// body scrolls to keep it visible when the list is taller than the terminal.
+/// bottom so it stays visible, and `view.focus` names a body row the body scrolls to bring into
+/// view when the list is taller than the terminal.
+///
+/// **That scroll is correct only while no body line wraps.** The offset is counted in logical
+/// lines, but `Paragraph::scroll` counts *wrapped* rows. The inner width is 58 columns (less on a
+/// narrow terminal), so a remote-supplied model id longer than that — or any terminal under about
+/// 62 columns — makes rows occupy two wrapped rows each and the highlighted row can drift off the
+/// bottom as the user presses Down. The height below is computed from the same logical count and
+/// is wrong in the same way. Both are #57; fix them together.
 ///
 /// The one place a popup's geometry is decided, reached from the one call site in [`draw_modal`].
 fn draw_popup(frame: &mut Frame, area: Rect, view: PopupView) {
@@ -942,8 +964,12 @@ fn draw_popup(frame: &mut Frame, area: Rect, view: PopupView) {
     let body_height = inner.height.saturating_sub(1);
     if body_height > 0 {
         // Scroll just far enough to bring the focused row into view.
+        // `try_from` for the same reason the height clamps in `usize`: `row` indexes a
+        // remote-supplied list, and `as u16` would wrap a long one back to the top of the popup.
         let offset = match focus {
-            Some(row) => (row as u16).saturating_sub(body_height.saturating_sub(1)),
+            Some(row) => u16::try_from(row)
+                .unwrap_or(u16::MAX)
+                .saturating_sub(body_height.saturating_sub(1)),
             None => 0,
         };
         frame.render_widget(
