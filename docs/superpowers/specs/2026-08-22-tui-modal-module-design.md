@@ -78,7 +78,6 @@ can be built to them:
 - One key-routing seam, one draw seam, one fetch-start seam, one close seam.
 - `ConnectTransition` is replaced by the `Close`/`Apply`/`Step` shape carried forward from
   `/models`, so `/connect` no longer re-inspects its step after the fact to decide whether to apply.
-- The two identical `UiEvent` fetch-result variants collapse to one.
 - Every existing modal test moves with the code it covers and keeps passing.
 
 **Out:**
@@ -368,19 +367,21 @@ fetch), `open_help` opens `Modal::Help` (likewise).
 
 **Fetch.** `begin_fetch` (`app.rs:805`, connect) and `begin_models_fetch` (`app.rs:884`, models) are
 byte-for-byte identical apart from the key override and the `UiEvent` variant they send. They
-collapse to one `begin_model_fetch(&mut self, provider: String, key: Option<String>)`. The two
-`UiEvent` variants collapse with them:
+collapse to one `begin_model_fetch(&mut self, provider: String, key: Option<String>)`, which claims
+its nonce from `ModalHost` and posts the event the open modal expects.
 
-```rust
-UiEvent::ModelsFetched { nonce: u64, provider: String, result: Result<Vec<String>, String> }
-```
-
-`UiEvent::ConnectModels` is deleted and its `run`-loop arm merges into the `ModelsFetched` arm.
-`handle_connect_models` + `handle_models_fetched` collapse to one `handle_models_fetched` that
-checks the nonce once, then matches the open modal and applies the connect-specific or
-models-specific fill. The two fills stay distinct — connect shows a fetch error **inline** in its
-model-list step, models falls back to a **manual entry** step — because that difference is real
-behaviour, not duplication.
+**The two `UiEvent` variants are deliberately *not* merged.** An earlier draft of this spec merged
+`UiEvent::ConnectModels` into `UiEvent::ModelsFetched` on the grounds that their payloads were
+identical. Sibling PR #55 (issue #47, which merges before this branch) makes them genuinely
+different: `ModelsFetched` gains a richer payload (`FetchFailure`/`FetchError`/`ModelChoice`) so the
+models modal can classify an auth failure apart from a network failure, while `ConnectModels`
+deliberately keeps its `Result<Vec<String>, String>` so the connect modal is untouched. Two
+differently-typed results are not duplication, and merging them here would have to be un-merged on
+the rebase. `handle_connect_models` and `handle_models_fetched` therefore both survive, each keeping
+its own fill — connect shows a fetch error **inline** in its model-list step, models falls back to a
+**manual entry** step — and both are now guarded by the one `ModalHost` nonce instead of two
+per-modal counters. The unification this change does deliver is the nonce, the launcher, and the
+close path.
 
 ### 4.5 The inert `*_return` fields
 
@@ -496,6 +497,15 @@ is implemented here.
 
 Merge order is #45 → #44 → #47 → this branch, so all three land first. Before the PR opens and
 again before it merges, this branch rebases onto `origin/master` and re-runs the full suite.
+**Issue #57 (`draw_popup` sizes from `body.len()`, not the wrapped line count).** Found by #47's
+worker; a body string wider than the popup's ~58-column inner width wraps to two rows, the height
+calculation counts it as one, and content is pushed off the bottom. **Not fixed here** — it is a
+behaviour change and separately tracked. This change is neutral-to-helpful for it: after the draw
+seam lands, `draw_popup` has exactly **one** call site and remains the only place the height is
+computed, so #57 is a localized fix inside `draw_popup` rather than an edit spread over three draw
+tails. The view builders deliberately do **not** compute or cap height; they only produce
+`PopupView { title, body, footer, focus }`.
+
 Conflict-resolution rule for the rebase: **their semantics win, this branch's structure wins** —
 a behaviour change they introduced is preserved, expressed through the structure introduced here.
 #45 is confined to `crates/tui/src/selection.rs` and cannot conflict.
@@ -537,9 +547,9 @@ a behaviour change they introduced is preserved, expressed through the structure
 4. **The two nonces merge into one.** Rationale: only one modal can be open, so one counter is
    sufficient; a merged counter also invalidates across a modal *switch*, which two counters did
    not. Strictly stronger, not observably different.
-5. **The two `UiEvent` fetch variants merge into one.** Rationale: they are structurally identical
-   and now share one `begin_model_fetch`; keeping two would keep the copy the issue objects to.
-   `UiEvent` is not a public API (§3, Out).
+5. **The two `UiEvent` fetch variants stay separate.** Rationale: sibling #47 gives them different
+   payloads (§4.4). They already share one launcher and one nonce; merging the variants themselves
+   would fight a change that merges first, for no structural gain.
 6. **`apply_and_close_modal` closes before persisting.** Rationale: that is the `/models` ordering
    the issue asks to carry forward, and the orderings are indistinguishable (§4.4).
 7. **No i18n change.** Rationale: no string is added, removed, or re-keyed; keys move file but not

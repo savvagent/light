@@ -5,8 +5,13 @@
 **Goal:** Extract the help/connect/models modal machinery out of `crates/tui/src/app.rs` into a new
 `crates/tui/src/modal.rs`, behind a single `App` field `modal: ModalHost` that makes "two modals open
 at once" unrepresentable — deleting seven `App` fields, the `Mode::Help` variant, four close paths,
-two fetch-start functions, two `UiEvent` variants and two transition enums, with **no change to modal
-behaviour**.
+two fetch-start functions and two transition enums, with **no change to modal behaviour**.
+
+> **Amended mid-flight (Task 2).** The plan originally also merged `UiEvent::ConnectModels` into
+> `UiEvent::ModelsFetched`. Sibling PR #55 (issue #47) gives the two results different payloads, so
+> they are no longer duplication and merging them would be un-merged on the rebase. Both variants and
+> both `handle_*` fills survive; they now share one launcher (`begin_model_fetch`) and one nonce
+> (`ModalHost`). See the spec §4.4 for the reasoning.
 
 **Architecture:** One `Modal` enum (`Help` / `Connect(ConnectStep)` / `Models(ModelsStep)`) wrapped
 in a `ModalHost { open: Option<Modal>, nonce: u64 }` that owns the stale-fetch counter, so
