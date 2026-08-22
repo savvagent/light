@@ -400,9 +400,22 @@ outright rather than re-derived. Justification, per the issue's "delete them or 
   state and would actually change behaviour in the `/connect`-while-signed-out case that
   `dismiss_modals` exists to prevent. Deleting is the change that provably preserves behaviour.
 
-The existing tests `closing_the_modal_returns_to_the_mode_it_was_opened_from` and
-`help_modal_returns_to_the_mode_it_was_opened_from` are the regression net for this and are kept
-verbatim (they assert on `app.mode`, which is now simply never disturbed).
+The existing tests are the regression net for this and are kept (they assert on `app.mode`, which
+is now simply never disturbed). They are renamed in the review round to
+`closing_the_modal_leaves_the_base_mode_undisturbed` and
+`help_modal_closes_without_disturbing_the_base_mode`, each carrying its old name in a doc line, so
+the names stop promising a restore that no longer happens without losing the grep path to master.
+
+**The distinction in the first two bullets is load-bearing and must not be flattened.**
+`connect_return`/`models_return` were inert *on master*. `help_return` was **not**: master's
+`open_help` is `self.help_return = self.mode; self.mode = Mode::Help;` — the assignment is the very
+next line, and `close_help`'s read was the only way back out of `Mode::Help`. `help_return` became
+inert *because* this change deletes the `Mode::Help` variant. Saying all three "were inert" reads
+as a claim about master and is false of the third; it is also the claim that masked the regression
+recorded in §11.1, and it is repeated in the body of follow-up issue #64, where the deferral of
+`Mode::Key` rests on it. `key_return` is load-bearing on master in *precisely* the same way
+`help_return` was — the reason #64 is deferred is that folding it in needs a `return_to` payload,
+not that help was different in kind.
 
 ### 4.6 Starting a fetch on a step
 
@@ -471,8 +484,20 @@ a fourth copy of the pattern.
    `self.connect.is_none()` and `draw` rendered both blocks sequentially. With one
    `Option<Modal>`, opening a modal replaces any other. Unreachable today by control-flow ordering,
    so no user-visible change; the point is that it is now unreachable by construction.
-2. **`connect_return` / `models_return` / `help_return` are deleted.** Provably inert (§4.5);
-   deleting them cannot change behaviour.
+2. **`connect_return` / `models_return` / `help_return` are deleted.** Inert at the point of
+   deletion (§4.5); deleting them cannot change behaviour. Note the asymmetry recorded there:
+   `help_return` was load-bearing on master and is made inert *by* this change.
+3. **A keypress on a still-loading connect list no longer respawns its fetch.** Undeclared in the
+   first draft of this spec and found independently by three reviewers. Master's
+   `handle_connect_key` fired a fetch on *any* step landing on `ModelList { fetching: true, .. }`,
+   and `connect_step_next`'s `Up`/`Down` arm carries `fetching` through — so every keypress while a
+   connect list was loading spawned a duplicate request, bumped the nonce, and discarded the
+   in-flight result. Each redundant request carried the provider API key, and terminal key-repeat
+   triggers it. Worse, the re-fetch passed `fetch_key = None`, dropping the key the user had just
+   typed in favour of `resolve_key`. The `after.filter(|a| Some(a) != before.as_ref())` guard in
+   `handle_modal_key` fixes it; `moving_the_cursor_while_a_connect_list_loads_does_not_refetch`
+   pins it. A genuine improvement, claimed here rather than left for a future bisection to blame
+   this change for an unconfessed delta.
 
 Everything else is required to be observably identical, and the moved tests are the check.
 
@@ -483,8 +508,9 @@ is implemented here.
 
 - **#44 (`models-fetch-bounds`)** stores the fetch `JoinHandle` and aborts it on close. `ModalHost`
   is exactly that seam: a third private field `fetch: Option<JoinHandle<()>>`, set by
-  `begin_model_fetch` (now **one** call site instead of two) and aborted in `ModalHost::close` and
-  `ModalHost::open` (now **one** close path instead of four). This is the same shape `leave_engine`
+  `begin_model_fetch` (now **one** call site instead of two) and aborted in `invalidate_fetch` —
+  see §11.2, which corrects an earlier statement of this landing spot that named only `open`/`close`
+  and would have leaked the task on the step-back path. This is the same shape `leave_engine`
   already uses for `engine_forward_task` (`app.rs:483`). The abort belongs in `ModalHost` rather
   than in `App` precisely so it cannot be forgotten on one of the close paths — which is the bug
   class #44 exists to close. On a rebase conflict, #44's abort semantics land inside `ModalHost`.
@@ -528,9 +554,13 @@ a behaviour change they introduced is preserved, expressed through the structure
    `*_return` fields deleted here), so it needs a `Modal::Key { return_to: Mode }` payload or an
    equivalent. Filing, not fixing, is the correct move per the workflow's "do not silently widen
    scope" rule.
-5. **Open: `Modal::covers_base()` is a per-variant exception**, not a uniform rule. It is the honest
-   encoding of today's behaviour (§2.1). If help is ever restyled as an overlay, the method goes
-   away; changing it now would be an unsanctioned behaviour delta.
+5. **Resolved in the review round: `covers_base` moved from `Modal` to `ModalView`.** It was stated
+   per modal *and* checked a second time, as `matches!(.., Modal::Help)`, for the status hint. Both
+   now come off the value that decides how the modal is painted: `ModalView::covers_base` is
+   `matches!(self, ModalView::FullScreen(_))`, and `Modal::hint_key` folds in the second case. That
+   removes the drift in which a modal claims to cover the base while rendering a `Popup`, which
+   would paint over a screen nobody drew — `draw_full_screen` deliberately does not `Clear`. Still
+   an exception rather than a uniform rule, but no longer one that can disagree with itself.
 6. **Not a risk: semver.** No public interface changes; `light-factory-tui`'s library surface
    (`lib.rs`: `credentials`, `engine_view`, `i18n`) is untouched. No `Cargo.toml` version bump.
 
@@ -558,3 +588,92 @@ a behaviour change they introduced is preserved, expressed through the structure
    code; the pure-transition tests follow `connect_step_next`/`models_step_next`/`help_lines` into
    `modal.rs`, while tests that drive an `App` (routing, apply, persistence, rendering) stay in
    `app.rs`. A move is not a deletion — the plan's final step re-counts them.
+
+## 11. Review-round design changes
+
+Seven reviews plus an architect review ran against the opened PR. Everything below changed the
+design, not just the code; the rest of the spec above is unchanged and still describes the target.
+
+### 11.1 A modal must be dismissed when the mode changes asynchronously
+
+The first draft wired `dismiss_modals` to the two synchronous session-loss paths only, and its
+comment claimed "a modal cannot float over the sign-in screen or swallow its keys." It could.
+`handle_device_result` reaches `Mode::SignIn` on error and `enter` reaches `Mode::Connected` on
+success, both asynchronously, and Ctrl-P is reachable from `Mode::Device` because `handle_key`'s
+Ctrl-P branch runs before the mode dispatch. Left open, `covers_base` suppresses the replacement
+screen entirely and `handle_modal_key` swallows every key but Ctrl-C.
+
+This was impossible on master, where help *was* `Mode::Help`, so assigning `self.mode` tore the
+overlay down. Decoupling help from `Mode` is what introduced it — which is exactly the claim §4.5
+now insists must not be flattened. Both asynchronous arrivals dismiss.
+
+### 11.2 The nonce bump *is* the fetch-invalidation event
+
+The first draft had three mutators disagreeing about invalidation: `close` early-returned when
+nothing was open, `replace_step` never bumped, `next_fetch_nonce` bumped directly. All three now
+route through one private `ModalHost::invalidate_fetch`, and `replace_step` bumps exactly when
+`Modal::fetch_target` changes across the step.
+
+The rule this establishes, and the reason it matters more than tidiness: **abort wherever the nonce
+is bumped.** #56's `JoinHandle` belongs in `ModalHost` with its `abort()` inside `invalidate_fetch`,
+which reaches all four mutators. Naming only `open`/`close` — as §8 originally did — misses the
+path `ProviderList → Enter → ModelList{fetching}` (task A spawned) `→ Esc → ProviderList` (no open,
+no close) `→ Enter → ModelList{fetching}` (task B spawned, handle overwritten), where task A runs to
+completion holding a connection whose headers carry the provider API key. #56 shipped a fix for
+precisely that path (`stepping_back_out_of_a_fetching_connect_list_aborts_the_fetch`); it must keep
+passing under this structure. `close` is unconditional for the same reason: a fetch outlives the
+modal that started it, so modal state is not evidence about fetch state.
+
+One consequence, recorded so nobody re-derives it: with `replace_step` bumping, every path to
+`begin_model_fetch` is already preceded by a bump, so `next_fetch_nonce()` and `nonce()` now return
+the same value there. `next_fetch_nonce` is kept anyway — it is the abort seam for #56, and it keeps
+the "each fetch carries a fresh generation" guarantee local to the launcher instead of contingent on
+what `replace_step` happens to do.
+
+### 11.3 `ModalTransition::Apply` carries what it commits
+
+A nullary `Apply` stated the rule "this step has something to commit" twice — in the transition arm
+and again in `Modal::apply_target` — and `apply_and_close_modal` re-read the modal to discover
+which. That second read happened after `self.store.set(..)` and interleaved with
+`self.modal.close()`, and it selected between commits of *different privilege*: `ModalApply::Provider`
+changes which service receives the user's prompts and key, `Model` only re-pins a model on the
+provider already active. The two statements could also disagree — `Modal::Help` returning `Apply`
+compiled, and the `None => {}` arm then closed the modal having committed nothing.
+
+`Apply(ModalApply)` makes it structural. Every arm producing one already had `provider`, `models`
+and `selected` in scope, so the payload is free; `Modal::apply_target` and `models_apply_target` are
+deleted, along with the duplicated enumeration of non-applying states that §4.3 had in both places.
+
+### 11.4 `fetch_target` names the sink, and has no catch-all
+
+`begin_model_fetch` chose its result event with `matches!(self.modal.current(), Some(Modal::Connect(_)))`
+— the same after-the-fact re-inspection this change removed from `/connect`'s apply path, and
+correct only by convention now that `replace_step` accepts any variant. `fetch_target` returns
+`Option<(&str, FetchSink)>`, so the sink is decided by the arm that decided there was a fetch at
+all. Its `_ => None` is gone: a fourth modal, or a fifth step, that should fetch would have fallen
+through it and simply never started one.
+
+### 11.5 The module points away from `app.rs`
+
+`modal.rs` imported `mask` and `takes_key` back out of `app.rs`, a cycle that makes the module
+unmovable — and a module that cannot be moved is not yet a layer. `takes_key` joins
+`resolve_key`/`key_status`/`REMOTE_IDS` in `crate::selection`, which it already wraps; `mask` moves
+into `modal.rs`, which is where key entry is heading under #64. The graph is now
+`app → modal → {selection, provider, i18n, credentials}`.
+
+### 11.6 #57 is fixed upstream, not here
+
+`draw_popup` sized its box from `body.len()` and scrolled `focus` by the same logical count, while
+ratatui counts wrapped rows. PR #55 fixed both (`4d98474`, closing #57) using
+`Paragraph::line_count` behind ratatui's `unstable-rendered-line-info` feature. This branch rebases
+onto that and carries it across the module move; the comments here that described the unfixed
+behaviour are replaced by #55's, not reverted to `body.len()`.
+
+### 11.7 Framing: state-space, not line count
+
+`app.rs` shrinks by ~1000 lines but `modal.rs` adds more than that back, so excluding tests this is
+net **+152 production lines**. The win this change trades on is state-space, not LOC: `App` fields
+44 → 38, one `Option<Modal>` in place of six fields, one draw seam in place of three, one nonce in
+place of two, one close path in place of four, and "two modals open at once" unrepresentable rather
+than merely unreached. Given ARCHITECTURE.md's note that the predecessor died of surface-area
+sprawl, the LOC framing would be the wrong claim as well as an indefensible one.
