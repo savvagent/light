@@ -14,6 +14,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
+// Two pure leaf helpers shared with the screens `App` draws outside a modal: `mask` also renders
+// the key-entry screen, `takes_key` also gates the `/key` command.
 use crate::app::{mask, takes_key};
 
 /// One row of the connect modal's provider list. Self-contained (id + connected flag) so the pure
@@ -263,7 +265,7 @@ impl ModalHost {
 }
 
 /// Move a list selection up (`-1`) or down (`+1`), wrapping at the ends.
-pub(crate) fn cycle_index(current: usize, len: usize, delta: isize) -> usize {
+fn cycle_index(current: usize, len: usize, delta: isize) -> usize {
     if len == 0 {
         return 0;
     }
@@ -280,7 +282,7 @@ pub(crate) fn cycle_index(current: usize, len: usize, delta: isize) -> usize {
 /// Pure step-transition for the connect modal: maps a key press in the current step to the next
 /// step (or close). No keyring, terminal, or network state — the `rows` carried in each step make
 /// "back" navigation total.
-pub(crate) fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ModalTransition {
+fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ModalTransition {
     match step {
         ConnectStep::ProviderList { rows, selected } => match key.code {
             KeyCode::Esc => ModalTransition::Close,
@@ -392,7 +394,7 @@ pub(crate) fn connect_step_next(step: &ConnectStep, key: KeyEvent) -> ModalTrans
 
 /// The `(provider, model)` pair a models-modal step would persist, or `None` when the step
 /// carries no usable selection (still fetching, an empty list, or a blank manual entry).
-pub(crate) fn models_apply_target(step: &ModelsStep) -> Option<(String, String)> {
+fn models_apply_target(step: &ModelsStep) -> Option<(String, String)> {
     match step {
         ModelsStep::ModelList {
             provider,
@@ -448,7 +450,7 @@ pub(crate) async fn fetch_model_list(
 
 /// Pure step-transition for the models modal: maps a key press in the current step to the next
 /// step, apply, or close. No network/keyring/terminal state.
-pub(crate) fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModalTransition {
+fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModalTransition {
     match step {
         ModelsStep::Offline => match key.code {
             KeyCode::Esc | KeyCode::Enter => ModalTransition::Close,
@@ -509,7 +511,7 @@ pub(crate) fn models_step_next(step: &ModelsStep, key: KeyEvent) -> ModalTransit
 }
 /// Assemble the help modal body for `locale`: section headers followed by their indented entries,
 /// with a blank line between sections. Pure and unit-testable (no ratatui types).
-pub(crate) fn help_lines(locale: Locale) -> Vec<String> {
+fn help_lines(locale: Locale) -> Vec<String> {
     const SECTIONS: &[(&str, &[&str])] = &[
         (
             "help.section.global",
@@ -838,9 +840,11 @@ fn draw_full_screen(frame: &mut Frame, area: Rect, view: FullScreenView) {
     frame.render_widget(paragraph, pane);
 }
 
-/// Render a centered, bordered popup titled `title`, clearing what is underneath. `footer` is
-/// pinned to the bottom so it stays visible, and `focus` names a `body` row that must remain on
-/// screen — the body scrolls to keep it visible when the list is taller than the terminal.
+/// Render a centered, bordered popup, clearing what is underneath. The footer is pinned to the
+/// bottom so it stays visible, and `view.focus` names a body row that must remain on screen — the
+/// body scrolls to keep it visible when the list is taller than the terminal.
+///
+/// The one place a popup's geometry is decided, reached from the one call site in [`draw_modal`].
 fn draw_popup(frame: &mut Frame, area: Rect, view: PopupView) {
     let PopupView {
         title,
@@ -902,7 +906,7 @@ fn draw_popup(frame: &mut Frame, area: Rect, view: PopupView) {
 
 /// Center a rectangle of `percent_x` by `percent_y` within `area` (a standard ratatui modal
 /// helper).
-pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
