@@ -223,9 +223,12 @@ from `app.rs`'s test module into it, unchanged apart from their `use super::…`
 `models_apply_target_reads_the_highlighted_or_typed_id`, `connect_step_debug_redacts_the_key`,
 `help_lines_resolve_without_raw_key_fallback`, `help_lines_localize`.
 
-Move the helpers they use with them — `key(code)`, `row(id, connected)`, `model_list_step`,
-`models_list_step`, `models_manual_step` — and delete from `app.rs`'s test module any of those
-helpers that no longer has a caller there. `modal.rs`'s test module needs:
+The helpers those tests use — `key(code)`, `row(id, connected)`, `model_list_step`,
+`models_list_step`, `models_manual_step` — are **copied** into `modal.rs`'s test module, not moved:
+`app.rs`'s remaining tests (`handle_connect_models_*`, `handle_models_fetched_*`, the render tests)
+still call them. Copy them verbatim; a ten-line test constructor duplicated across two test modules
+is better than making it `pub(crate)` and leaking a test helper into the production namespace.
+`modal.rs`'s test module needs:
 
 ```rust
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -254,9 +257,10 @@ Run: `git diff --stat`
 Expected: `crates/tui/src/app.rs` shows a large deletion, `crates/tui/src/modal.rs` a matching
 addition, `crates/tui/src/main.rs` one line. Then:
 
-Run: `git diff -- crates/tui/src/app.rs | grep '^+' | grep -v '^+++' | grep -vE 'use crate::modal|pub\(crate\) fn (mask|takes_key)'`
-Expected: **no output**. This task adds nothing to `app.rs` except the import and the two
-`pub(crate)` markers; anything else is a stray edit and must be reverted.
+Run: `git diff -- crates/tui/src/app.rs | grep '^+' | grep -v '^+++'`
+Expected: the **only** added lines are (a) the `use crate::modal::{…}` import block and (b) the two
+`pub(crate) fn mask` / `pub(crate) fn takes_key` signature lines. Read the list; anything else is a
+stray edit made during the move and must be reverted. This task must not change one line of logic.
 
 - [ ] **Step 7: Format and commit**
 
@@ -727,7 +731,8 @@ if self.connect.is_some() { return self.handle_connect_key(key); }
 if self.models.is_some() { return self.handle_models_key(key); }
 ```
 
-with a single check moved to the **top** of the function, above the Ctrl-P arm:
+with a single check placed **immediately after** the existing `if self.mode == Mode::Help { … }`
+line and **before** the Ctrl-P arm:
 
 ```rust
 if self.modal.is_open() {
@@ -736,7 +741,12 @@ if self.modal.is_open() {
 ```
 
 and drop `&& self.connect.is_none() && self.models.is_none()` from the Ctrl-P guard (dead by
-construction now). Leave the `self.mode == Mode::Help` check where it is — Task 3 removes it.
+construction now). Leave the `self.mode == Mode::Help` check where it is — Task 3 removes it and
+promotes the modal check to the first statement in the function.
+
+`run_command`'s `/connect` and `/models` branches are **untouched**: both still require
+`self.mode == Mode::Connected` and still emit `status.connect_not_connected` /
+`status.models_not_connected` otherwise.
 
 h. **Fetch result.** Delete `handle_connect_models`; rewrite `handle_models_fetched` as the merged
    handler, keeping each modal's fill **exactly** as it is today (connect shows the error inline in
@@ -849,9 +859,10 @@ fn opening_a_second_modal_invalidates_the_first_modals_fetch() {
 - [ ] **Step 7: Run the full crate**
 
 Run: `cargo test -p light-factory-tui`
-Expected: PASS. Test count is **88** in the `light-factory` bin target (86 + the two new `App`
-tests) plus the seven new `modal.rs` tests from Step 1 = **95**. If any count is *lower* than 86 + 9,
-a test was lost — find it and restore it before continuing.
+Expected: PASS. `app.rs` and `modal.rs` compile into the same `light-factory` bin target, so this
+is a single number: **95** (86 before this branch + 7 new `modal.rs` tests from Step 1 + 2 new `App`
+tests from Step 6). Anything below 95 means a test was lost in the migration — find it and restore
+it before continuing.
 
 Run: `cargo clippy -p light-factory-tui --all-targets -- -D warnings`
 Expected: clean.
@@ -1006,26 +1017,56 @@ f. In `draw`'s footer hint, replace `} else if self.mode == Mode::Help {` with
 `help_modal_opens_and_restores_the_prior_mode`, `help_modal_returns_to_the_mode_it_was_opened_from`
 and `esc_and_ctrl_p_close_help_but_ctrl_c_quits` currently assert on `app.mode == Mode::Help`.
 Rewrite them to assert on the modal while **keeping every `app.mode` assertion they already make** —
-those are the regression net for the `help_return` deletion (spec §4.5) and must not be dropped:
+those are the regression net for the `help_return` deletion (spec §4.5) and must not be dropped.
+They are sync `#[test]`s today and stay sync; `handle_help_key` is replaced by `handle_modal_key`,
+which is also sync. Exact rewrites:
 
 ```rust
-#[tokio::test]
-async fn help_modal_opens_and_restores_the_prior_mode() {
+#[test]
+fn help_modal_opens_and_restores_the_prior_mode() {
     let mut app = test_app();
-    app.mode = Mode::Connected;
-    app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)).await;
+    assert!(matches!(app.mode, Mode::SignIn));
+    app.open_help();
     assert!(matches!(app.modal.current(), Some(Modal::Help)));
     // The base mode is never disturbed, so there is nothing to restore.
-    assert_eq!(app.mode, Mode::Connected);
-    app.handle_key(key(KeyCode::Esc)).await;
+    assert!(matches!(app.mode, Mode::SignIn));
+    app.modal.close();
     assert!(app.modal.current().is_none());
-    assert_eq!(app.mode, Mode::Connected);
+    assert!(matches!(app.mode, Mode::SignIn));
+}
+
+#[test]
+fn help_modal_returns_to_the_mode_it_was_opened_from() {
+    let mut app = test_app();
+    app.mode = Mode::Connected;
+    app.open_help();
+    assert!(matches!(app.modal.current(), Some(Modal::Help)));
+    assert!(matches!(app.mode, Mode::Connected));
+    app.modal.close();
+    assert!(matches!(app.mode, Mode::Connected));
+}
+
+#[test]
+fn esc_and_ctrl_p_close_help_but_ctrl_c_quits() {
+    let mut app = test_app();
+
+    app.open_help();
+    assert!(!app.handle_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())));
+    assert!(app.modal.current().is_none());
+    assert!(matches!(app.mode, Mode::SignIn));
+
+    app.open_help();
+    assert!(!app.handle_modal_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+    assert!(app.modal.current().is_none());
+    assert!(matches!(app.mode, Mode::SignIn));
+
+    app.open_help();
+    assert!(app.handle_modal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
 }
 ```
 
-Apply the same shape to the other two (the third must keep asserting that Ctrl-C returns `true` and
-that Ctrl-P closes). If any of the three is currently a sync `#[test]`, keep it sync and drive it
-through the same entry point it uses today.
+Note what carries over: `handle_help_key` returned `true` on Ctrl-C, and `handle_modal_key`'s
+Ctrl-C check (added in Task 2) is what preserves that — the third test is its regression net.
 
 - [ ] **Step 6: Run**
 
@@ -1122,6 +1163,9 @@ footer-selection `match` and the `focus` `match` move across verbatim.
 `self.provider_info.offline` → `ctx.offline` and
 `crate::provider::offline_notice(self.config.lang, reason)` →
 `crate::provider::offline_notice(ctx.locale, reason)`.
+
+`connect_view`'s `KeyEntry` arm calls `mask(input)`, so add `use crate::app::mask;` to `modal.rs`'s
+imports (Task 1 already made it `pub(crate)`).
 
 The footer styling that both functions applied at the call site
 (`Line::from(Span::styled(footer, Style::default().fg(Color::DarkGray)))`) moves into `draw_popup`,
@@ -1223,8 +1267,9 @@ git commit -m "tui: render every modal through one draw seam"
 - [ ] **Step 1: Measure**
 
 ```bash
+BASE=$(git merge-base origin/master HEAD)
 wc -l crates/tui/src/app.rs crates/tui/src/modal.rs
-git show HEAD~4:crates/tui/src/app.rs | wc -l
+git show "$BASE:crates/tui/src/app.rs" | wc -l
 ```
 
 Expected: `app.rs` sheds at least 800 lines from its 3736-line starting point; `modal.rs` holds the
@@ -1252,14 +1297,21 @@ Expected: the `light-factory` bin target reports **at least 95** tests (86 befor
 Tasks 2–3), 0 failed. A number below 86 means a test was lost — restore it.
 
 ```bash
-git show HEAD~4:crates/tui/src/app.rs | awk 'NR>2725 && /^    (async )?fn /' | sed 's/[({].*//;s/^    //' | sort > /tmp/before.txt
-awk '/^#\[cfg\(test\)\]/,0' crates/tui/src/app.rs crates/tui/src/modal.rs | grep -E '^    (async )?fn ' | sed 's/[({].*//;s/^    //' | sort > /tmp/after.txt
+BASE=$(git merge-base origin/master HEAD)
+git show "$BASE:crates/tui/src/app.rs" \
+  | grep -B1 -E '^    (async )?fn ' | grep -A1 -E '^    #\[(tokio::)?test\]' \
+  | grep -oE '^    (async )?fn [a-z0-9_]+' | sed 's/.*fn //' | sort -u > /tmp/before.txt
+cat crates/tui/src/app.rs crates/tui/src/modal.rs \
+  | grep -B1 -E '^    (async )?fn ' | grep -A1 -E '^    #\[(tokio::)?test\]' \
+  | grep -oE '^    (async )?fn [a-z0-9_]+' | sed 's/.*fn //' | sort -u > /tmp/after.txt
+wc -l /tmp/before.txt /tmp/after.txt
 comm -23 /tmp/before.txt /tmp/after.txt
 ```
 
-Expected: any name printed is a test that no longer exists under that name. For each one, confirm it
-was **renamed**, not deleted, and record the rename in the PR body. A genuine deletion is a plan
-failure.
+Expected: `/tmp/before.txt` has **63** names. Any name printed by `comm` is a test that no longer
+exists under that name. For each one, confirm it was **renamed**, not deleted, and record the rename
+in the PR body. A genuine deletion is a plan failure. (If the shell pipeline misbehaves on your
+platform, do the comparison by eye — the requirement is the audit, not the exact command.)
 
 - [ ] **Step 3: Full workspace gate**
 
