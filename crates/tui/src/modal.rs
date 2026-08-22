@@ -208,10 +208,21 @@ fn help_step_next(key: KeyEvent) -> ModalTransition {
 
 /// Owns the open modal together with the counter that invalidates its in-flight fetch.
 ///
-/// The nonce outlives the modal on purpose: closing bumps it so a fetch already in flight is
-/// discarded when it lands. Keeping it here — rather than as a second `App` field beside an
-/// `Option<Modal>` — is what makes "closing invalidates the fetch" impossible to forget at a call
-/// site.
+/// The nonce outlives the modal on purpose: every mutation that walks away from an awaited model
+/// list bumps it, so a fetch already in flight is discarded when it lands. Keeping it here — rather
+/// than as a second `App` field beside an `Option<Modal>` — is what makes "abandoning a fetch
+/// invalidates it" impossible to forget at a call site.
+///
+/// **The nonce is monotonic, and must stay so.** One counter serves every modal that has ever been
+/// open, which is sound only because no value is ever reused. Resetting it to `0` on close — the
+/// obvious-looking tidy-up — would let a later modal's fetch collide with an earlier one's nonce
+/// and accept its result.
+///
+/// **One invalidation seam.** [`Self::invalidate_fetch`] is the only place the nonce moves, and
+/// every mutator that abandons an in-flight fetch routes through it: [`Self::open`],
+/// [`Self::close`], [`Self::replace_step`] when the awaited target changes, and
+/// [`Self::next_fetch_nonce`]. Anything else that must happen when a fetch is abandoned — aborting
+/// its `JoinHandle`, say — belongs in that one method, never at the four call sites.
 #[derive(Default)]
 pub(crate) struct ModalHost {
     open: Option<Modal>,
@@ -219,21 +230,44 @@ pub(crate) struct ModalHost {
 }
 
 impl ModalHost {
+    /// Abandon whatever fetch this host is awaiting: bump the nonce so a result already in flight
+    /// is discarded when it lands. The one seam — see the type docs.
+    fn invalidate_fetch(&mut self) {
+        self.nonce += 1;
+    }
+
     /// Open `modal`, replacing whatever was open and invalidating its in-flight fetch.
     pub(crate) fn open(&mut self, modal: Modal) {
-        self.nonce += 1;
+        self.invalidate_fetch();
         self.open = Some(modal);
     }
 
     /// Close whatever is open and invalidate its in-flight fetch.
+    ///
+    /// Unconditional on purpose. A fetch outlives the modal that started it — `Apply` closes a
+    /// connect list whose request may still be in flight — so "nothing is open" is not evidence
+    /// that nothing needs invalidating. Bumping with nothing open costs one increment and keeps
+    /// this a plain fetch-generation counter rather than a modal-state-conditional one.
     pub(crate) fn close(&mut self) {
-        if self.open.take().is_some() {
-            self.nonce += 1;
-        }
+        self.open = None;
+        self.invalidate_fetch();
     }
 
-    /// Swap the open modal's state without invalidating the fetch it is awaiting.
+    /// Swap the open modal's state, invalidating the fetch it was awaiting only if the new state is
+    /// no longer waiting on the same thing.
+    ///
+    /// A step that keeps the same [`Modal::fetch_target`] — moving the cursor inside a list that is
+    /// still loading — must keep its result, which is why this is not an unconditional bump. A step
+    /// that walks away from one — Esc out of a fetching list, back to the provider list — must not,
+    /// which is why it is not an unconditional skip either. Without the bump the abandoned result
+    /// is stopped only by the receiver-side shape guard, a second copy of the rule maintained
+    /// somewhere else.
     pub(crate) fn replace_step(&mut self, modal: Modal) {
+        let target_changed =
+            self.open.as_ref().and_then(|m| m.fetch_target()) != modal.fetch_target();
+        if target_changed {
+            self.invalidate_fetch();
+        }
         self.open = Some(modal);
     }
 
@@ -257,9 +291,10 @@ impl ModalHost {
         self.open.as_ref().is_some_and(Modal::covers_base)
     }
 
-    /// Claim a nonce for a newly-spawned fetch, invalidating any earlier one.
+    /// Claim a nonce for a newly-spawned fetch, invalidating any earlier one. The returned value is
+    /// what that fetch's result must carry back to be accepted.
     pub(crate) fn next_fetch_nonce(&mut self) -> u64 {
-        self.nonce += 1;
+        self.invalidate_fetch();
         self.nonce
     }
 }
@@ -1351,12 +1386,96 @@ mod tests {
         let mut host = ModalHost::default();
         host.open(Modal::Models(models_list_step(vec![], true)));
         let before = host.nonce();
-        host.replace_step(Modal::Models(models_list_step(vec!["a".into()], false)));
+        // Same provider, still fetching: the cursor moved, the request did not change.
+        host.replace_step(Modal::Models(ModelsStep::ModelList {
+            provider: "openai".to_string(),
+            models: vec![],
+            selected: 3,
+            fetching: true,
+        }));
         assert_eq!(
             host.nonce(),
             before,
             "stepping must not discard the result being awaited"
         );
+    }
+
+    /// The counterpart of the above, and the reason `replace_step` is not an unconditional skip:
+    /// Esc out of a loading list abandons the request, so its result must not be accepted if it
+    /// lands afterwards.
+    #[test]
+    fn a_step_that_walks_away_from_a_fetch_invalidates_it() {
+        let mut host = ModalHost::default();
+        host.open(Modal::Connect(ConnectStep::ModelList {
+            rows: vec![row("openai", true)],
+            provider: "openai".to_string(),
+            models: vec![],
+            selected: 0,
+            fetching: true,
+            error: None,
+            from_key: false,
+        }));
+        let awaiting = host.nonce();
+        host.replace_step(Modal::Connect(ConnectStep::ProviderList {
+            rows: vec![row("openai", true)],
+            selected: 0,
+        }));
+        assert!(
+            host.nonce() > awaiting,
+            "stepping back out of a fetching list must discard its result"
+        );
+
+        // So does switching which provider is being awaited.
+        let switched = host.nonce();
+        host.replace_step(Modal::Connect(ConnectStep::ModelList {
+            rows: vec![row("openai", true)],
+            provider: "gemini".to_string(),
+            models: vec![],
+            selected: 0,
+            fetching: true,
+            error: None,
+            from_key: false,
+        }));
+        assert!(
+            host.nonce() > switched,
+            "a fetch for another provider must not fill this list"
+        );
+    }
+
+    /// `close` bumps even with nothing open: a fetch outlives the modal that started it (`Apply`
+    /// closes the list first), so modal state is not evidence about fetch state.
+    #[test]
+    fn closing_invalidates_a_fetch_that_outlived_its_modal() {
+        let mut host = ModalHost::default();
+        host.open(Modal::Models(models_list_step(vec![], true)));
+        let in_flight = host.next_fetch_nonce();
+        host.close();
+        let after_apply = host.nonce();
+        assert!(after_apply > in_flight);
+        host.close();
+        assert!(
+            host.nonce() > after_apply,
+            "closing with nothing open must still invalidate"
+        );
+    }
+
+    /// Merging the two per-modal counters into one is sound only because no value is ever reused.
+    #[test]
+    fn the_fetch_nonce_never_repeats_a_value() {
+        let mut host = ModalHost::default();
+        let mut seen = vec![host.nonce()];
+        host.open(Modal::Help);
+        seen.push(host.nonce());
+        seen.push(host.next_fetch_nonce());
+        host.replace_step(Modal::Models(models_list_step(vec![], true)));
+        seen.push(host.nonce());
+        seen.push(host.next_fetch_nonce());
+        host.close();
+        seen.push(host.nonce());
+        let mut sorted = seen.clone();
+        sorted.dedup();
+        assert_eq!(sorted, seen, "a repeated nonce would alias two fetches");
+        assert!(seen.windows(2).all(|w| w[0] <= w[1]), "must be monotonic");
     }
 
     #[test]
