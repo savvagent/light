@@ -23,7 +23,7 @@ process, so it would trade an env dependency for a data race.
 file (`crates/tui/src/selection.rs`), no new public interface (both new fns are private), no
 behavior change, no auth-spine / dependency-flow / deploy-shape impact.
 
-**Source:** GitHub issue savvagent/light#45.
+**Source:** GitHub issue savvagent/light-factory#45.
 
 ## Global Constraints
 
@@ -76,6 +76,20 @@ written to fail-for-the-right-reason until the seam exists.
       `OPENAI_API_KEY=sk-test cargo test -p light-factory-tui` — expect both green.
 - [x] Run `cargo clippy --workspace --all-targets -- -D warnings` — expect clean.
 - [x] Run `cargo fmt --all` and commit as `tui: make the resolve_key test independent of the ambient env`.
+
+## Deviations from the plan as written
+
+- **A single named `process_env` reader instead of an inline `std::env::var` closure.** The
+  architecture section above says `sources` / `resolve_key` "delegate to them with
+  `std::env::var`", which would have meant two inline closures. Implementation introduced one
+  private `fn process_env(var: &str) -> Option<String>` and passed it at both call sites, so the
+  module has exactly one place that touches the real environment. The task list was updated to
+  match; this note records that the refinement was made during implementation, not planned.
+- **`key_status_with` and its wiring test, added in review.** The plan built the `_with` seam for
+  `resolve_key` only, leaving `key_status` — the other consumer of `sources_with` — untested at
+  the wiring level, where a transposed `classify(keyring_key, env_key)` compiles and passes.
+  Review folded in `key_status_with`, with `key_status` delegating through `process_env`, plus a
+  test covering all four outcomes. `sources` was dropped: `key_status` was its only caller.
 
 ## Out-of-band verification
 
