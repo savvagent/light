@@ -145,6 +145,8 @@ connection open after the user pressed Esc.
 
 ### 6.1 `ListBounds` (`crates/providers/src/models.rs`)
 
+Requires one new import in `models.rs`: `use std::time::Duration;`.
+
 ```rust
 /// The bounds a model-list fetch runs under. Threaded through the `*_at` seams so tests can pin
 /// tight values without exposing a runtime knob.
@@ -174,9 +176,10 @@ unchanged (§7).
 
 ### 6.2 The deadline
 
-Each of the five requests (`list_anthropic`, `list_openai_compatible` ×2 paths, `list_gemini`,
-`list_ollama_models_at`) gains `.timeout(bounds.timeout)` on its `RequestBuilder`, between the
-headers and `.send()`. Nothing else acquires a deadline: `build_http_client` is untouched, so the
+Each of the four request-building sites — `list_anthropic`, `list_openai_compatible` (which serves
+both the `openai` and `deepseek` paths), `list_gemini`, and `list_ollama_models_at` — gains
+`.timeout(bounds.timeout)` on its `RequestBuilder`, between the headers and `.send()`, covering all
+five provider paths. Nothing else acquires a deadline: `build_http_client` is untouched, so the
 completion providers keep exactly the client they have today.
 
 Pinned by tests in `base_url.rs`: a client from `build_http_client` renders no timeout in its
@@ -210,6 +213,10 @@ async fn read_capped(mut resp: reqwest::Response, max_bytes: usize) -> anyhow::R
     Ok(buf)
 }
 ```
+
+Peak buffering is `max_bytes` plus the frame that tripped the check, and that frame's size is
+chosen by the HTTP layer (hyper's read buffer for h1, the negotiated max frame size for h2) — not by
+the sender — so the bound is genuinely closed, not merely one-frame-open.
 
 `Response::chunk()` is available without reqwest's `stream` feature
 (`reqwest-0.13.4/src/async_impl/response.rs:310`; `bytes_stream` at :351 is the gated one), so no
@@ -277,7 +284,11 @@ Wiring (five sites, each one line):
 | `begin_models_fetch` | `self.abort_models_fetch();` before spawning; store the new handle |
 | `close_connect` | `self.abort_connect_fetch();` |
 | `close_models` | `self.abort_models_fetch();` |
-| `dismiss_modals` | `self.abort_connect_fetch();` / `self.abort_models_fetch();` inside the existing `if` arms |
+| `dismiss_modals` | `self.abort_connect_fetch();` **and** `self.abort_models_fetch();` unconditionally, outside the existing `if self.connect.is_some()` / `if self.models.is_some()` arms |
+
+Cancellation is deliberately tied to *task* state, not to *modal* state: `abort()` on a taken-`None`
+handle is a no-op, so aborting unconditionally in `dismiss_modals` costs nothing and removes the
+possibility of a handle stranded by a state combination the abort was gated on.
 
 `apply_and_close_connect` and `apply_and_close_models` already delegate to `close_connect` /
 `close_models`, so they are covered without edits. Nothing else in `app.rs` is touched.
@@ -297,8 +308,10 @@ No public interface changes, so **no `Cargo.toml` version bump** (Non-Negotiable
 
 `crates/providers/Cargo.toml` gains no dependency and no feature: `Response::chunk` and
 `RequestBuilder::timeout` are both in the crate's existing `default-features = false, features =
-["rustls", "json"]` build. `serde_json` is already a dependency; `anyhow::Context` is already in use
-elsewhere in the crate.
+["rustls", "json"]` build, and `anyhow` + `serde_json` are already `[dependencies]`. Note the crate
+does not currently import `anyhow::Context` anywhere — every provider uses a bare `?` on
+`reqwest::Error` — so `use anyhow::Context;` is a new import of an existing dependency, not a new
+dependency.
 
 Behavioral compatibility of the unchanged public functions: a caller that previously received a
 >1000-entry list now receives 1000, and a caller that previously hung now receives an error. Both are
@@ -337,9 +350,12 @@ All tests offline and deterministic; the provider tests use the crate's existing
 2. `a_body_at_the_cap_is_still_accepted` — the boundary is not off by one.
 3. `an_over_long_model_list_is_truncated` — 20 ids with `max_models: 5` returns exactly the first 5
    in sorted order (proving the cap is applied after sorting, not to arrival order).
-4. `a_stalled_endpoint_fails_at_the_deadline` — wiremock delays past a `timeout` of ~150 ms; the call
-   returns an `Err` promptly and the error is a timeout. This is the behavioral proof that the
-   deadline is applied to the model-list path.
+4. `a_stalled_endpoint_fails_at_the_deadline` — wiremock delays well past a `timeout` of ~150 ms and
+   the call returns an `Err`. The error is identified **structurally**, not by its message:
+   `err.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_timeout)` (the `?` on
+   `send()` preserves the `reqwest::Error` as the anyhow source). No assertion is made on elapsed
+   wall-clock time, which would be flaky under load. This is the behavioral proof that the deadline
+   is applied to the model-list path.
 5. `default_bounds_are_the_production_values` — pins `ListBounds::DEFAULT` (15 s / 2 MiB / 1000), so
    a later accidental widening is a failing test rather than a silent regression.
 6. Existing model-list tests updated for the new `*_at` signature and kept green (they double as the
@@ -366,9 +382,12 @@ All tests offline and deterministic; the provider tests use the crate's existing
    constant is a one-line change; making it configurable is deliberately deferred (Assumption 4).
 3. **Truncation is silent.** A user on a hypothetical >1000-model endpoint would not know the list
    was cut. Follow-up rather than scope creep (Assumption 5).
-4. **Other network paths remain unbounded** — the completion providers (intentionally), the auth
-   `Api` client, and the WebSocket. Out of scope here (§5); worth a separate issue for the auth
-   client, whose requests are short by nature and have no legitimate reason to hang.
+4. **The same unbounded-client pattern exists in `crates/tui/src/api.rs:33`** (`reqwest::Client::new()`
+   — no timeout on the auth/sign-in HTTP path, whose requests are short by nature and have no
+   legitimate reason to hang). That is a different crate and a different trust boundary, so widening
+   this change to cover it would be scope creep. Per the workflow's "same bug pattern found
+   elsewhere" rule it gets a **filed follow-up issue** at close-out, not a fix here. The completion
+   providers and the WebSocket stay unbounded intentionally.
 5. **`app.rs` conflict risk with #46/#47.** Minimized by touching only field declarations,
    initializers, and five one-line call sites, and by adding no logic to
    `handle_connect_models`/`handle_models_fetched`. Merge order is #45 → #44 → #47 → #46.
